@@ -11,7 +11,7 @@ export default async function Portal(){
  if(!member)redirect("/onboarding");
  const [{data:org},{data:sub},{data:devices},{data:features},{data:site}]=await Promise.all([
   supabase.from("organizations").select("id,name,plan_code,status").eq("id",member.organization_id).single(),
-  supabase.from("subscriptions").select("plan_code,status,current_period_end").eq("organization_id",member.organization_id).maybeSingle(),
+  supabase.from("subscriptions").select("plan_code,status,current_period_end,cancel_at_period_end,canceled_at,cancellation_effective_at").eq("organization_id",member.organization_id).maybeSingle(),
   supabase.from("edge_devices").select("id,device_name,status,last_seen_at,app_version").eq("organization_id",member.organization_id),
   supabase.from("feature_entitlements").select("feature_key,enabled,source").eq("organization_id",member.organization_id),
   supabase.from("sites").select("id,name").eq("organization_id",member.organization_id).limit(1).maybeSingle()
@@ -19,7 +19,7 @@ export default async function Portal(){
  return <main className="shell"><div className="brand">AI SECURITY COMMAND CENTER</div><h1>Customer Portal</h1>
  <p className="muted">{user.email} · {org?.name}</p>
  <section className="grid">
-  <article className="card"><h2>Plan</h2><strong>{sub?.plan_code??org?.plan_code}</strong><p className="muted">Status: {sub?.status??org?.status}</p></article>
+  <article className="card"><h2>Plan</h2><strong>{sub?.plan_code??org?.plan_code}</strong><p className="muted">Status: {sub?.cancel_at_period_end?"Cancellation scheduled":sub?.status??org?.status}</p>{sub?.cancel_at_period_end&&<p className="muted"><strong>{(sub.plan_code??org?.plan_code??"").toUpperCase()}</strong> plan will cancel on {new Date(sub.cancellation_effective_at??sub.current_period_end).toLocaleDateString()}.</p>}</article>
   <article className="card"><h2>Devices</h2><strong>{devices?.length??0}</strong><p className="muted">{devices?.filter(d=>d.status==="online").length??0} reporting online</p></article>
   <article className="card"><h2>Overrides</h2><strong>{features?.length??0}</strong><p className="muted">Managed feature settings</p></article>
  </section>
