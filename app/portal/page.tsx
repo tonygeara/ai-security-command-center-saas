@@ -23,7 +23,7 @@ export default async function Portal(){
   <article className="card"><h2>Devices</h2><strong>{devices?.length??0}</strong><p className="muted">{devices?.filter(d=>d.status==="online").length??0} reporting online</p></article>
   <article className="card"><h2>Overrides</h2><strong>{features?.length??0}</strong><p className="muted">Managed feature settings</p></article>
  </section>
- <h2>Plans</h2><UpgradePlans/><h2>Device pairing</h2><article className="card"><PairDevice orgId={member.organization_id} siteId={site?.id}/></article><h2>Your devices</h2>
+ <h2>Plans</h2><UpgradePlans currentPlan={sub?.plan_code??org?.plan_code??"trial"}/><h2>Device pairing</h2><article className="card"><PairDevice orgId={member.organization_id} siteId={site?.id}/></article><h2>Your devices</h2>
  <section className="grid">{(devices??[]).map(d=><article className="card" key={d.id}><h2>{d.device_name}</h2><p>Status: <span className={d.status==="online"?"ok":"muted"}>{d.status}</span></p><p className="muted">Version: {d.app_version??"unknown"}</p><p className="muted">Last heartbeat: {d.last_seen_at?new Date(d.last_seen_at).toLocaleString():"Never"}</p></article>)}</section>
  </main>
 }
