@@ -1,0 +1,1 @@
+export default function Unauthorized(){return <main className="shell"><div className="card"><h1>Access denied</h1><p className="muted">Your account does not have Super Admin access.</p></div></main>}
