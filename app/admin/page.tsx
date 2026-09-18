@@ -1,5 +1,6 @@
 import {redirect} from "next/navigation";
 import {createClient} from "../../lib/supabase/server";
+import FeatureToggle from "./FeatureToggle";
 
 export default async function Admin(){
  const supabase=await createClient();
@@ -25,6 +26,6 @@ export default async function Admin(){
    <article className="card"><h2>Overrides</h2><strong>{overrides.length}</strong><p className="muted">Feature entitlements</p></article>
   </section>
   <h2>Customers</h2>
-  <section className="grid">{(orgs??[]).map(o=>{const sd=subscriptions.find(s=>s.organization_id===o.id);const ds=edgeDevices.filter(d=>d.organization_id===o.id);const drone=overrides.find(e=>e.organization_id===o.id&&e.feature_key==="drone_ai");return <article className="card" key={o.id}><h2>{o.name}</h2><p className="muted">{o.slug}</p><p>Plan: <b>{sd?.plan_code??o.plan_code}</b></p><p>Status: <span className="ok">{sd?.status??o.status}</span></p><p>Devices: {ds.length}</p><p>Drone AI override: <b className={drone?.enabled?"ok":"locked"}>{drone?drone.enabled?"ON":"OFF":"PLAN DEFAULT"}</b></p></article>})}</section>
+  <section className="grid">{(orgs??[]).map(o=>{const sd=subscriptions.find(s=>s.organization_id===o.id);const ds=edgeDevices.filter(d=>d.organization_id===o.id);const drone=overrides.find(e=>e.organization_id===o.id&&e.feature_key==="drone_ai");return <article className="card" key={o.id}><h2>{o.name}</h2><p className="muted">{o.slug}</p><p>Plan: <b>{sd?.plan_code??o.plan_code}</b></p><p>Status: <span className="ok">{sd?.status??o.status}</span></p><p>Devices: {ds.length}</p><p>Drone AI: <FeatureToggle orgId={o.id} feature="drone_ai" initial={drone?.enabled??false}/></p></article>})}</section>
  </main>
 }
