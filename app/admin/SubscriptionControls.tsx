@@ -1,0 +1,11 @@
+"use client";
+import {useState} from "react";
+import {useRouter} from "next/navigation";
+import {createClient} from "../../lib/supabase/client";
+export default function SubscriptionControls({orgId,initialPlan,initialStatus,paid}:{orgId:string;initialPlan:string;initialStatus:string;paid:boolean}){
+ const router=useRouter();const [plan,setPlan]=useState(initialPlan),[status,setStatus]=useState(initialStatus),[busy,setBusy]=useState(false),[message,setMessage]=useState("");
+ async function save(){setBusy(true);setMessage("");try{const {error}=await createClient().rpc("admin_manage_account",{target_org:orgId,target_status:status,target_plan:paid?null:plan});if(error)throw error;setMessage("Account updated.");router.refresh();}catch(e){setMessage(e instanceof Error?e.message:"Update failed");}finally{setBusy(false);}}
+ async function billing(){setBusy(true);setMessage("");try{const {data,error}=await createClient().functions.invoke("admin-billing-portal",{body:{organization_id:orgId}});if(error||!data?.url)throw new Error(error?.message||data?.error||"Billing unavailable");const url=new URL(data.url);if(url.protocol!=="https:"||url.hostname!=="billing.stripe.com")throw new Error("Invalid billing destination");location.assign(url.href);}catch(e){setMessage(e instanceof Error?e.message:"Billing unavailable");setBusy(false);}}
+ return <div className="subscriptionControls"><h3>Subscription & account access</h3><label>Account status<select value={status} disabled={busy} onChange={e=>setStatus(e.target.value)}>{["active","trial","suspended","cancelled"].map(s=><option key={s}>{s}</option>)}</select></label>{!paid&&<label>Manual plan<select value={plan} disabled={busy} onChange={e=>setPlan(e.target.value)}>{["trial","home","pro","business","enterprise"].map(p=><option key={p}>{p}</option>)}</select></label>}<button className="ghost" disabled={busy} onClick={save}>Save account access</button>{paid&&<><p className="muted">Account access changes do not cancel charges. Manage paid plans, cancellation, payment methods and invoices through Stripe.</p><button className="btn" disabled={busy} onClick={billing}>Manage Stripe subscription</button></>}<p role="status">{message}</p></div>;
+}
+
