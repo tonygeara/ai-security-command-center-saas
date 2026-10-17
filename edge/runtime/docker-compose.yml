@@ -1,0 +1,46 @@
+# AI Security Command Center - local AI runtime (the only Docker setup).
+# Started and stopped by the launcher. Data lives in AI_SECURITY_DATA
+# (default %LOCALAPPDATA%\AI-Security-System), never next to the program.
+#
+# Images are pinned to the versions verified on the reference PC so a
+# re-pull can never silently upgrade Frigate.
+name: ai-security
+
+services:
+  mqtt:
+    image: eclipse-mosquitto:2@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797  # 2.1.2
+    container_name: frigate-mqtt
+    restart: unless-stopped
+    command: mosquitto -c /mosquitto-no-auth.conf
+    ports:
+      - "127.0.0.1:1883:1883"   # local only: no one on the LAN can switch cameras off
+
+  mediamtx:
+    image: bluenviron/mediamtx:1@sha256:1b029d11049be75630e9b73bb0d5f47b08a7db4eaee89a80bf8f53bc40e56414  # v1.20.1
+    container_name: drone-mediamtx
+    restart: unless-stopped
+    environment:
+      MTX_RTSPTRANSPORTS: tcp
+    ports:
+      - "1935:1935"             # LAN: the drone app pushes RTMP here
+      - "127.0.0.1:8556:8554"   # local: dashboard + Frigate read the drone RTSP
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable@sha256:d4351369984d4a9e2a49ac59736f6490856a7ea11f7790040746d21496967010  # 0.17.2
+    container_name: frigate
+    restart: unless-stopped
+    privileged: true
+    shm_size: "512mb"
+    depends_on:
+      - mqtt
+      - mediamtx
+    ports:
+      - "127.0.0.1:8971:8971"
+      - "127.0.0.1:8554:8554"
+      - "127.0.0.1:8555:8555/tcp"
+      - "127.0.0.1:8555:8555/udp"
+    volumes:
+      - "${AI_SECURITY_DATA:?set by the launcher}/frigate/config:/config"
+      - "${AI_SECURITY_DATA:?set by the launcher}/frigate/storage:/media/frigate"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

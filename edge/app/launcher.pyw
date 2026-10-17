@@ -1,22 +1,49 @@
-import os, sys, time, socket, subprocess, threading, queue, webbrowser, shutil, urllib.request
+import os, sys, json, time, socket, subprocess, threading, queue, webbrowser, shutil, urllib.request
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-APP_VERSION = 'V11.0.2 • Startup repair'
+APP_VERSION = 'V11.1.0'
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
-APP_HOME = os.path.dirname(os.path.abspath(__file__))
-FRIGATE_DIR = os.path.join(APP_HOME, 'frigate')
-OVERLAY_DIR = os.path.join(APP_HOME, 'frigate-overlay')
-LOG_DIR = os.path.join(APP_HOME, 'logs')
-os.makedirs(LOG_DIR, exist_ok=True)
-DASHBOARD = os.path.join(OVERLAY_DIR, 'dashboard.py')
-PID_FILE = os.path.join(APP_HOME, 'dashboard.pid')
+FROZEN = getattr(sys, 'frozen', False)
+
+# Program files (read-only when installed) are kept apart from user data, so the
+# installer can replace the program without touching cameras, faces or events.
+APP_HOME = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
+DATA_HOME = os.environ.get('AI_SECURITY_DATA') or os.path.join(
+    os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'AI-Security-System')
+FRIGATE_DIR = os.path.join(DATA_HOME, 'frigate')
+FRIGATE_CONFIG = os.path.join(FRIGATE_DIR, 'config', 'config.yaml')
+OVERLAY_DIR = os.path.join(DATA_HOME, 'frigate-overlay')
+LOG_DIR = os.path.join(DATA_HOME, 'logs')
+PID_FILE = os.path.join(DATA_HOME, 'dashboard.pid')
 DASH_LOG = os.path.join(LOG_DIR, 'dashboard.log')
+LOG_MAX_BYTES = 5 * 1024 * 1024
+DASHBOARD_PORT = 8080
+CONTAINERS = ['frigate', 'drone-mediamtx', 'frigate-mqtt']
+COMPOSE_PROJECT = 'ai-security'
 
 
-def run_hidden(args, timeout=60):
+def _first_existing(*paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return paths[0]
+
+
+# Installed: <app>\runtime. Source checkout: edge\app\..\runtime.
+RUNTIME_DIR = _first_existing(os.path.join(APP_HOME, 'runtime'),
+                              os.path.join(os.path.dirname(APP_HOME), 'runtime'))
+COMPOSE_FILE = os.path.join(RUNTIME_DIR, 'docker-compose.yml')
+FRIGATE_TEMPLATE = os.path.join(RUNTIME_DIR, 'frigate', 'config.example.yaml')
+DASHBOARD_SCRIPT = os.path.join(APP_HOME, 'dashboard.py')
+
+for d in (LOG_DIR, OVERLAY_DIR, os.path.join(FRIGATE_DIR, 'config'), os.path.join(FRIGATE_DIR, 'storage')):
+    os.makedirs(d, exist_ok=True)
+
+
+def run_hidden(args, timeout=60, env=None):
     return subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
+                          text=True, timeout=timeout, creationflags=CREATE_NO_WINDOW, env=env)
 
 
 def port_open(port, host='127.0.0.1', timeout=0.4):
@@ -50,11 +77,43 @@ def docker_container_running(name):
         return False
 
 
+def docker_container_project(name):
+    try:
+        r = run_hidden(['docker','inspect','-f','{{index .Config.Labels "com.docker.compose.project"}}',name], timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ''
+    except Exception:
+        return ''
+
+
+def compose(*args, timeout=600):
+    env = os.environ.copy()
+    env['AI_SECURITY_DATA'] = DATA_HOME.replace('\\', '/')
+    return run_hidden(['docker','compose','-p',COMPOSE_PROJECT,'-f',COMPOSE_FILE,*args], timeout=timeout, env=env)
+
+
 def pythonw_exe():
     exe = sys.executable
     folder = os.path.dirname(exe)
     cand = os.path.join(folder, 'pythonw.exe')
     return cand if os.path.exists(cand) else exe
+
+
+def rotate_log(path, max_bytes=LOG_MAX_BYTES):
+    try:
+        if os.path.getsize(path) > max_bytes:
+            os.replace(path, path + '.1')
+    except OSError:
+        pass
+
+
+def run_dashboard_in_process():
+    """Frozen build: `AI-Security-Command-Center.exe --dashboard` runs the dashboard."""
+    log = open(DASH_LOG, 'a', encoding='utf-8', errors='ignore', buffering=1)
+    sys.stdout = sys.stderr = log  # windowed builds have no console streams
+    os.environ.setdefault('AI_SECURITY_HOME', OVERLAY_DIR)
+    os.chdir(OVERLAY_DIR)
+    import runpy
+    runpy.run_module('dashboard', run_name='__main__')
 
 
 class App(tk.Tk):
@@ -134,22 +193,17 @@ class App(tk.Tk):
                 raise RuntimeError('Docker Desktop could not be started. Open Docker Desktop, wait until it says Engine running, then click Start System.')
             self.emit('status','Docker','Running')
 
-            self.ensure_container('frigate-mqtt', ['docker','run','-d','--name','frigate-mqtt','--restart','unless-stopped','-p','1883:1883','eclipse-mosquitto:2','mosquitto','-c','/mosquitto-no-auth.conf'])
+            if not os.path.isfile(COMPOSE_FILE):
+                raise RuntimeError('Runtime file missing: ' + COMPOSE_FILE + '. Reinstall the application.')
+            self.seed_frigate_config()
+            self.replace_legacy_containers()
+
+            self.emit('msg','Starting MQTT, MediaMTX and Frigate...'); self.emit('log','docker compose up -d (first start downloads images and can take several minutes)')
+            r = compose('up','-d')
+            if r.returncode:
+                raise RuntimeError('Could not start the AI services:\n' + r.stdout.strip()[-800:])
             self.emit('status','MQTT','Running' if docker_container_running('frigate-mqtt') else 'Error')
-
-            self.ensure_container('drone-mediamtx', ['docker','run','-d','--name','drone-mediamtx','--restart','unless-stopped','-e','MTX_RTSPTRANSPORTS=tcp','-p','1935:1935','-p','8556:8554','bluenviron/mediamtx:1'])
             self.emit('status','MediaMTX','Running' if docker_container_running('drone-mediamtx') else 'Error')
-
-            if docker_container_exists('frigate'):
-                self.ensure_container('frigate', None)
-            else:
-                cfg = os.path.abspath(os.path.join(FRIGATE_DIR,'config'))
-                storage = os.path.abspath(os.path.join(FRIGATE_DIR,'storage')); os.makedirs(storage, exist_ok=True)
-                cmd=['docker','run','-d','--name','frigate','--restart','unless-stopped','--privileged','--shm-size=512m',
-                     '-p','8971:8971','-p','8554:8554','-p','8555:8555/tcp','-p','8555:8555/udp','-p','1984:1984',
-                     '-v',cfg+':/config','-v',storage+':/media/frigate','-e','FRIGATE_RTSP_PASSWORD=password',
-                     'ghcr.io/blakeblackshear/frigate:stable']
-                self.ensure_container('frigate', cmd)
 
             self.emit('status','Frigate','Starting...'); self.emit('msg','Waiting for Frigate...')
             for _ in range(90):
@@ -158,22 +212,43 @@ class App(tk.Tk):
             self.emit('status','Frigate','Running' if port_open(8971) else 'Container running')
 
             self.emit('msg',f'Starting dashboard {APP_VERSION}...')
-            if port_open(8080) and not http_ok('http://127.0.0.1:8080/', 2):
-                raise RuntimeError('Port 8080 is already being used by another application. Close it and click Start System again.')
-            if not port_open(8080): self.start_dashboard()
+            url = f'http://127.0.0.1:{DASHBOARD_PORT}/'
+            if port_open(DASHBOARD_PORT) and not http_ok(url, 2):
+                raise RuntimeError(f'Port {DASHBOARD_PORT} is already being used by another application. Close it and click Start System again.')
+            if not port_open(DASHBOARD_PORT): self.start_dashboard()
             for _ in range(40):
-                if http_ok('http://127.0.0.1:8080/', 2): break
+                if http_ok(url, 2): break
                 time.sleep(1)
-            if not http_ok('http://127.0.0.1:8080/', 2):
-                raise RuntimeError('Dashboard did not start on port 8080. Click Diagnostics to open the dashboard log.')
-            self.emit('status','Dashboard','Running • 8080')
+            if not http_ok(url, 2):
+                raise RuntimeError(f'Dashboard did not start on port {DASHBOARD_PORT}. Click Diagnostics to open the dashboard log.')
+            self.emit('status','Dashboard',f'Running • {DASHBOARD_PORT}')
             self.emit('status','Drone stream','RTSP server reachable • 8556' if port_open(8556) else 'Waiting for RTSP server')
-            self.emit('msg','System ready'); self.emit('log','System ready: http://127.0.0.1:8080')
-            webbrowser.open('http://127.0.0.1:8080')
+            self.emit('msg','System ready'); self.emit('log',f'System ready: {url}')
+            webbrowser.open(url)
         except Exception as e:
             self.emit('log','ERROR: '+str(e)); self.emit('error', str(e)); self.emit('msg','Start failed — see Activity / Diagnostics')
         finally:
             self.emit('busy', False)
+
+    def seed_frigate_config(self):
+        """First start on a new PC: give Frigate a starter config."""
+        if os.path.isfile(FRIGATE_CONFIG) or not os.path.isfile(FRIGATE_TEMPLATE):
+            return
+        shutil.copyfile(FRIGATE_TEMPLATE, FRIGATE_CONFIG)
+        settings_file = os.path.join(OVERLAY_DIR, 'local_settings.json')
+        if not os.path.exists(settings_file):
+            with open(settings_file, 'w', encoding='utf-8') as f:
+                json.dump({'camera_name': 'camera'}, f, indent=2)
+        self.emit('log', 'Created starter Frigate config. Use Camera / Drone Setup to add your camera.')
+
+    def replace_legacy_containers(self):
+        """Containers created by older versions (C:\\frigate, V8-V11 scripts) use the same
+        names but other config folders. Remove them so only this runtime is used.
+        Only the containers are removed; config, recordings and events stay on disk."""
+        for name in CONTAINERS:
+            if docker_container_exists(name) and docker_container_project(name) != COMPOSE_PROJECT:
+                self.emit('log', f'Replacing old {name} container with the {APP_VERSION} runtime')
+                run_hidden(['docker','rm','-f',name], timeout=60)
 
     def ensure_docker(self):
         try:
@@ -190,37 +265,30 @@ class App(tk.Tk):
                 except Exception: pass
         return False
 
-    def ensure_container(self, name, create_cmd):
-        self.emit('msg',f'Starting {name}...'); self.emit('log',f'Checking container: {name}')
-        if docker_container_exists(name):
-            if not docker_container_running(name):
-                r=run_hidden(['docker','start',name], timeout=60)
-                if r.returncode: raise RuntimeError(f'Could not start {name}: {r.stdout.strip()}')
-        else:
-            if not create_cmd: raise RuntimeError(f'{name} is missing and no creation command is available.')
-            r=run_hidden(create_cmd, timeout=240)
-            if r.returncode: raise RuntimeError(f'Could not create {name}: {r.stdout.strip()}')
-        self.emit('log',f'{name}: running')
-
     def start_dashboard(self):
-        if not os.path.isfile(DASHBOARD):
-            raise RuntimeError('Dashboard file missing: ' + DASHBOARD)
-        env=os.environ.copy(); env['AI_SECURITY_HOME']=OVERLAY_DIR
+        if FROZEN:
+            cmd = [sys.executable, '--dashboard']
+        else:
+            if not os.path.isfile(DASHBOARD_SCRIPT):
+                raise RuntimeError('Dashboard file missing: ' + DASHBOARD_SCRIPT)
+            cmd = [pythonw_exe(), DASHBOARD_SCRIPT]
+        rotate_log(DASH_LOG)
+        env=os.environ.copy(); env['AI_SECURITY_HOME']=OVERLAY_DIR; env['AI_SECURITY_DATA']=DATA_HOME
         log=open(DASH_LOG,'a',encoding='utf-8',errors='ignore')
-        p=subprocess.Popen([pythonw_exe(), DASHBOARD], cwd=OVERLAY_DIR, env=env,
+        p=subprocess.Popen(cmd, cwd=OVERLAY_DIR, env=env,
                            stdout=log, stderr=subprocess.STDOUT, creationflags=CREATE_NO_WINDOW)
         with open(PID_FILE,'w') as f: f.write(str(p.pid))
         self.emit('log',f'Dashboard process started (PID {p.pid})')
 
     def open_dashboard(self):
-        if port_open(8080): webbrowser.open('http://127.0.0.1:8080')
+        if port_open(DASHBOARD_PORT): webbrowser.open(f'http://127.0.0.1:{DASHBOARD_PORT}')
         else: messagebox.showwarning('Dashboard not running','Click Start System first.',parent=self)
 
     def diagnostics(self):
-        lines=[]
-        for name in ['frigate','drone-mediamtx','frigate-mqtt']:
+        lines=[f'Version: {APP_VERSION}', f'Program: {APP_HOME}', f'Data: {DATA_HOME}']
+        for name in CONTAINERS:
             lines.append(f'{name}: ' + ('running' if docker_container_running(name) else ('stopped' if docker_container_exists(name) else 'missing')))
-        lines += [f'8080 dashboard: {port_open(8080)}', f'8556 drone RTSP: {port_open(8556)}', f'8971 Frigate: {port_open(8971)}']
+        lines += [f'{DASHBOARD_PORT} dashboard: {port_open(DASHBOARD_PORT)}', f'8556 drone RTSP: {port_open(8556)}', f'8971 Frigate: {port_open(8971)}']
         self.emit('log','DIAGNOSTICS\n'+'\n'.join(lines))
         if os.path.exists(DASH_LOG):
             try: os.startfile(DASH_LOG)
@@ -239,14 +307,12 @@ class App(tk.Tk):
             if os.path.exists(PID_FILE):
                 try:
                     pid=open(PID_FILE).read().strip()
-                    if pid: run_hidden(['taskkill','/PID',pid,'/F'], timeout=15)
+                    if pid: run_hidden(['taskkill','/PID',pid,'/T','/F'], timeout=15)
                 except Exception: pass
                 try: os.remove(PID_FILE)
                 except OSError: pass
-            for name in ['frigate','drone-mediamtx','frigate-mqtt']:
-                if docker_container_exists(name):
-                    try: run_hidden(['docker','stop',name], timeout=40)
-                    except Exception: pass
+            try: compose('stop', timeout=120)
+            except Exception: pass
             for k in self.status_vars: self.emit('status',k,'Stopped')
             self.emit('msg','System stopped'); self.emit('log','System stopped.')
         finally: self.emit('busy',False)
@@ -267,11 +333,12 @@ class App(tk.Tk):
         def save():
             try:
                 import yaml
-                path=os.path.join(FRIGATE_DIR,'config','config.yaml')
-                with open(path,'r',encoding='utf-8') as f: data=yaml.safe_load(f) or {}
-                data.setdefault('go2rtc',{}).setdefault('streams',{})['tony']=[urlvar.get().strip()]
-                data['go2rtc']['streams']['drone']=['rtsp://host.docker.internal:8556/drone']
-                with open(path,'w',encoding='utf-8') as f: yaml.safe_dump(data,f,sort_keys=False)
+                with open(FRIGATE_CONFIG,'r',encoding='utf-8') as f: data=yaml.safe_load(f) or {}
+                streams=data.setdefault('go2rtc',{}).setdefault('streams',{})
+                streams[self.camera_name(data)]=[urlvar.get().strip()]
+                streams['drone']=['rtsp://host.docker.internal:8556/drone']
+                shutil.copyfile(FRIGATE_CONFIG, FRIGATE_CONFIG + '.bak')
+                with open(FRIGATE_CONFIG,'w',encoding='utf-8') as f: yaml.safe_dump(data,f,sort_keys=False)
                 messagebox.showinfo('Saved','Camera URL saved. Restart Frigate (Stop System, then Start System) to apply it.',parent=win)
             except Exception as e: messagebox.showerror('Save failed',str(e),parent=win)
         b=ttk.Frame(frm); b.pack(fill='x',side='bottom',pady=(14,0))
@@ -279,12 +346,19 @@ class App(tk.Tk):
         ttk.Button(b,text='Open Dashboard',command=self.open_dashboard).pack(side='left',padx=8)
         ttk.Button(b,text='Close',command=win.destroy).pack(side='right')
 
+    @staticmethod
+    def camera_name(data):
+        """The first non-drone camera in the Frigate config (e.g. 'tony' or 'camera')."""
+        for name in (data.get('cameras') or {}):
+            if name != 'drone':
+                return name
+        return 'camera'
+
     def read_camera_url(self):
         try:
             import yaml
-            path=os.path.join(FRIGATE_DIR,'config','config.yaml')
-            with open(path,'r',encoding='utf-8') as f: data=yaml.safe_load(f) or {}
-            s=data.get('go2rtc',{}).get('streams',{}).get('tony',[''])
+            with open(FRIGATE_CONFIG,'r',encoding='utf-8') as f: data=yaml.safe_load(f) or {}
+            s=data.get('go2rtc',{}).get('streams',{}).get(self.camera_name(data),[''])
             if isinstance(s,list) and s: return str(s[0])
             return str(s or '')
         except Exception: return ''
@@ -298,4 +372,9 @@ class App(tk.Tk):
 
     def on_close(self): self.destroy()
 
-if __name__=='__main__': App().mainloop()
+
+if __name__=='__main__':
+    if '--dashboard' in sys.argv:
+        run_dashboard_in_process()
+    else:
+        App().mainloop()
