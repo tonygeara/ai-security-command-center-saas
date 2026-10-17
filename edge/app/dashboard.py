@@ -120,6 +120,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
+APP_VERSION = "V11.1.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -575,7 +576,7 @@ def _tracked_box(store, object_id):
     return item.get("box")
 
 
-def set_face_overlay(known, label, box=None, object_id=""):
+def set_face_overlay(known, label, box=None, object_id="", preserve_identity=False):
     global face_overlay
     key = _overlay_key("face", object_id, label)
     with overlay_lock:
@@ -583,6 +584,12 @@ def set_face_overlay(known, label, box=None, object_id=""):
             box = _tracked_box(tracked_person_boxes, object_id)
         if box is None and time.time() < recent_person_box_until:
             box = recent_person_box
+
+        # Generic tracker updates only move the box; they must not reset a
+        # recognized (or flagged unknown) face back to "PERSON".
+        existing = face_overlays.get(key)
+        if preserve_identity and existing and existing.get("label") not in (None, "", "PERSON"):
+            known, label = existing.get("known"), existing.get("label")
 
         item = {
             "active_until": time.time() + OVERLAY_SECONDS,
@@ -596,7 +603,7 @@ def set_face_overlay(known, label, box=None, object_id=""):
         face_overlay = dict(item)
 
 
-def set_plate_overlay(known, label, plate, box=None, object_id=""):
+def set_plate_overlay(known, label, plate, box=None, object_id="", preserve_identity=False):
     global plate_overlay
     key = _overlay_key("vehicle", object_id, plate or label)
     with overlay_lock:
@@ -604,6 +611,10 @@ def set_plate_overlay(known, label, plate, box=None, object_id=""):
             box = _tracked_box(tracked_vehicle_boxes, object_id)
         if box is None and time.time() < recent_vehicle_box_until:
             box = recent_vehicle_box
+
+        existing = plate_overlays.get(key)
+        if preserve_identity and existing and existing.get("plate"):
+            known, label, plate = existing.get("known"), existing.get("label"), existing.get("plate")
 
         item = {
             "active_until": time.time() + OVERLAY_SECONDS,
@@ -636,7 +647,7 @@ def active_overlay_snapshot():
     return faces, vehicles
 
 
-def update_drone_overlay(data, known=None, identity_label=None, plate=""):
+def update_drone_overlay(data, known=None, identity_label=None, plate="", preserve_identity=False):
     """Maintain every detected drone person/vehicle, not just the guidance target."""
     if not isinstance(data, dict):
         return
@@ -652,6 +663,8 @@ def update_drone_overlay(data, known=None, identity_label=None, plate=""):
 
     with drone_overlay_lock:
         previous = dict(drone_overlays.get(key, {}))
+        if preserve_identity and (previous.get("known") or previous.get("plate")):
+            known, identity_label = None, None
         known_value = previous.get("known", False) if known is None else bool(known)
         display = identity_label or previous.get("label") or label.replace("_", " ").upper()
         if label in {"face", "person"}:
@@ -773,6 +786,7 @@ def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_b
         "Type": event_type,
         "Name": name,
         "Identifier": identifier,
+        "Camera": CAMERA_NAME,
         "Snapshot": snapshot_path,
     }
     fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
@@ -1401,15 +1415,18 @@ def drone_encoder_worker():
 
 
 def generate_drone_frames():
+    last_sent = None
     while True:
         jpg = None
         with drone_jpeg_lock:
             if drone_latest_jpeg is not None:
                 jpg = drone_latest_jpeg
-        if jpg is None:
-            # Keep the browser feed responsive while waiting for the next drone frame.
-            time.sleep(0.05)
+        if jpg is None or jpg is last_sent:
+            # Only send newly encoded frames. Re-sending the same JPEG every few ms
+            # floods the socket, and the browser-side buffering adds latency.
+            time.sleep(0.005)
             continue
+        last_sent = jpg
         yield (
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n"
@@ -1417,9 +1434,6 @@ def generate_drone_frames():
             b"Pragma: no-cache\r\n"
             b"Expires: 0\r\n\r\n" + jpg + b"\r\n"
         )
-        # No extra browser-side sleep: encoder_worker already controls the rate.
-        # This prevents another full frame interval from being added to latency.
-        time.sleep(0.002)
 
 
 threading.Thread(target=drone_camera_worker, daemon=True).start()
@@ -1580,12 +1594,14 @@ def on_message(
                             data,
                             known=False,
                             identity_label="SCANNING FACE...",
+                            preserve_identity=True,
                         )
                     elif quick_label in {"car", "motorcycle", "truck", "bus"}:
                         update_drone_overlay(
                             data,
                             known=False,
                             identity_label="READING PLATE...",
+                            preserve_identity=True,
                         )
             elif msg.topic == MQTT_TOPIC:
                 update_type_for_drone = str(data.get("type") or "").lower()
@@ -1656,7 +1672,7 @@ def on_message(
                         "box": box,
                         "updated_at": time.time(),
                     }
-                    set_face_overlay(False, "PERSON", box, object_id=object_id)
+                    set_face_overlay(False, "PERSON", box, object_id=object_id, preserve_identity=True)
                     queue_unknown_person(object_id, box)
 
             elif label in {"car", "motorcycle", "truck", "bus"}:
@@ -1669,7 +1685,7 @@ def on_message(
                         "box": box,
                         "updated_at": time.time(),
                     }
-                    set_plate_overlay(False, label.upper(), "", box, object_id=object_id)
+                    set_plate_overlay(False, label.upper(), "", box, object_id=object_id, preserve_identity=True)
 
             return
 
@@ -1888,7 +1904,10 @@ def start_mqtt():
             on_message
         )
 
-        client.connect(
+        # connect_async + loop_start keeps retrying in the background, so the
+        # dashboard recovers if Mosquitto/Frigate start after this script.
+        client.reconnect_delay_set(min_delay=1, max_delay=30)
+        client.connect_async(
             MQTT_HOST,
             MQTT_PORT,
             60
@@ -1922,7 +1941,7 @@ def pair_windows_device(pairing_code, device_name="Windows Edge"):
         r = requests.post(PAIR_DEVICE_URL, json={
             "code": code,
             "device_name": device_name,
-            "app_version": "V11.0.2"
+            "app_version": APP_VERSION
         }, timeout=15)
         data = r.json()
         if not r.ok:
@@ -2006,6 +2025,7 @@ def force_drone_ai_off(reason="Cloud entitlement disabled"):
     print("Drone AI forced OFF:", reason)
 
 def cloud_control_worker():
+    global camera_enabled_runtime
     config = load_edge_agent_config()
     token = str(config.get("device_token") or "").strip()
     if not token:
@@ -2019,7 +2039,7 @@ def cloud_control_worker():
             response = requests.post(
                 CLOUD_CONTROL_URL,
                 headers={"x-device-token": token},
-                json={"app_version": "V11.0.2"},
+                json={"app_version": APP_VERSION},
                 timeout=12,
             )
             response.raise_for_status()
@@ -3389,6 +3409,10 @@ def _safe_camera_slug(name):
     s = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(name or "camera").strip()).strip("_").lower()
     return (s or "camera")[:40]
 
+# No Supabase function for camera-source sync is deployed or in the repo yet.
+# Set AI_SECURITY_SOURCE_CONTROL_URL once one exists.
+EDGE_SOURCE_CONTROL_URL = os.environ.get("AI_SECURITY_SOURCE_CONTROL_URL", "")
+
 def _test_rtsp(url):
     cap = cv2.VideoCapture(str(url), cv2.CAP_FFMPEG)
     try:
@@ -3402,6 +3426,8 @@ def _cloud_source(method="GET", payload=None):
     token = _edge_token()
     if not token:
         return {"ok": False, "error": "Pair this Windows device to your customer account first."}
+    if not EDGE_SOURCE_CONTROL_URL:
+        return {"ok": False, "error": "Cloud camera-source sync is not available in this version. Configure the camera on this PC."}
     try:
         r = requests.request(method, EDGE_SOURCE_CONTROL_URL, headers={"x-device-token": token, "content-type":"application/json"},
                              json=payload or {}, timeout=12)
@@ -3523,7 +3549,7 @@ function addCam(){m('Checking plan and configuring camera…',true);call('/api/s
 
 @app.route("/healthz")
 def healthz():
-    return jsonify({"ok": True, "service": "ai-security-command-center", "version": "V11.0.2"})
+    return jsonify({"ok": True, "service": "ai-security-command-center", "version": APP_VERSION})
 
 @app.route("/api/system/readiness")
 def api_system_readiness():
@@ -3549,7 +3575,7 @@ def api_system_readiness():
         required.append(checks["mediamtx"])
     return jsonify({
         "ok": all(required),
-        "version": "V11.0.2",
+        "version": APP_VERSION,
         "checks": checks,
         "plan": cloud.get("plan_code"),
         "organization_status": cloud.get("organization_status"),
@@ -3588,40 +3614,51 @@ def api_telegram_test():
 # EVENT DELETE API
 # ============================================================
 
-def delete_history_event(event_index):
+def event_key(row):
+    """Stable identity for a history row (list indexes shift as new events arrive)."""
+    return "|".join(str(row.get(k, "") or "") for k in ("Date", "Time", "Identifier", "Snapshot"))
+
+
+def delete_history_event(event_index, key=""):
     if not os.path.exists(EVENT_LOG):
         raise RuntimeError("Event history file does not exist.")
 
-    with open(EVENT_LOG, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames
-        rows = list(reader)
+    with event_log_lock:
+        with open(EVENT_LOG, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
 
-    if not fieldnames:
-        raise RuntimeError("Event history has no headers.")
+        if not fieldnames:
+            raise RuntimeError("Event history has no headers.")
 
-    newest_first = list(reversed(rows))
-    if event_index < 0 or event_index >= len(newest_first):
-        raise RuntimeError("Event could not be found.")
+        newest_first = list(reversed(rows))
+        if key:
+            matches = [row for row in newest_first if event_key(row) == key]
+            if not matches:
+                raise RuntimeError("Event could not be found. Refresh the page and try again.")
+            event_to_delete = matches[0]
+        else:
+            if event_index < 0 or event_index >= len(newest_first):
+                raise RuntimeError("Event could not be found.")
+            event_to_delete = newest_first[event_index]
+        snapshot = event_to_delete.get("Snapshot", "") or ""
 
-    event_to_delete = newest_first[event_index]
-    snapshot = event_to_delete.get("Snapshot", "") or ""
+        removed = False
+        new_rows = []
+        for row in rows:
+            if not removed and row == event_to_delete:
+                removed = True
+                continue
+            new_rows.append(row)
 
-    removed = False
-    new_rows = []
-    for row in rows:
-        if not removed and row == event_to_delete:
-            removed = True
-            continue
-        new_rows.append(row)
+        if not removed:
+            raise RuntimeError("Event could not be deleted.")
 
-    if not removed:
-        raise RuntimeError("Event could not be deleted.")
-
-    with open(EVENT_LOG, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(new_rows)
+        with open(EVENT_LOG, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(new_rows)
 
     if snapshot:
         snapshot_name = os.path.basename(snapshot.replace("\\", "/"))
@@ -3638,7 +3675,8 @@ def delete_history_event(event_index):
 @app.route("/api/events/<int:event_index>", methods=["DELETE"])
 def api_delete_event(event_index):
     try:
-        deleted = delete_history_event(event_index)
+        data = request.get_json(silent=True) or {}
+        deleted = delete_history_event(event_index, str(data.get("key") or ""))
         return jsonify({"ok": True, "message": "Event deleted.", "event": deleted})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -7018,6 +7056,7 @@ UNKNOWN FACE / VEHICLE CAPTURES
     type="button"
     class="delete-event-button"
     data-event-index="{{ loop.index0 }}"
+    data-event-key="{{ event.event_key }}"
 >
 DELETE EVENT
 </button>
@@ -7081,7 +7120,7 @@ DELETE EVENT
 {% endif %}
 </div>
 
-<button type="button" class="delete-event-button" data-event-index="{{ loop.index0 }}">DELETE EVENT</button>
+<button type="button" class="delete-event-button" data-event-index="{{ loop.index0 }}" data-event-key="{{ event.event_key }}">DELETE EVENT</button>
 </div>
 </div>
 {% endfor %}
@@ -9204,7 +9243,11 @@ document.addEventListener("click", async event => {
     button.innerText = "DELETING...";
 
     try {
-        const response = await fetch("/api/events/" + eventIndex, {method: "DELETE"});
+        const response = await fetch("/api/events/" + eventIndex, {
+            method: "DELETE",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({key: button.dataset.eventKey || ""}),
+        });
         const result = await response.json();
         if (!result.ok) throw new Error(result.error || "Unable to delete event.");
 
@@ -9737,6 +9780,12 @@ document.getElementById(
    FACE LIBRARY
    ========================================================== */
 
+function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>"']/g, c => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+    })[c]);
+}
+
 document.getElementById(
     "openFaceLibrary"
 ).addEventListener(
@@ -9778,7 +9827,7 @@ document.getElementById(
                 container.innerHTML =
                     '<div class="waiting">'
                     +
-                    (
+                    escapeHtml(
                         result.error
                         ||
                         "No enrolled faces found."
@@ -9801,7 +9850,7 @@ document.getElementById(
                             </div>
 
                             <div class="library-name">
-                                ${name}
+                                ${escapeHtml(name)}
                             </div>
 
                             <div class="library-sub">
@@ -9885,11 +9934,11 @@ document.getElementById(
                             </div>
 
                             <div class="library-name">
-                                ${name}
+                                ${escapeHtml(name)}
                             </div>
 
                             <div class="library-sub">
-                                PLATE • ${plate}
+                                PLATE • ${escapeHtml(plate)}
                             </div>
 
                         </div>
@@ -9912,7 +9961,24 @@ document.getElementById(
 /* DRONE FEED STATUS
    Uses already-cached Drone AI + tracking state.
    No extra HTTP requests are generated here. */
+let droneFeedWasOnline = false;
+let droneFeedRetryAt = 0;
+function reconnectDroneFeed() {
+    const img = document.getElementById("droneCameraFeed");
+    if (img) img.src = "/drone_video_feed?t=" + Date.now();
+}
+const droneFeedImgEl = document.getElementById("droneCameraFeed");
+if (droneFeedImgEl) droneFeedImgEl.addEventListener("error", () => { droneFeedRetryAt = Date.now() + 3000; });
+
 function refreshDroneFeedStatus() {
+    // Re-open the MJPEG stream when the drone comes back online or after a load error,
+    // instead of requiring a full page refresh.
+    if ((droneVideoOnline && !droneFeedWasOnline) || (droneFeedRetryAt && Date.now() >= droneFeedRetryAt)) {
+        droneFeedRetryAt = 0;
+        reconnectDroneFeed();
+    }
+    droneFeedWasOnline = droneVideoOnline;
+
     const stateEl = document.getElementById("droneFeedState");
     if (stateEl) {
         stateEl.innerText = droneVideoOnline ? "● VIDEO LIVE" : (droneEnabled ? "WAITING FOR VIDEO" : "NO VIDEO");
@@ -10136,6 +10202,8 @@ def _dashboard_context():
                 event["image_file"] = ""
     decorate_event_images(events)
     decorate_event_images(history_events)
+    for event in events + history_events:
+        event["event_key"] = event_key(event)
     return events, history_events
 
 @app.route("/")
@@ -10614,8 +10682,13 @@ if __name__ == "__main__":
         "Dashboard:"
         f" http://localhost:{PORT}"
     )
-    print("V11.0.2 CUSTOMER PLATFORM")
+    print(f"{APP_VERSION} CUSTOMER PLATFORM")
     print()
+
+    # The browser polls several endpoints every second; logging each request
+    # grew dashboard.log to hundreds of MB. Keep warnings and errors only.
+    import logging
+    logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
     app.run(
         host="127.0.0.1",
