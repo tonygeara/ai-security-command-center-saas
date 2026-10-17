@@ -92,6 +92,10 @@ LOCAL_SETTINGS_FILE = os.path.join(BASE_FOLDER, "local_settings.json")
 MANAGED_FRIGATE_DIR = os.path.join(BASE_FOLDER, "frigate")
 MANAGED_FRIGATE_CONFIG = os.path.join(MANAGED_FRIGATE_DIR, "config.yml")
 os.makedirs(MANAGED_FRIGATE_DIR, exist_ok=True)
+# The config file the Frigate container actually reads (mounted by the launcher's runtime).
+LIVE_FRIGATE_CONFIG = os.path.join(
+    os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "frigate", "config", "config.yaml"
+)
 
 def load_local_settings():
     try:
@@ -1275,7 +1279,7 @@ def drone_camera_worker():
             # This lets the dashboard show the DJI/MediaMTX feed as soon as it exists.
             if cap is None or not cap.isOpened():
                 try:
-                    _dcfg_path = r'C:\\frigate\\config\\config.yaml' if os.path.exists(r'C:\\frigate\\config\\config.yaml') else r'C:\\frigate\\config\\config.yml'
+                    _dcfg_path = LIVE_FRIGATE_CONFIG if os.path.exists(LIVE_FRIGATE_CONFIG) else r'C:\frigate\config\config.yaml'
                     if os.path.exists(_dcfg_path):
                         with open(_dcfg_path,'r',encoding='utf-8') as _df:
                             _dcfg = yaml.safe_load(_df) or {}
@@ -3409,10 +3413,11 @@ def _safe_camera_slug(name):
     s = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(name or "camera").strip()).strip("_").lower()
     return (s or "camera")[:40]
 
-# No Supabase function for camera-source sync is deployed or in the repo yet.
-# Set AI_SECURITY_SOURCE_CONTROL_URL once one exists.
-EDGE_SOURCE_CONTROL_URL = os.environ.get("AI_SECURITY_SOURCE_CONTROL_URL", "")
-
+# Registers camera/drone sources against the plan limits (supabase/functions/edge-source-control).
+EDGE_SOURCE_CONTROL_URL = os.environ.get(
+    "AI_SECURITY_SOURCE_CONTROL_URL",
+    "https://qfnxwuejfotofuxlyqjd.supabase.co/functions/v1/edge-source-control",
+)
 def _test_rtsp(url):
     cap = cv2.VideoCapture(str(url), cv2.CAP_FFMPEG)
     try:
@@ -3439,7 +3444,30 @@ def _cloud_source(method="GET", payload=None):
         return {"ok": False, "error": f"Cloud source service unavailable: {e}"}
 
 def _write_managed_frigate(camera_name, source_url):
-    # Customer credentials remain on this PC. The generated file is not uploaded to the SaaS.
+    """Add or update one camera in the live Frigate config, keeping everything else
+    (other cameras, drone, face recognition, LPR). Customer credentials stay on this PC."""
+    import copy, shutil, yaml
+    if not os.path.isfile(LIVE_FRIGATE_CONFIG):
+        return _write_fresh_frigate(camera_name, source_url)
+    with open(LIVE_FRIGATE_CONFIG, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    cameras = cfg.setdefault("cameras", {})
+    template = next((c for n, c in cameras.items() if n != "drone" and isinstance(c, dict)), None)
+    camera = copy.deepcopy(cameras.get(camera_name) or template or {
+        "objects": {"track": ["person", "car", "motorcycle"]}, "detect": {"enabled": True}})
+    camera["enabled"] = True
+    camera["ffmpeg"] = {"inputs": [{"path": f"rtsp://127.0.0.1:8554/{camera_name}",
+                                    "input_args": "preset-rtsp-restream", "roles": ["detect"]}]}
+    cameras[camera_name] = camera
+    cfg.setdefault("go2rtc", {}).setdefault("streams", {})[camera_name] = [source_url]
+    shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-camera-setup")
+    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    os.replace(tmp, LIVE_FRIGATE_CONFIG)
+
+def _write_fresh_frigate(camera_name, source_url):
+    # No live config yet (first setup): write a minimal one where Frigate reads it.
     import yaml
     cfg = {
       "mqtt":{"host":"host.docker.internal","port":1883},
@@ -3455,11 +3483,11 @@ def _write_managed_frigate(camera_name, source_url):
         "record":{"enabled":False}
       }}
     }
-    os.makedirs(MANAGED_FRIGATE_DIR, exist_ok=True)
-    tmp=MANAGED_FRIGATE_CONFIG+".tmp"
+    os.makedirs(os.path.dirname(LIVE_FRIGATE_CONFIG), exist_ok=True)
+    tmp=LIVE_FRIGATE_CONFIG+".tmp"
     with open(tmp,"w",encoding="utf-8") as f:
         yaml.safe_dump(cfg,f,sort_keys=False)
-    os.replace(tmp,MANAGED_FRIGATE_CONFIG)
+    os.replace(tmp,LIVE_FRIGATE_CONFIG)
 
 def _restart_frigate():
     try:
@@ -10271,7 +10299,9 @@ def event_image(filename):
 # ---------------- V10.5 LOCAL CAMERA AUTO-RECOVERY ----------------
 # This subsystem is intentionally local-only: camera credentials never leave this PC.
 RECOVERY_STATE_PATH = os.path.join(BASE_FOLDER, "camera_recovery_v11.json")
+# The live config first; C:\frigate only for PCs still running a pre-V11.1 Frigate container.
 FRIGATE_CONFIG_CANDIDATES = [
+    LIVE_FRIGATE_CONFIG,
     r"C:\frigate\config\config.yaml",
     r"C:\frigate\config\config.yml",
 ]
