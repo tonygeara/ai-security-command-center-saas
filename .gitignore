@@ -22,3 +22,4 @@ event_history.csv
 frigate.db
 .jwt_secret
 license_cache.json
+deno.lock
