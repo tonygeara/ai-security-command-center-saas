@@ -3389,15 +3389,213 @@ def discovery_drone_test():
     ok=_test_rtsp("rtsp://127.0.0.1:8556/drone")
     return jsonify({"ok":ok,"state":"online" if ok else "waiting","message":"Drone stream detected." if ok else "Drone service ready — waiting for live video."}),200
 
+# ============================================================
+# HUD THEME (shared by every page; same look as the Drones / control page)
+# ============================================================
+
+HUD_CSS = r"""
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{background:#02070c;color:#d9efff;font-family:Arial,Helvetica,sans-serif;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:linear-gradient(rgba(20,135,180,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(20,135,180,.025) 1px,transparent 1px);
+  background-size:40px 40px}
+a{color:#5bd9ff}
+
+/* top bar */
+.hud-top{position:sticky;top:0;z-index:20;display:flex;align-items:stretch;min-height:64px;background:#03101a;
+  border-bottom:1px solid #0876ad;box-shadow:0 0 26px rgba(0,153,255,.10);overflow:hidden}
+.hud-top::after{content:"";position:absolute;bottom:0;left:-40%;width:40%;height:1px;
+  background:linear-gradient(90deg,transparent,#36cfff,transparent);animation:topSweep 4s linear infinite}
+@keyframes topSweep{to{left:100%}}
+.hud-brand{display:flex;align-items:center;gap:11px;padding:0 18px;border-right:1px solid #12405a;text-decoration:none;flex:none}
+.brand-shield{width:40px;height:45px;display:flex;align-items:center;justify-content:center;
+  clip-path:polygon(50% 0,92% 15%,84% 74%,50% 100%,16% 74%,8% 15%);background:rgba(18,151,215,.20);
+  color:#45d0ff;font-size:18px;border:1px solid #31c6ff}
+.brand-name{color:#5bd9ff;font-size:17px;font-weight:bold;letter-spacing:2px}
+.brand-sub{margin-top:2px;color:#4a91b2;font-size:8px;letter-spacing:2px}
+.hud-nav{display:flex;flex:1;overflow-x:auto;scrollbar-width:none}
+.hud-nav::-webkit-scrollbar{display:none}
+.hud-nav a{position:relative;display:flex;align-items:center;gap:8px;padding:0 16px;color:#6d8b9d;text-decoration:none;
+  font-size:10px;letter-spacing:1.5px;text-transform:uppercase;border-right:1px solid #123447;white-space:nowrap;transition:.2s}
+.hud-nav a .ico{color:#2f7fa3;font-size:13px}
+.hud-nav a:hover{color:#bfefff;background:rgba(14,88,128,.12)}
+.hud-nav a.active{color:#5bd9ff;background:rgba(18,151,215,.10)}
+.hud-nav a.active .ico{color:#45d0ff}
+.hud-nav a.active::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:#36cfff;box-shadow:0 0 10px #36cfff}
+.hud-clock{display:flex;flex-direction:column;justify-content:center;align-items:flex-end;padding:0 18px;border-left:1px solid #12405a;min-width:150px;flex:none}
+.hud-clock b{color:#e9f8ff;font-size:16px;letter-spacing:1px}
+.hud-clock span{margin-top:3px;color:#24ed87;font-size:9px;letter-spacing:1.5px;display:flex;align-items:center;gap:6px}
+
+/* layout */
+.hud-main{position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:22px 24px 40px}
+.hud-main.narrow{max-width:920px}
+.page-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;margin-bottom:18px;flex-wrap:wrap}
+.page-kicker{color:#4a91b2;font-size:10px;letter-spacing:3px;text-transform:uppercase}
+.page-title{margin:6px 0 0;color:#5bd9ff;font-size:22px;letter-spacing:2px;text-transform:uppercase;font-weight:bold;text-shadow:0 0 18px rgba(54,207,255,.25)}
+.page-sub{color:#6d8b9d;font-size:12px;margin-top:6px;letter-spacing:.5px;line-height:1.5}
+.actions{display:flex;gap:8px;flex-wrap:wrap}
+.grid-2{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(320px,.8fr);gap:16px;align-items:start}
+.stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px}
+
+/* panels */
+.panel{position:relative;overflow:hidden;background:#04111b;border:1px solid #0a5480;border-radius:6px;box-shadow:0 0 20px rgba(0,126,188,.08);margin-bottom:16px}
+.panel::before{content:"";position:absolute;top:0;left:0;width:130px;height:1px;background:linear-gradient(90deg,#36cfff,transparent)}
+.panel-head{min-height:43px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 14px;border-bottom:1px solid #123447}
+.panel-title{color:#a8c7d7;font-size:11px;letter-spacing:1.5px;text-transform:uppercase}
+.panel-body{padding:16px}
+.live{color:#2aea88;font-size:10px;letter-spacing:1px}
+.stat{position:relative;overflow:hidden;background:#04111b;border:1px solid #0a5480;border-radius:6px;padding:14px 16px}
+.stat::after{content:"";position:absolute;bottom:0;left:-100%;width:100%;height:1px;background:linear-gradient(90deg,transparent,#36cfff,transparent);animation:topSweep 4s linear infinite}
+.stat-label{color:#6d8b9d;font-size:10px;letter-spacing:1.5px;text-transform:uppercase}
+.stat-value{margin-top:8px;font-size:15px;font-weight:bold;color:#e9f8ff;letter-spacing:.5px}
+
+/* status dots */
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#4d6b7c;margin-right:8px;vertical-align:middle}
+.dot.good{background:#26ee89;box-shadow:0 0 10px #26ee89;animation:pulseDot 1.4s infinite}
+.dot.warn{background:#ffb23c;box-shadow:0 0 10px #ffb23c;animation:pulseDot 1.4s infinite}
+.dot.bad{background:#ff5d6c;box-shadow:0 0 10px #ff5d6c}
+@keyframes pulseDot{50%{opacity:.35;transform:scale(.7)}}
+
+/* video */
+.camera-box{position:relative;background:#000;aspect-ratio:16/9}
+.camera-box img{width:100%;height:100%;object-fit:contain;display:block}
+.corner{position:absolute;width:34px;height:34px;pointer-events:none}
+.corner.tl{top:14px;left:14px;border-top:2px solid #3dd8ff;border-left:2px solid #3dd8ff}
+.corner.tr{top:14px;right:14px;border-top:2px solid #3dd8ff;border-right:2px solid #3dd8ff}
+.corner.bl{bottom:14px;left:14px;border-bottom:2px solid #3dd8ff;border-left:2px solid #3dd8ff}
+.corner.br{bottom:14px;right:14px;border-bottom:2px solid #3dd8ff;border-right:2px solid #3dd8ff}
+.overlay-tag{position:absolute;left:56px;bottom:22px;background:rgba(3,16,26,.85);border:1px solid #155879;color:#9edfff;padding:7px 10px;border-radius:4px;font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.camera-footer{min-height:30px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;color:#5d8499;font-size:9px;letter-spacing:1px}
+.cam-name{color:#35caff}
+
+/* rows, text */
+.hud-row{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 14px;background:#05131d;border:1px solid #153c56;border-radius:5px;margin-bottom:8px}
+.hud-row:last-child{margin-bottom:0}
+.hud-row b{color:#d9efff;font-size:13px;letter-spacing:.3px}
+.muted{color:#6d8b9d;font-size:12px;line-height:1.5}
+.state{color:#2aea88;font-size:11px;font-weight:bold;letter-spacing:1px}
+code{color:#2eef88;background:#020a10;border:1px solid #123447;border-radius:3px;padding:2px 6px;font-size:12px;word-break:break-all}
+
+/* buttons, inputs */
+.hud-btn{min-height:36px;padding:0 16px;cursor:pointer;color:#66dfff;background:rgba(14,88,128,.12);border:1px solid #155879;border-radius:4px;
+  font-size:10px;font-weight:bold;letter-spacing:1.5px;text-transform:uppercase;font-family:inherit;transition:.2s}
+.hud-btn:hover{color:#fff;border-color:#35cbff;box-shadow:0 0 12px rgba(53,203,255,.16)}
+.hud-btn.primary{color:#02131d;background:#25c7ff;border-color:#45d0ff;box-shadow:0 0 16px rgba(37,199,255,.25)}
+.hud-btn.primary:hover{background:#5bd9ff;color:#02131d}
+.hud-btn.danger{color:#ff7b86;border-color:#7a2935;background:rgba(125,12,28,.12)}
+.hud-btn:disabled{opacity:.5;cursor:default;box-shadow:none}
+label{display:block;margin:16px 0 7px;color:#a8c7d7;font-size:10px;letter-spacing:1.5px;text-transform:uppercase}
+input[type=text],input[type=password],input[type=number],input:not([type]),select{width:100%;background:#020a10;color:#d9efff;border:1px solid #155879;
+  border-radius:4px;padding:11px 12px;font-size:14px;font-family:inherit;outline:none;transition:.2s}
+input:focus,select:focus{border-color:#36cfff;box-shadow:0 0 12px rgba(54,207,255,.18)}
+input.toggle{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:46px;height:24px;margin:0;border-radius:12px;
+  background:#0a1c28;border:1px solid #155879;cursor:pointer;transition:.2s}
+input.toggle::after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#4d6b7c;transition:.2s}
+input.toggle:checked{background:rgba(37,199,255,.18);border-color:#36cfff;box-shadow:0 0 12px rgba(54,207,255,.2)}
+input.toggle:checked::after{left:25px;background:#45d0ff;box-shadow:0 0 8px #45d0ff}
+.hud-msg{margin-top:16px;padding:12px 14px;border-radius:5px;border:1px solid #155879;background:#05131d;font-size:13px;color:#9edfff}
+.hud-msg:empty{display:none}
+.hud-msg.ok{border-color:#1f7a50;color:#7dffc1;background:rgba(18,120,70,.12)}
+.hud-msg.bad{border-color:#7a2935;color:#ff9ea8;background:rgba(125,12,28,.14)}
+.notice{display:none}.notice.show{display:block}
+
+/* events */
+.event-row{display:grid;grid-template-columns:64px 1fr auto;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #123447}
+.event-row:last-child{border-bottom:0}
+.thumb{width:64px;height:44px;border-radius:4px;border:1px solid #153c56;background:#05131d;object-fit:cover;display:block}
+.event-type{color:#5bd9ff;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase}
+.event-type.unknown{color:#ffb23c}
+
+@media(max-width:1000px){.grid-2{grid-template-columns:1fr}.stat-grid{grid-template-columns:1fr 1fr}.hud-clock{display:none}}
+@media(max-width:560px){.stat-grid{grid-template-columns:1fr}.brand-sub{display:none}.hud-main{padding:16px 12px 32px}}
+"""
+
+HUD_NAV_ITEMS = [
+    ("dashboard", "/", "⌂", "Dashboard"),
+    ("control", "/legacy", "⌁", "Drones & Control"),
+    ("events", "/legacy#history", "◷", "Events"),
+    ("people", "/legacy#face-library", "◎", "People"),
+    ("vehicles", "/legacy#vehicle-library", "▱", "Vehicles"),
+    ("devices", "/setup/discover", "＋", "Devices"),
+    ("settings", "/settings", "⚙", "Settings"),
+]
+
+
+def hud_topbar(active="", nav=True):
+    active_attr = ' class="active"'
+    links = "".join(
+        f'<a href="{href}"{active_attr if key == active else ""}><span class="ico">{ico}</span>{label}</a>'
+        for key, href, ico, label in HUD_NAV_ITEMS
+    ) if nav else ""
+    return (
+        '<header class="hud-top">'
+        '<a class="hud-brand" href="/"><div class="brand-shield">A</div>'
+        '<div><div class="brand-name">AI SECURITY</div><div class="brand-sub">COMMAND CENTER</div></div></a>'
+        f'<nav class="hud-nav">{links}</nav>'
+        '<div class="hud-clock"><b id="hudClock">--:--:--</b><span><i class="dot good"></i>SYSTEM PROTECTED</span></div>'
+        '</header>'
+        '<script>(function(){const c=document.getElementById("hudClock");'
+        'const t=()=>{c.textContent=new Date().toLocaleTimeString()};t();setInterval(t,1000)})()</script>'
+    )
+
+
+def hud_page(title, body, active="", head="", nav=True):
+    """A complete page in the HUD theme. `body` is inserted under the top bar."""
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        f'<title>{title} — AI Security Command Center</title>'
+        '<link rel="stylesheet" href="/hud.css">' + head + '</head><body>'
+        + hud_topbar(active, nav) + body + '</body></html>'
+    )
+
+
+def hud_subnav(active=""):
+    """Navigation strip for the Drones & Control page, which keeps its own status top bar."""
+    links = "".join(
+        f'<a href="{href}" class="{"active" if key == active else ""}"><span>{ico}</span>{label}</a>'
+        for key, href, ico, label in HUD_NAV_ITEMS
+    )
+    return (
+        '<style>.hud-subnav{position:relative;z-index:15;display:flex;overflow-x:auto;background:#03101a;'
+        'border-bottom:1px solid #12405a;margin-bottom:10px;scrollbar-width:none}'
+        '.hud-subnav a{position:relative;display:flex;align-items:center;gap:8px;padding:11px 16px;color:#6d8b9d;'
+        'text-decoration:none;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;border-right:1px solid #123447;white-space:nowrap}'
+        '.hud-subnav a span{color:#2f7fa3;font-size:13px}.hud-subnav a:hover{color:#bfefff;background:rgba(14,88,128,.12)}'
+        '.hud-subnav a.active{color:#5bd9ff;background:rgba(18,151,215,.10)}'
+        '.hud-subnav a.active::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:#36cfff;box-shadow:0 0 10px #36cfff}'
+        '</style>'
+        f'<nav class="hud-subnav">{links}</nav>'
+    )
+
+
+@app.route("/hud.css")
+def hud_css():
+    return Response(HUD_CSS, mimetype="text/css", headers={"Cache-Control": "max-age=300"})
+
+
+DISCOVER_PAGE = hud_page("Devices", r"""
+<main class="hud-main narrow">
+<div class="page-head"><div><div class="page-kicker">Devices</div><h1 class="page-title">Automatic Device Discovery</h1>
+<div class="page-sub">Scan the local network for camera and streaming candidates. Video is verified separately before onboarding.</div></div>
+<div class="actions"><button class="hud-btn" onclick="location.href='/setup/camera'">Add camera manually</button></div></div>
+<section class="panel"><div class="panel-head"><div class="panel-title">▣ Network scan</div><div class="live">LAN</div></div>
+<div class="panel-body"><button class="hud-btn primary" onclick="s()">Scan network</button><div id="x" style="margin-top:14px"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">✈ Drone</div><div class="live">RTMP</div></div>
+<div class="panel-body"><div id="z" class="muted">Checking…</div><div style="margin-top:14px"><button class="hud-btn" onclick="t()">Test drone stream</button></div></div></section>
+</main>
+<script>
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+async function s(){x.innerHTML='<p class="muted">Scanning nearby devices…</p>';const c=new AbortController();const timer=setTimeout(()=>c.abort(),30000);try{let r=await fetch('/api/discovery/scan',{method:'POST',signal:c.signal});let d=await r.json();x.innerHTML=`<p class="muted">Scan complete · PC: ${esc(d.host_ip)} · Network: ${esc(d.network)} · ${d.devices?.length||0} candidate(s)</p>`;(d.devices||[]).forEach(v=>x.innerHTML+=`<div class="hud-row"><div><b>${esc(v.ip)}</b><div class="muted">${esc(v.kind)} · Ports: ${esc((v.ports||[]).join(', '))} ${v.mac?'· '+esc(v.mac):''}</div></div><button class="hud-btn" onclick="location.href='/setup/camera'">Add</button></div>`);if(!(d.devices||[]).length)x.innerHTML+='<p class="muted">No stream candidates found yet. Make sure the camera is online and RTSP is enabled.</p>'}catch(e){x.innerHTML='<p class="muted">Scan timed out safely. Try once more after confirming the camera is online.</p>'}finally{clearTimeout(timer)}}
+async function q(){let d=await(await fetch('/api/discovery/drone')).json();z.innerHTML=`<div class="hud-row"><div><b>DJI / controller publish address</b></div><code>${esc(d.publish_url)}</code></div><div class="hud-row"><div><b>Local AI stream</b></div><code>${esc(d.local_rtsp_url)}</code></div><div class="hud-row"><div><b>Streaming service</b></div><span class="state">${d.mediamtx_ready?'<i class="dot good"></i>READY':'<i class="dot bad"></i>NOT RUNNING'}</span></div>`}
+async function t(){let d=await(await fetch('/api/discovery/drone/test')).json();alert(d.message)}q()
+</script>""", active="devices")
+
+
 @app.route("/setup/discover")
 def setup_discover():
-    return """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>Auto Discovery</title>
-<style>body{font-family:Arial;background:#071019;color:#eef8ff}.w{max-width:900px;margin:50px auto}.c{background:#0c1924;border:1px solid #1d4258;border-radius:18px;padding:25px;margin:18px}button{background:#16a8ff;color:white;border:0;border-radius:9px;padding:12px 18px;font-weight:800}.d{padding:12px;border-top:1px solid #18384b}code{color:#7dffc1}p{color:#96afbf}</style></head>
-<body><div class=w><div class=c><p>AI SECURITY COMMAND CENTER · V10.5</p><h1>Automatic Device Discovery</h1><p>Scan the local network for camera and streaming candidates. Video is verified separately before onboarding.</p><button onclick=s()>Scan network</button><div id=x></div></div>
-<div class=c><h2>Drone</h2><div id=z>Checking…</div><br><button onclick=t()>Test drone stream</button></div></div>
-<script>async function s(){x.innerHTML='<p>Scanning nearby devices…</p>';const c=new AbortController();const timer=setTimeout(()=>c.abort(),30000);try{let r=await fetch('/api/discovery/scan',{method:'POST',signal:c.signal});let d=await r.json();x.innerHTML=`<p>Scan complete · PC: ${d.host_ip||''} · Network: ${d.network||''} · ${d.devices?.length||0} candidate(s)</p>`;(d.devices||[]).forEach(v=>x.innerHTML+=`<div class=d><b>${v.ip}</b> · ${v.kind}<br>Ports: ${v.ports.join(', ')} ${v.mac?'· '+v.mac:''}</div>`);if(!(d.devices||[]).length)x.innerHTML+='<p>No stream candidates found yet. Make sure the camera is online and RTSP is enabled.</p>'}catch(e){x.innerHTML='<p>Scan timed out safely. Try once more after confirming the camera is online.</p>'}finally{clearTimeout(timer)}}
-async function q(){let d=await(await fetch('/api/discovery/drone')).json();z.innerHTML=`DJI/controller publish address: <code>${d.publish_url}</code><br>Local AI stream: <code>${d.local_rtsp_url}</code><br>${d.mediamtx_ready?'Streaming service ready.':'Streaming service not running.'}`}
-async function t(){let d=await(await fetch('/api/discovery/drone/test')).json();alert(d.message)}q()</script></body></html>"""
+    return DISCOVER_PAGE
 # ============================================================
 # V10.5 PROFESSIONAL CAMERA ONBOARDING
 # ============================================================
@@ -3546,28 +3744,29 @@ def api_setup_camera():
 
 @app.route("/setup/camera")
 def camera_setup_page():
-    return """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
-<title>Add Camera — AI Security Command Center</title><style>
-body{font-family:Arial;background:#071019;color:#eaf6ff;margin:0}.w{max-width:760px;margin:55px auto;padding:28px}
-.card{background:#0b1823;border:1px solid #1c4056;border-radius:18px;padding:28px;box-shadow:0 30px 80px #0007}
-h1{margin-top:0}p{color:#93adbd;line-height:1.55}label{display:block;margin:18px 0 7px;font-weight:700}
-input{box-sizing:border-box;width:100%;padding:14px;border-radius:9px;border:1px solid #31536a;background:#07131c;color:white}
-button{margin-top:18px;padding:13px 18px;border:0;border-radius:9px;font-weight:800;cursor:pointer}
-.primary{background:#18a9ff;color:white}.secondary{background:#183044;color:#dff5ff;margin-right:8px}
-#msg{margin-top:18px;padding:13px;border-radius:9px;display:none}.ok{display:block!important;background:#0d392b;color:#80ffc2}.bad{display:block!important;background:#431d24;color:#ffb5bd}
-small{color:#6f8d9f}</style></head><body><div class=w><div class=card>
-<p>AI SECURITY COMMAND CENTER · V10.5</p><h1>Add a security camera</h1>
-<p>This wizard tests the camera before changing anything, checks your subscription limit, registers the source with your account, creates a local Frigate configuration and restarts Frigate.</p>
-<label>Camera name</label><input id=n placeholder="Front Door">
-<label>RTSP address</label><input id=u type=password placeholder="rtsp://username:password@192.168.1.50:554/stream1">
-<small>Credentials stay on this Windows PC and are not sent to the SaaS.</small><br>
-<button class=secondary onclick="testCam()">Test connection</button><button class=primary onclick="addCam()">Test & Add Camera</button>
-<div id=msg></div></div></div><script>
-const m=(t,ok)=>{let x=document.getElementById('msg');x.className=ok?'ok':'bad';x.textContent=t}
+    return CAMERA_SETUP_PAGE
+
+
+CAMERA_SETUP_PAGE = hud_page("Add Camera", r"""
+<main class="hud-main narrow">
+<div class="page-head"><div><div class="page-kicker">Devices</div><h1 class="page-title">Add a security camera</h1>
+<div class="page-sub">Tests the camera before changing anything, checks your subscription limit, registers it with your account, adds it to Frigate and restarts Frigate.</div></div>
+<div class="actions"><button class="hud-btn" onclick="location.href='/setup/discover'">Scan network</button></div></div>
+<section class="panel"><div class="panel-head"><div class="panel-title">▣ Camera connection</div><div class="live">RTSP</div></div>
+<div class="panel-body">
+<label for="n">Camera name</label><input id="n" placeholder="Front Door">
+<label for="u">RTSP address</label><input id="u" type="password" placeholder="rtsp://username:password@192.168.1.50:554/stream1">
+<div class="muted" style="margin-top:8px">Credentials stay on this Windows PC and are not sent to the cloud.</div>
+<div class="actions" style="margin-top:18px"><button class="hud-btn" onclick="testCam()">Test connection</button><button class="hud-btn primary" onclick="addCam()">Test &amp; add camera</button></div>
+<div id="msg" class="hud-msg"></div>
+</div></section>
+</main>
+<script>
+const m=(t,ok)=>{let x=document.getElementById('msg');x.className='hud-msg '+(ok?'ok':'bad');x.textContent=t}
 async function call(path){let r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:n.value,rtsp_url:u.value})});let d=await r.json();m(d.message||d.error||'Done',r.ok&&d.ok);return d}
 function testCam(){m('Testing camera…',true);call('/api/setup/camera/test')}
 function addCam(){m('Checking plan and configuring camera…',true);call('/api/setup/camera')}
-</script></body></html>"""
+</script>""", active="devices")
 
 
 # ============================================================
@@ -6652,6 +6851,7 @@ LIVE ACTIVITY
 
 </div>
 
+<!--HUD_SUBNAV-->
 
 <!-- =======================================================
      MAIN APP
@@ -9996,7 +10196,9 @@ function reconnectDroneFeed() {
     if (img) img.src = "/drone_video_feed?t=" + Date.now();
 }
 const droneFeedImgEl = document.getElementById("droneCameraFeed");
-if (droneFeedImgEl) droneFeedImgEl.addEventListener("error", () => { droneFeedRetryAt = Date.now() + 3000; });
+// Retry only while the drone video is up; otherwise (no stream, or Drone Live not licensed)
+// the next offline->online change reconnects it.
+if (droneFeedImgEl) droneFeedImgEl.addEventListener("error", () => { if (droneVideoOnline) droneFeedRetryAt = Date.now() + 3000; });
 
 function refreshDroneFeedStatus() {
     // Re-open the MJPEG stream when the drone comes back online or after a load error,
@@ -10027,6 +10229,16 @@ function refreshDroneFeedStatus() {
 }
 setInterval(refreshDroneFeedStatus, 1000);
 refreshDroneFeedStatus();
+
+/* Links like /legacy#history from the other pages open the matching panel. */
+function openPanelFromHash() {
+    const h = location.hash;
+    if (h === "#history") openEventHistory();
+    else if (h === "#face-library") document.getElementById("openFaceLibrary")?.click();
+    else if (h === "#vehicle-library") document.getElementById("openVehicleLibrary")?.click();
+}
+window.addEventListener("hashchange", openPanelFromHash);
+openPanelFromHash();
 </script>
 
 
@@ -10037,22 +10249,19 @@ refreshDroneFeedStatus();
 
 
 
-PAIRING_PAGE = """
-<!doctype html>
-<html><head><meta charset="utf-8"><title>AI Security Command Center Setup</title>
-<style>
-body{margin:0;background:#071019;color:#eaf6ff;font-family:Arial,sans-serif;display:grid;place-items:center;min-height:100vh}
-.card{width:min(520px,92vw);background:#0d1a26;border:1px solid #1d3a4d;border-radius:16px;padding:30px}
-.brand{color:#66e3ff;letter-spacing:.12em}.muted{color:#93a9b7}input,button{width:100%;box-sizing:border-box;padding:14px;margin-top:12px;border-radius:9px;font-size:16px}
-input{background:#071019;color:#fff;border:1px solid #28556c}button{border:0;font-weight:700;cursor:pointer}
-.code{text-transform:uppercase;letter-spacing:4px}#msg{min-height:24px;margin-top:14px}
-</style></head>
-<body><div class="card"><div class="brand">AI SECURITY COMMAND CENTER</div>
-<h1>Pair this Windows device</h1>
+PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("control"))
+
+PAIRING_PAGE = hud_page("Pair Device", """
+<main class="hud-main" style="max-width:560px;padding-top:8vh">
+<section class="panel"><div class="panel-head"><div class="panel-title">⌁ Device pairing</div><div class="live">SECURE</div></div>
+<div class="panel-body">
+<div class="page-kicker">Setup</div><h1 class="page-title" style="margin-bottom:10px">Pair this Windows device</h1>
 <p class="muted">In your Customer Portal, choose <b>Pair a Windows device</b>, then enter the one-time code below.</p>
-<input id="name" value="Windows Edge" placeholder="Device name">
-<input id="code" class="code" maxlength="8" placeholder="PAIRING CODE">
-<button id="pair">PAIR DEVICE</button><div id="msg" class="muted"></div></div>
+<label for="name">Device name</label><input id="name" value="Windows Edge" placeholder="Device name">
+<label for="code">Pairing code</label><input id="code" maxlength="8" placeholder="PAIRING CODE" style="text-transform:uppercase;letter-spacing:6px;font-size:18px;text-align:center">
+<button id="pair" class="hud-btn primary" style="width:100%;margin-top:18px;min-height:44px">Pair device</button>
+<div id="msg" class="hud-msg"></div>
+</div></section></main>
 <script>
 const btn=document.getElementById("pair"),msg=document.getElementById("msg");
 btn.onclick=async()=>{
@@ -10068,71 +10277,47 @@ btn.onclick=async()=>{
   setTimeout(()=>location.href="/",1200);
  }catch(e){msg.innerText=e.message||"Pairing failed";btn.disabled=false}
 };
-</script></body></html>
-"""
+</script>""", nav=False)
 
 
 
-CUSTOMER_PAGE = """
-<!doctype html>
-<html>
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AI Security Command Center</title>
-<style>
-:root{--bg:#071019;--panel:#0d1924;--panel2:#101f2c;--line:#1d3445;--text:#eef7fc;--muted:#8fa6b5;--accent:#22b7ff;--good:#35d07f;--warn:#ffbd45;--bad:#ff667a}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,Segoe UI,Arial,sans-serif}
-.shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh}.side{border-right:1px solid var(--line);padding:22px 16px;background:#08131d;position:sticky;top:0;height:100vh}
-.brand{font-weight:800;letter-spacing:.08em;font-size:14px;color:#bfeaff;margin:6px 10px 28px}.nav a{display:flex;gap:12px;align-items:center;color:#b7c9d4;text-decoration:none;padding:12px 14px;border-radius:10px;margin:4px 0}.nav a.active,.nav a:hover{background:#102636;color:white}.nav .ico{width:20px;text-align:center}
-.main{padding:28px 32px;max-width:1500px;width:100%;margin:auto}.top{display:flex;justify-content:space-between;gap:18px;align-items:center;margin-bottom:24px}.top h1{margin:0;font-size:28px}.sub{color:var(--muted);margin-top:6px}.actions{display:flex;gap:10px}.btn{border:1px solid var(--line);background:#102332;color:white;padding:10px 14px;border-radius:10px;font-weight:700;cursor:pointer}.btn.primary{background:var(--accent);color:#00131d;border-color:transparent}
-.health{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:18px}.stat,.card{background:var(--panel);border:1px solid var(--line);border-radius:16px}.stat{padding:16px}.label{color:var(--muted);font-size:13px}.value{font-size:18px;font-weight:800;margin-top:7px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;background:var(--muted)}.dot.good{background:var(--good)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}
-.grid{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(320px,.8fr);gap:18px}.card{overflow:hidden}.cardhead{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid var(--line)}.cardhead h2{font-size:17px;margin:0}.live{background:#020609;aspect-ratio:16/9;display:grid;place-items:center;position:relative}.live img{width:100%;height:100%;object-fit:contain}.badge{padding:6px 9px;border-radius:999px;background:#102b20;color:#7ff0ad;font-size:12px;font-weight:800}.overlay{position:absolute;left:14px;bottom:14px;background:#071019cc;padding:8px 10px;border-radius:9px;font-size:12px}
-.quick{padding:16px;display:grid;gap:10px}.quickrow{display:flex;justify-content:space-between;align-items:center;background:var(--panel2);padding:13px;border-radius:11px}.small{font-size:12px;color:var(--muted)}.events{margin-top:18px}.eventlist{padding:4px 16px 14px}.event{display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid #172b39}.thumb{width:52px;height:42px;border-radius:8px;background:#142634;object-fit:cover}.event:last-child{border-bottom:0}
-.notice{display:none;margin-bottom:16px;padding:12px 14px;border-radius:11px;background:#17291e;border:1px solid #285c3b;color:#baf4cf}.notice.show{display:block}
-@media(max-width:900px){.shell{grid-template-columns:1fr}.side{display:none}.main{padding:18px}.health{grid-template-columns:1fr 1fr}.grid{grid-template-columns:1fr}}@media(max-width:520px){.health{grid-template-columns:1fr}.actions{display:none}}
-</style>
-</head>
-<body><div class="shell">
-<aside class="side"><div class="brand">AI SECURITY<br>COMMAND CENTER</div><nav class="nav">
-<a class="active" href="/"><span class="ico">⌂</span>Dashboard</a>
-<a href="/"><span class="ico">▣</span>Live View</a>
-<a href="/legacy#history"><span class="ico">◷</span>Events</a>
-<a href="/legacy#face-library"><span class="ico">◎</span>People</a>
-<a href="/legacy#vehicle-library"><span class="ico">▱</span>Vehicles</a>
-<a href="/legacy"><span class="ico">⌁</span>Drones</a>
-<a href="/setup/discover"><span class="ico">＋</span>Devices</a>
-<a href="/settings"><span class="ico">⚙</span>Settings</a>
-</nav></aside>
-<main class="main">
-<div class="top"><div><h1>Good to see you</h1><div class="sub">Your security system at a glance.</div></div>
-<div class="actions"><button class="btn" onclick="location.href='/setup/discover'">Add device</button><button class="btn primary" onclick="runRecovery()">Check system</button></div></div>
-<div id="notice" class="notice"></div>
-<section class="health">
-<div class="stat"><div class="label">Front Camera</div><div class="value"><span id="camDot" class="dot"></span><span id="camText">Checking…</span></div></div>
-<div class="stat"><div class="label">AI Detection</div><div class="value"><span id="aiDot" class="dot"></span><span id="aiText">Checking…</span></div></div>
-<div class="stat"><div class="label">Drone</div><div class="value"><span id="droneDot" class="dot"></span><span id="droneText">Checking…</span></div></div>
-<div class="stat"><div class="label">Edge Agent</div><div class="value"><span id="edgeDot" class="dot"></span><span id="edgeText">Connected</span></div></div>
+CUSTOMER_PAGE = hud_page("Dashboard", """
+<main class="hud-main">
+<div class="page-head"><div><div class="page-kicker">Overview</div><h1 class="page-title">Security Status</h1>
+<div class="page-sub">Your security system at a glance.</div></div>
+<div class="actions"><button class="hud-btn" onclick="location.href='/setup/discover'">Add device</button><button class="hud-btn primary" onclick="runRecovery()">Check system</button></div></div>
+<div id="notice" class="notice hud-msg" style="margin:0 0 16px"></div>
+<section class="stat-grid">
+<div class="stat"><div class="stat-label">Front camera</div><div class="stat-value"><span id="camDot" class="dot"></span><span id="camText">Checking…</span></div></div>
+<div class="stat"><div class="stat-label">AI detection</div><div class="stat-value"><span id="aiDot" class="dot"></span><span id="aiText">Checking…</span></div></div>
+<div class="stat"><div class="stat-label">Drone</div><div class="stat-value"><span id="droneDot" class="dot"></span><span id="droneText">Checking…</span></div></div>
+<div class="stat"><div class="stat-label">Edge agent</div><div class="stat-value"><span id="edgeDot" class="dot"></span><span id="edgeText">Connected</span></div></div>
 </section>
-<section class="grid">
-<div class="card"><div class="cardhead"><h2>Front Camera</h2><span id="liveBadge" class="badge">LIVE</span></div>
-<div class="live"><img src="/video_feed" alt="Front camera live view"><div class="overlay" id="recoveryLabel">Automatic recovery active</div></div></div>
-<div class="card"><div class="cardhead"><h2>System</h2><span class="small">Automatic</span></div><div class="quick">
-<div class="quickrow"><div><b>Camera recovery</b><div class="small" id="recoveryDetail">Monitoring network changes</div></div><span id="recoveryState">●</span></div>
-<div class="quickrow"><div><b>People recognition</b><div class="small">Known & unknown people</div></div><span id="faceState">—</span></div>
-<div class="quickrow"><div><b>License plate recognition</b><div class="small">Vehicle events</div></div><span id="lprState">—</span></div>
-<div class="quickrow"><div><b>Cloud connection</b><div class="small" id="planText">Checking subscription</div></div><span id="cloudState">●</span></div>
+<section class="grid-2">
+<div class="panel"><div class="panel-head"><div class="panel-title">▣ Live camera feed</div><div id="liveBadge" class="live">● LIVE</div></div>
+<div class="camera-box"><img src="/video_feed" alt="Front camera live view">
+<div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+<div class="overlay-tag" id="recoveryLabel">Automatic recovery active</div></div>
+<div class="camera-footer"><div class="cam-name">CAM 01</div><div>FRONT CAMERA • FACE AI • LPR AI</div></div></div>
+<div class="panel"><div class="panel-head"><div class="panel-title">⚙ System</div><div class="live">AUTOMATIC</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Camera recovery</b><div class="muted" id="recoveryDetail">Monitoring network changes</div></div><span class="state" id="recoveryState">●</span></div>
+<div class="hud-row"><div><b>People recognition</b><div class="muted">Known &amp; unknown people</div></div><span class="state" id="faceState">—</span></div>
+<div class="hud-row"><div><b>License plate recognition</b><div class="muted">Vehicle events</div></div><span class="state" id="lprState">—</span></div>
+<div class="hud-row"><div><b>Cloud connection</b><div class="muted" id="planText">Checking subscription</div></div><span class="state" id="cloudState">●</span></div>
+<div class="actions" style="margin-top:14px"><button class="hud-btn" onclick="location.href='/legacy'">Open drones &amp; control</button></div>
 </div></div>
 </section>
-<section class="card events"><div class="cardhead"><h2>Recent security events</h2><button class="btn" onclick="location.href='/legacy#history'">View all</button></div>
-<div class="eventlist">
+<section class="panel"><div class="panel-head"><div class="panel-title">◷ Recent security events</div><button class="hud-btn" onclick="location.href='/legacy#history'">View all</button></div>
+<div class="panel-body" style="padding-top:4px;padding-bottom:6px">
 {% if events %}
 {% for e in events[:5] %}
-<div class="event">{% if e.image_file %}<img class="thumb" src="/events/{{e.image_file}}">{% else %}<div class="thumb"></div>{% endif %}
-<div><b>{{ e.get('Type', e.get('Event','Security event')) }}</b><div class="small">{{ e.get('Name', e.get('Details','')) }}</div></div><div class="small">{{ e.get('Time', e.get('Timestamp','')) }}</div></div>
+<div class="event-row">{% if e.image_file %}<img class="thumb" src="/events/{{e.image_file}}" alt="">{% else %}<div class="thumb"></div>{% endif %}
+<div><div class="event-type{% if 'UNKNOWN' in (e.get('Type', '')|upper) %} unknown{% endif %}">{{ e.get('Type', e.get('Event','Security event')) }}</div><div class="muted">{{ e.get('Name', e.get('Details','')) }}</div></div>
+<div class="muted">{{ e.get('Date', '') }} {{ e.get('Time', e.get('Timestamp','')) }}</div></div>
 {% endfor %}
-{% else %}<div class="small" style="padding:22px 0">No recent security events.</div>{% endif %}
+{% else %}<div class="muted" style="padding:18px 0">No recent security events.</div>{% endif %}
 </div></section>
-</main></div>
+</main>
 <script>
 function setState(id,text,state){document.getElementById(id+'Text').textContent=text;const d=document.getElementById(id+'Dot');d.className='dot '+state}
 async function refresh(){
@@ -10160,8 +10345,7 @@ async function runRecovery(){
  }catch(e){n.textContent='Could not complete the check.'} setTimeout(()=>{n.classList.remove('show')},5000);refresh()
 }
 refresh();setInterval(refresh,10000);
-</script></body></html>
-"""
+</script>""", active="dashboard")
 
 
 
@@ -10177,15 +10361,33 @@ def _save_customer_settings(data):
     CUSTOMER_SETTINGS_FILE.parent.mkdir(parents=True,exist_ok=True)
     tmp=CUSTOMER_SETTINGS_FILE.with_suffix(".tmp");tmp.write_text(json.dumps(safe,indent=2),encoding="utf-8");os.replace(tmp,CUSTOMER_SETTINGS_FILE);return safe
 
-SETTINGS_PAGE="""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Settings</title><style>
-body{margin:0;background:#071019;color:#eef7fc;font-family:Segoe UI,Arial}.w{max-width:900px;margin:auto;padding:28px}.c{background:#0d1924;border:1px solid #1d3445;border-radius:16px;padding:20px;margin:14px 0}.r{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:14px 0;border-bottom:1px solid #183040}.r:last-child{border:0}.m{color:#8fa6b5;font-size:13px}.t{width:48px;height:26px}.b{background:#22b7ff;border:0;border-radius:10px;padding:11px 16px;font-weight:800;cursor:pointer}.a{color:#9edfff;text-decoration:none}input[type=number]{background:#071019;color:white;border:1px solid #28506a;border-radius:8px;padding:10px;width:160px}.s{padding:10px 12px;border-radius:9px;background:#102332;margin-top:10px}</style></head><body><div class=w><a class=a href="/">← Dashboard</a><h1>Settings</h1><p class=m>Simple controls for AI, cameras and drones.</p>
-<div class=c><h2>AI & devices</h2>
-<div class=r><div><b>Camera AI</b><div class=m>Person and vehicle detection</div></div><input class=t type=checkbox data-key=camera_ai></div>
-<div class=r><div><b>Face recognition</b></div><input class=t type=checkbox data-key=face_ai></div><div class=r><div><b>License plate recognition</b></div><input class=t type=checkbox data-key=lpr></div>
-<div class=r><div><b>Drone runtime</b><div class=m>Live receiver only when needed</div></div><input class=t type=checkbox data-key=drone_runtime></div><div class=r><div><b>Drone AI</b></div><input class=t type=checkbox data-key=drone_ai></div><div class=r><div><b>Drone tracking assist</b></div><input class=t type=checkbox data-key=drone_tracking></div></div>
-<div class=c><h2>GPS Dispatch</h2><p class=m>Store the camera location locally. Aircraft movement remains safety-gated behind a compatible flight-control bridge.</p><div class=r><b>Enable GPS Dispatch</b><input class=t type=checkbox data-key=gps_dispatch></div><div class=r><b>Camera latitude</b><input id=lat type=number step=any></div><div class=r><b>Camera longitude</b><input id=lon type=number step=any></div><div class=r><b>Safety radius (m)</b><input id=radius type=number min=10 max=1000></div><div class=r><b>Require dispatch confirmation</b><input class=t type=checkbox data-key=require_dispatch_confirmation></div><button class=b onclick=save()>Save settings</button><div id=msg class=s>Loading…</div></div>
-<div class=c><h2>Add device</h2><p class=m>Scan the current local network for nearby camera and stream candidates.</p><button class=b onclick="location.href='/setup/discover'">Add camera or drone</button></div></div>
-<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}load()</script></body></html>"""
+SETTINGS_PAGE = hud_page("Settings", r"""
+<main class="hud-main narrow">
+<div class="page-head"><div><div class="page-kicker">Configuration</div><h1 class="page-title">Settings</h1><div class="page-sub">Simple controls for AI, cameras and drones.</div></div></div>
+<section class="panel"><div class="panel-head"><div class="panel-title">◎ AI &amp; devices</div><div class="live">LOCAL</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Camera AI</b><div class="muted">Person and vehicle detection</div></div><input class="toggle" type="checkbox" data-key="camera_ai"></div>
+<div class="hud-row"><div><b>Face recognition</b></div><input class="toggle" type="checkbox" data-key="face_ai"></div>
+<div class="hud-row"><div><b>License plate recognition</b></div><input class="toggle" type="checkbox" data-key="lpr"></div>
+<div class="hud-row"><div><b>Drone runtime</b><div class="muted">Live receiver only when needed</div></div><input class="toggle" type="checkbox" data-key="drone_runtime"></div>
+<div class="hud-row"><div><b>Drone AI</b></div><input class="toggle" type="checkbox" data-key="drone_ai"></div>
+<div class="hud-row"><div><b>Drone tracking assist</b></div><input class="toggle" type="checkbox" data-key="drone_tracking"></div>
+</div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">✈ GPS dispatch</div><div class="live">SAFETY-GATED</div></div><div class="panel-body">
+<p class="muted" style="margin-top:0">Store the camera location locally. Aircraft movement remains safety-gated behind a compatible flight-control bridge.</p>
+<div class="hud-row"><div><b>Enable GPS dispatch</b></div><input class="toggle" type="checkbox" data-key="gps_dispatch"></div>
+<div class="hud-row"><div><b>Camera latitude</b></div><input id="lat" type="number" step="any" style="width:180px"></div>
+<div class="hud-row"><div><b>Camera longitude</b></div><input id="lon" type="number" step="any" style="width:180px"></div>
+<div class="hud-row"><div><b>Safety radius (m)</b></div><input id="radius" type="number" min="10" max="1000" style="width:180px"></div>
+<div class="hud-row"><div><b>Require dispatch confirmation</b></div><input class="toggle" type="checkbox" data-key="require_dispatch_confirmation"></div>
+<div class="actions" style="margin-top:16px"><button class="hud-btn primary" onclick="save()">Save settings</button></div>
+<div id="msg" class="hud-msg">Loading…</div>
+</div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">＋ Add device</div></div><div class="panel-body">
+<p class="muted" style="margin-top:0">Scan the current local network for nearby camera and stream candidates.</p>
+<button class="hud-btn" onclick="location.href='/setup/discover'">Add camera or drone</button>
+</div></section>
+</main>
+<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}load()</script>""", active="settings")
 @app.route("/settings")
 def customer_settings_page():return Response(SETTINGS_PAGE,mimetype="text/html")
 @app.route("/api/customer/settings",methods=["GET","POST"])
