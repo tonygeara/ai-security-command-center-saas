@@ -1,0 +1,47 @@
+# AI Security Command Center: Windows Edge app
+
+The local half of the platform: a launcher window, the dashboard (Flask, port 8080) and the
+local AI services (Frigate, MQTT, MediaMTX in Docker). The cloud portal lives at the repo root.
+
+```
+edge/
+  app/launcher.pyw        launcher window; starts Docker services + dashboard
+  app/dashboard.py        dashboard web app (http://127.0.0.1:8080)
+  runtime/                the ONLY Docker setup (versions pinned)
+  installer/              build.ps1 -> Setup.exe
+```
+
+## Where things live on a PC
+
+| What | Where |
+|---|---|
+| Program (installed) | `%LOCALAPPDATA%\Programs\AI Security Command Center` |
+| Data: Frigate config + database, events, faces, pairing token, logs | `%LOCALAPPDATA%\AI-Security-System` |
+
+Upgrading or uninstalling the program never touches the data folder.
+
+## Build the installer
+
+Needs Python 3.13 and Inno Setup 6 (`winget install -e --id JRSoftware.InnoSetup`).
+
+```
+powershell -ExecutionPolicy Bypass -File edge\installer\build.ps1
+```
+
+Output: `edge\installer\output\AI-Security-Command-Center-Setup-<version>.exe`.
+To release a new version, change `APP_VERSION` in both `app/launcher.pyw` and `app/dashboard.py`.
+
+## Run from source (development)
+
+```
+%LOCALAPPDATA%\AI-Security-System\venv\Scripts\pythonw.exe edge\app\launcher.pyw
+```
+
+Uses the same data folder as the installed app. Stop the installed app first.
+
+## Docker services
+
+The launcher runs `docker compose -p ai-security -f runtime/docker-compose.yml up -d`.
+On first start it removes containers left by older versions (same names, other config
+folders); their data folders are not deleted. Ports are bound to 127.0.0.1 except
+RTMP 1935, which the drone app pushes to over the LAN.

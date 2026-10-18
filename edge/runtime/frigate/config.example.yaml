@@ -1,0 +1,58 @@
+# Starter Frigate config, copied to <data>\frigate\config\config.yaml on first start.
+# Use "Camera / Drone Setup" in the launcher to set the camera address.
+# Put the real camera password in the address there; this file is never committed.
+mqtt:
+  enabled: true
+  host: host.docker.internal
+  port: 1883
+
+go2rtc:
+  streams:
+    camera:
+      - rtsp://USERNAME:PASSWORD@CAMERA-IP:554/stream1
+    drone:
+      - rtsp://host.docker.internal:8556/drone
+
+cameras:
+  camera:
+    enabled: true
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/camera
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+    objects:
+      track:
+        - person
+        - car
+        - motorcycle
+    detect:
+      enabled: true
+  drone:
+    enabled: false
+    ffmpeg:
+      inputs:
+        - path: rtsp://127.0.0.1:8554/drone
+          input_args: preset-rtsp-restream
+          roles:
+            - detect
+    objects:
+      track:
+        - person
+        - car
+        - motorcycle
+    detect:
+      enabled: true
+
+face_recognition:
+  enabled: true
+  model_size: small
+
+lpr:
+  enabled: true
+  model_size: small
+  detection_threshold: 0.5
+  recognition_threshold: 0.6
+  min_area: 500
+  min_plate_length: 4

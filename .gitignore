@@ -4,3 +4,20 @@ node_modules/
 .env.local
 *.log
 .DS_Store
+
+# Windows Edge app: build output and anything private.
+edge/.venv-build/
+edge/installer/build/
+edge/installer/dist/
+edge/installer/output/
+__pycache__/
+*.pyc
+# Never commit device data, camera passwords or tokens.
+edge_agent_config.json
+telegram_config.json
+camera_recovery*.json
+local_settings.json
+known_plates.json
+event_history.csv
+frigate.db
+.jwt_secret
