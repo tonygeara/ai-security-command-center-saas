@@ -1980,7 +1980,70 @@ cloud_state = {
     "limits": {"cameras": None, "drones": None},
     "last_success": 0.0,
     "last_error": "",
+    "offline_grace": False,
+    "grace_expires_at": 0.0,
 }
+
+# A security system must keep running when the internet or the cloud is down.
+# The last good license is cached locally and honoured for LICENSE_GRACE_SECONDS.
+LICENSE_CACHE_FILE = os.path.join(BASE_FOLDER, "license_cache.json")
+LICENSE_GRACE_SECONDS = 7 * 24 * 3600
+LICENSE_FIELDS = ("organization_status", "plan_code", "features", "usage", "limits")
+
+def _license_signature(token, payload):
+    import hashlib, hmac
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(token.encode("utf-8"), body, hashlib.sha256).hexdigest()
+
+def save_license_cache(token, data, saved_at):
+    payload = {k: data.get(k) for k in LICENSE_FIELDS}
+    payload["saved_at"] = saved_at
+    try:
+        tmp = LICENSE_CACHE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"license": payload, "signature": _license_signature(token, payload)}, f)
+        os.replace(tmp, LICENSE_CACHE_FILE)
+    except Exception as e:
+        print("License cache save error:", e)
+
+def load_license_cache(token, now=None):
+    """Return the cached license if it is genuine and still inside the grace period."""
+    now = now or time.time()
+    try:
+        with open(LICENSE_CACHE_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        payload = raw.get("license") or {}
+        import hmac
+        if not hmac.compare_digest(str(raw.get("signature") or ""), _license_signature(token, payload)):
+            print("License cache ignored: signature mismatch")
+            return None
+        saved_at = float(payload.get("saved_at") or 0)
+        if not 0 < saved_at <= now + 300 or now - saved_at > LICENSE_GRACE_SECONDS:
+            return None
+        return payload
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print("License cache read error:", e)
+        return None
+
+def _apply_license(data, connected, last_success):
+    org_active = str(data.get("organization_status") or "").lower() in {"active", "trial"}
+    features = data.get("features") if isinstance(data.get("features"), dict) else {}
+    with cloud_lock:
+        cloud_state.update({
+            "connected": connected,
+            "licensed": org_active,
+            "organization_status": str(data.get("organization_status") or "unknown"),
+            "plan_code": str(data.get("plan_code") or "unknown"),
+            "features": features,
+            "usage": data.get("usage") if isinstance(data.get("usage"), dict) else {"cameras": 0, "drones": 0},
+            "limits": data.get("limits") if isinstance(data.get("limits"), dict) else {"cameras": None, "drones": None},
+            "last_success": last_success,
+            "offline_grace": not connected,
+            "grace_expires_at": last_success + LICENSE_GRACE_SECONDS,
+        })
+    return org_active, features
 
 def load_edge_agent_config():
     try:
@@ -2038,6 +2101,12 @@ def cloud_control_worker():
         print("Cloud Edge Agent disabled: missing device token.")
         return
 
+    # Start from the cached license so features work immediately, even offline.
+    cached = load_license_cache(token)
+    if cached:
+        _apply_license(cached, connected=False, last_success=float(cached["saved_at"]))
+        print("Using cached license until cloud responds")
+
     while True:
         try:
             response = requests.post(
@@ -2048,20 +2117,11 @@ def cloud_control_worker():
             )
             response.raise_for_status()
             data = response.json()
-            org_active = str(data.get("organization_status") or "").lower() in {"active", "trial"}
-            features = data.get("features") if isinstance(data.get("features"), dict) else {}
+            now = time.time()
+            org_active, features = _apply_license(data, connected=True, last_success=now)
             with cloud_lock:
-                cloud_state.update({
-                    "connected": True,
-                    "licensed": org_active,
-                    "organization_status": str(data.get("organization_status") or "unknown"),
-                    "plan_code": str(data.get("plan_code") or "unknown"),
-                    "features": features,
-                    "usage": data.get("usage") if isinstance(data.get("usage"), dict) else {"cameras": 0, "drones": 0},
-                    "limits": data.get("limits") if isinstance(data.get("limits"), dict) else {"cameras": None, "drones": None},
-                    "last_success": time.time(),
-                    "last_error": "",
-                })
+                cloud_state["last_error"] = ""
+            save_license_cache(token, data, now)
 
             # Enforce cloud subscription controls locally.
             drone_ai_allowed = org_active and bool((features.get("drone_ai") or {}).get("enabled"))
@@ -2085,6 +2145,14 @@ def cloud_control_worker():
             with cloud_lock:
                 cloud_state["connected"] = False
                 cloud_state["last_error"] = str(e)
+                last_success = float(cloud_state.get("last_success") or 0)
+                if last_success and time.time() - last_success <= LICENSE_GRACE_SECONDS:
+                    # Keep the last good license; features stay on while offline.
+                    cloud_state["offline_grace"] = True
+                elif cloud_state.get("licensed"):
+                    cloud_state["licensed"] = False
+                    cloud_state["offline_grace"] = False
+                    print("Offline grace period expired: licensed features disabled")
             print("Cloud Edge Agent poll error:", e)
 
         time.sleep(CLOUD_POLL_SECONDS)
@@ -3655,7 +3723,7 @@ def _write_managed_frigate(camera_name, source_url):
         "objects": {"track": ["person", "car", "motorcycle"]}, "detect": {"enabled": True}})
     camera["enabled"] = True
     camera["ffmpeg"] = {"inputs": [{"path": f"rtsp://127.0.0.1:8554/{camera_name}",
-                                    "input_args": "preset-rtsp-restream", "roles": ["detect"]}]}
+                                    "input_args": "preset-rtsp-restream", "roles": ["detect", "record"]}]}
     cameras[camera_name] = camera
     cfg.setdefault("go2rtc", {}).setdefault("streams", {})[camera_name] = [source_url]
     shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-camera-setup")
@@ -3669,16 +3737,20 @@ def _write_fresh_frigate(camera_name, source_url):
     import yaml
     cfg = {
       "mqtt":{"host":"host.docker.internal","port":1883},
-      "go2rtc":{"streams":{camera_name: source_url}},
-      "detectors":{"cpu1":{"type":"cpu"}},
+      "go2rtc":{"streams":{camera_name: [source_url]}},
+      # Same defaults as edge/runtime/frigate/config.example.yaml.
+      "detectors":{"ov":{"type":"openvino","device":"CPU"}},
+      "model":{"width":300,"height":300,"input_tensor":"nhwc","input_pixel_format":"bgr",
+               "path":"/openvino-model/ssdlite_mobilenet_v2.xml","labelmap_path":"/openvino-model/coco_91cl_bkgr.txt"},
+      "record":{"enabled":True,"motion":{"days":3},
+                "alerts":{"retain":{"days":14,"mode":"motion"}},"detections":{"retain":{"days":14,"mode":"motion"}}},
+      "snapshots":{"enabled":True,"bounding_box":True,"retain":{"default":14}},
       "objects":{"track":["person","car","motorcycle"]},
       "cameras":{camera_name:{
         "ffmpeg":{"inputs":[
-          {"path":source_url,"roles":["detect"]},
-          {"path":f"rtsp://127.0.0.1:8554/{camera_name}","input_args":"preset-rtsp-restream","roles":["record"]}
+          {"path":f"rtsp://127.0.0.1:8554/{camera_name}","input_args":"preset-rtsp-restream","roles":["detect","record"]}
         ]},
-        "detect":{"enabled":True},
-        "record":{"enabled":False}
+        "detect":{"enabled":True}
       }}
     }
     os.makedirs(os.path.dirname(LIVE_FRIGATE_CONFIG), exist_ok=True)
@@ -10334,8 +10406,12 @@ async function refresh(){
   const rc=(r.cameras||{}).tony||{}; const rs=rc.status||'monitoring';
   document.getElementById('recoveryDetail').textContent=rs==='stream_unavailable'?'Camera found — enable RTSP or check camera account':rs==='reconnected'?'IP changed — reconnected automatically':rs==='network_changed'?'Network changed — finding your camera…':rs==='recovering'?'Finding your camera…':rs==='checking'?'Checking camera…':rs==='offline'?'Camera offline — recovery will retry':'Monitoring network changes';
   document.getElementById('recoveryLabel').textContent=rs==='stream_unavailable'?'Camera found — video unavailable':rs==='reconnected'?'Reconnected automatically':rs==='network_changed'?'Network changed — reconnecting…':rs==='recovering'?'Reconnecting automatically…':rs==='checking'?'Checking connection…':'Automatic recovery active';
-  document.getElementById('planText').textContent=cl.plan_code?('Plan: '+String(cl.plan_code).toUpperCase()):(cl.connected?'Cloud connected':'Local mode');
-  document.getElementById('cloudState').textContent=cl.connected?'●':'○';
+  const plan=cl.plan_code&&cl.plan_code!=='unknown'?'Plan: '+String(cl.plan_code).toUpperCase():'';
+  document.getElementById('planText').textContent=cl.connected?(plan||'Cloud connected')
+    :cl.offline_grace?('Offline — license valid until '+new Date(cl.grace_expires_at*1000).toLocaleDateString())
+    :'Offline — features locked until the cloud is reachable';
+  const cs=document.getElementById('cloudState');cs.textContent=cl.connected?'● ONLINE':cl.offline_grace?'● OFFLINE MODE':'○ OFFLINE';
+  cs.style.color=cl.connected?'#2aea88':cl.offline_grace?'#ffb23c':'#ff5d6c';
  }catch(e){setState('cam','Needs attention','bad')}
 }
 async function runRecovery(){

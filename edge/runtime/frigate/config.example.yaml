@@ -22,6 +22,7 @@ cameras:
           input_args: preset-rtsp-restream
           roles:
             - detect
+            - record
     objects:
       track:
         - person
@@ -37,6 +38,7 @@ cameras:
           input_args: preset-rtsp-restream
           roles:
             - detect
+            - record
     objects:
       track:
         - person
@@ -44,6 +46,38 @@ cameras:
         - motorcycle
     detect:
       enabled: true
+
+# OpenVINO detector: faster than the default CPU detector, bundled in the Frigate image.
+detectors:
+  ov:
+    type: openvino
+    device: CPU
+model:
+  width: 300
+  height: 300
+  input_tensor: nhwc
+  input_pixel_format: bgr
+  path: /openvino-model/ssdlite_mobilenet_v2.xml
+  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+
+# Keep footage: motion clips 3 days, alerts/detections 14 days.
+record:
+  enabled: true
+  motion:
+    days: 3
+  alerts:
+    retain:
+      days: 14
+      mode: motion
+  detections:
+    retain:
+      days: 14
+      mode: motion
+snapshots:
+  enabled: true
+  bounding_box: true
+  retain:
+    default: 14
 
 face_recognition:
   enabled: true
