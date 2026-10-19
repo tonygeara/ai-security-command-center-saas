@@ -11050,7 +11050,11 @@ def _recover_camera(camera_name):
             current_mac=(_neighbor_mac(ip) or "").lower()
 
         identity_ok=(not expected_mac) or (current_mac and current_mac==expected_mac)
-        if (not network_changed) and _ip_on_active_lan(ip) and identity_ok and _port(ip,port,.15) and _rtsp_auth_probe(url,3):
+        # Frigate receiving frames proves the stream works. Opening another RTSP session
+        # here often missed its 3 s window (Tapo is slow to start sessions and limits how
+        # many it allows), which sent every check into a full 254-address ping sweep.
+        stream_ok = frigate_camera_online() or _rtsp_auth_probe(url,6)
+        if (not network_changed) and _ip_on_active_lan(ip) and identity_ok and _port(ip,port,.5) and stream_ok:
             rec.update({"last_ip":ip,"stream":stream,"status":"online","last_ok":int(time.time()),"network":current_net})
             if current_mac:rec["mac"]=current_mac
             _save_recovery_state(state)
