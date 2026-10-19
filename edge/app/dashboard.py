@@ -11001,9 +11001,9 @@ def _discover_same_camera(camera_name, expected_mac, old_url):
             candidates=[ip for ip,mac in neighbors.items() if mac.lower()==expected_mac.lower()]
     # Enroll identity explicitly instead of sending saved credentials to unknown devices.
     if not expected_mac:return None
-    # Prefer the previously working Tapo stream, then try stream1/stream2.
+    # Prefer the previously working stream (main quality first), then the other Tapo stream.
     paths=[]
-    for p in (old_stream,"/stream2","/stream1"):
+    for p in (old_stream,"/stream1","/stream2"):
         if p not in paths:paths.append(p)
     from urllib.parse import quote
     for ip in candidates:
@@ -11011,7 +11011,8 @@ def _discover_same_camera(camera_name, expected_mac, old_url):
             return {"ip":ip,"mac":neighbors.get(ip),"stream":old_stream,"adapter":adapter,"stream_ready":False}
         for pth in paths:
             url=f"rtsp://{quote(user,safe='')}:{quote(pw,safe='')}@{ip}:{port}{pth}"
-            if _rtsp_auth_probe(url,4):
+            # Give the stream the user had more time before falling back to another one.
+            if _rtsp_auth_probe(url,8 if pth==old_stream else 4):
                 return {"ip":ip,"mac":neighbors.get(ip),"stream":pth,"adapter":adapter,"stream_ready":True}
         return {"ip":ip,"mac":neighbors.get(ip),"stream":old_stream,"adapter":adapter,"stream_ready":False}
     return None
@@ -11033,10 +11034,13 @@ def _recover_camera(camera_name):
         # V10.9: detect LAN changes and never authenticate against a stale/reused IP.
         current_net=_network_signature()
         previous_net=rec.get("network") or {}
-        network_changed=bool(previous_net and (
-            previous_net.get("gateway") != current_net.get("gateway") or
-            previous_net.get("network") != current_net.get("network")
-        ))
+        # Compare only values both checks actually read: under heavy CPU load the Windows
+        # network query can time out and return a blank gateway, which looked like a
+        # network change and triggered needless camera rediscovery and Frigate restarts.
+        def _changed(key):
+            a, b = previous_net.get(key), current_net.get(key)
+            return bool(a and b and a != b)
+        network_changed=bool(previous_net and (_changed("gateway") or _changed("network")))
         expected_mac=(rec.get("mac") or "").lower()
         current_mac=None
         if _ip_on_active_lan(ip):
@@ -11063,7 +11067,9 @@ def _recover_camera(camera_name):
             rec.update({"last_ip":found["ip"],"mac":found["mac"],"status":"stream_unavailable","last_check":int(time.time())})
             _save_recovery_state(state)
             return {"ok":False,"state":"stream_unavailable","ip":found["ip"],"message":"Camera identified; RTSP video is unavailable. Enable RTSP and check the camera account."}
-        if found["ip"]==ip and found["stream"]==stream:
+        if found["ip"]==ip:
+            # Same camera at the same address: a probe just timed out (busy PC or network blip).
+            # Never rewrite the config or switch to another stream for that; keep the user's stream.
             rec.update({"last_ip":ip,"mac":found.get("mac") or rec.get("mac"),"stream":stream,
                         "status":"online","last_ok":int(time.time()),"network":_network_signature()})
             _save_recovery_state(state)
