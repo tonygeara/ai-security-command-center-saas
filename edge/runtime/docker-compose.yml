@@ -39,6 +39,8 @@ services:
       - "127.0.0.1:8554:8554"
       - "127.0.0.1:8555:8555/tcp"
       - "127.0.0.1:8555:8555/udp"
+      - "127.0.0.1:1984:1984"   # go2rtc: the dashboard's real-time live view (local only)
+      - "127.0.0.1:5000:5000"   # Frigate API: snapshots and camera status (local only)
     volumes:
       - "${AI_SECURITY_DATA:?set by the launcher}/frigate/config:/config"
       - "${AI_SECURITY_DATA:?set by the launcher}/frigate/storage:/media/frigate"

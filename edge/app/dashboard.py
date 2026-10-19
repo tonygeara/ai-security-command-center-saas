@@ -736,7 +736,17 @@ def _prune_unknown_tracking(now=None):
 
 def _snapshot_bytes():
     with jpeg_lock:
-        return bytes(latest_jpeg) if latest_jpeg else None
+        if latest_jpeg:
+            return bytes(latest_jpeg)
+    # Local reader idle: take Frigate's latest frame, with detection boxes drawn.
+    try:
+        r = requests.get(f"{FRIGATE_API_URL}/api/{CAMERA_NAME}/latest.jpg",
+                         params={"bbox": 1, "h": 720}, timeout=3)
+        if r.ok and r.content[:2] == b"\xff\xd8":
+            return r.content
+    except Exception as e:
+        print("Frigate snapshot error:", e)
+    return None
 
 
 def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_bytes=None):
@@ -1037,6 +1047,43 @@ threading.Thread(
 # CAMERA
 # ============================================================
 
+# The browser plays the live view straight from Frigate's go2rtc relay, so the dashboard
+# only decodes the camera itself when something needs frames here: an MJPEG fallback
+# viewer, face enrollment, or a short on-demand request. Decoding the stream full-time
+# in Python cost ~15-20% of the PC and lagged ~1 s behind.
+FRIGATE_API_URL = os.environ.get("AI_SECURITY_FRIGATE_API", "http://127.0.0.1:5000")
+GO2RTC_URL = os.environ.get("AI_SECURITY_GO2RTC_URL", "http://127.0.0.1:1984")
+live_viewers = 0
+live_viewers_lock = threading.Lock()
+frame_demand_until = 0.0
+_frigate_online_cache = {"at": 0.0, "online": False}
+
+
+def request_frames(seconds=8.0):
+    """Ask the camera reader to run for at least `seconds`."""
+    global frame_demand_until
+    frame_demand_until = max(frame_demand_until, time.time() + seconds)
+
+
+def frames_wanted():
+    return live_viewers > 0 or bool(enrollment.get("running")) or time.time() < frame_demand_until
+
+
+def frigate_camera_online():
+    """Camera status from Frigate (cached 5 s), used while the local reader is idle."""
+    now = time.time()
+    if now - _frigate_online_cache["at"] < 5:
+        return _frigate_online_cache["online"]
+    online = False
+    try:
+        stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=2).json()
+        online = float(((stats.get("cameras") or {}).get(CAMERA_NAME) or {}).get("camera_fps") or 0) > 0
+    except Exception:
+        pass
+    _frigate_online_cache.update(at=now, online=online)
+    return online
+
+
 def camera_worker():
     global latest_frame
     global camera_connected
@@ -1045,9 +1092,9 @@ def camera_worker():
 
     while True:
         try:
-            # Close the local RTSP reader while Camera AI is disabled.
-            if not camera_enabled_runtime:
-                camera_connected = False
+            # Close the local RTSP reader while Camera AI is disabled or nothing needs frames.
+            if not camera_enabled_runtime or not frames_wanted():
+                camera_connected = bool(camera_enabled_runtime and frigate_camera_online())
                 if cap is not None:
                     try:
                         cap.release()
@@ -2201,28 +2248,61 @@ def get_events(limit=8):
 # ============================================================
 
 def generate_frames():
-    while True:
-        jpg = None
+    # MJPEG fallback (and the enrollment preview): keeps the local reader running while open.
+    global live_viewers
+    with live_viewers_lock:
+        live_viewers += 1
+    try:
+        while True:
+            jpg = None
 
-        with jpeg_lock:
-            if latest_jpeg is not None:
-                jpg = latest_jpeg
+            with jpeg_lock:
+                if latest_jpeg is not None:
+                    jpg = latest_jpeg
 
-        if jpg is None:
-            time.sleep(0.1)
+            if jpg is None:
+                time.sleep(0.1)
 
-            continue
+                continue
 
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n\r\n"
-            + jpg
-            + b"\r\n"
-        )
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n"
+                + jpg
+                + b"\r\n"
+            )
 
-        time.sleep(
-            1.0 / MAIN_STREAM_FPS
-        )
+            time.sleep(
+                1.0 / MAIN_STREAM_FPS
+            )
+    finally:
+        with live_viewers_lock:
+            live_viewers -= 1
+
+
+_detect_size_cache = {"at": 0.0, "size": (1280, 720)}
+
+
+def camera_detect_size():
+    """Frigate's detect resolution: the coordinate space of detection boxes (cached 60 s)."""
+    now = time.time()
+    if now - _detect_size_cache["at"] > 60:
+        _detect_size_cache["at"] = now
+        try:
+            cfg = requests.get(f"{FRIGATE_API_URL}/api/config", timeout=3).json()
+            detect = ((cfg.get("cameras") or {}).get(CAMERA_NAME) or {}).get("detect") or {}
+            if detect.get("width") and detect.get("height"):
+                _detect_size_cache["size"] = (int(detect["width"]), int(detect["height"]))
+        except Exception:
+            pass
+    return _detect_size_cache["size"]
+
+
+@app.route("/api/live/config")
+def api_live_config():
+    width, height = camera_detect_size()
+    return jsonify({"go2rtc": GO2RTC_URL, "stream": CAMERA_NAME, "width": width, "height": height,
+                    "fallback": "/video_feed"})
 
 
 # ============================================================
@@ -2546,6 +2626,15 @@ def enrollment_worker(name, source="camera"):
         )
 
         time.sleep(0.25)
+
+        # The local camera reader only runs on demand; give it time to connect.
+        if source != "drone":
+            request_frames(15)
+            for _ in range(50):
+                with frame_lock:
+                    if latest_frame is not None:
+                        break
+                time.sleep(0.2)
 
         successful_samples = 0
 
@@ -3579,6 +3668,110 @@ input.toggle:checked::after{left:25px;background:#45d0ff;box-shadow:0 0 8px #45d
 @media(max-width:560px){.stat-grid{grid-template-columns:1fr}.brand-sub{display:none}.hud-main{padding:16px 12px 32px}}
 """
 
+# Live camera player shared by the dashboard pages. Any element with data-live-camera
+# plays the camera straight from Frigate's go2rtc relay (MSE over WebSocket, decoded by
+# the browser) with detection boxes drawn on a canvas. Falls back to /video_feed (MJPEG,
+# decoded by this program) when the relay is unavailable.
+LIVE_PLAYER_HTML = r"""
+<style>
+.live-slot{position:relative;width:100%;height:100%;background:#000;overflow:hidden}
+.live-slot video-stream,.live-slot video,.live-slot>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;background:#000}
+.live-slot canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+.live-mode{position:absolute;right:12px;top:10px;z-index:3;font:bold 9px Arial,sans-serif;letter-spacing:1px;color:#2aea88;
+  background:rgba(3,16,26,.8);border:1px solid #155879;padding:4px 7px;border-radius:3px}
+.live-mode.compat{color:#ffb23c}
+</style>
+<script type="module">
+const cfg = await fetch("/api/live/config", {cache: "no-store"}).then(r => r.json()).catch(() => null);
+
+function setMode(slot, text, compat) {
+    let tag = slot.querySelector(".live-mode");
+    if (!tag) { tag = document.createElement("div"); tag.className = "live-mode"; slot.appendChild(tag); }
+    tag.textContent = text;
+    tag.classList.toggle("compat", !!compat);
+}
+
+function useFallback(slot, why) {
+    slot.querySelector("video-stream")?.remove();
+    if (!slot.querySelector(":scope > img")) {
+        const img = new Image();
+        img.alt = "Live camera";
+        img.src = (cfg && cfg.fallback) || "/video_feed";
+        slot.prepend(img);
+    }
+    slot.dataset.mode = "mjpeg";
+    setMode(slot, "COMPATIBILITY MODE", true);
+    console.info("Live view fallback:", why);
+}
+
+function drawOverlays(slot) {
+    const canvas = document.createElement("canvas");
+    slot.appendChild(canvas);
+    const ctx = canvas.getContext("2d");
+    let items = [];
+    const render = () => {
+        const w = slot.clientWidth, h = slot.clientHeight, dpr = window.devicePixelRatio || 1;
+        canvas.width = w * dpr; canvas.height = h * dpr;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        if (slot.dataset.mode !== "direct") return;  // the MJPEG fallback has boxes drawn in
+        const vw = cfg.width || 1280, vh = cfg.height || 720, s = Math.min(w / vw, h / vh);
+        const ox = (w - vw * s) / 2, oy = (h - vh * s) / 2;
+        for (const it of items) {
+            const color = it.known ? "#00dc50" : "#ffa500";
+            let X = ox + 18, Y = oy + 18, W = vw * s - 36, H = vh * s - 36;  // no box: frame the view
+            if (Array.isArray(it.box) && it.box.length === 4) {
+                const [x1, y1, x2, y2] = it.box.map(Number);
+                X = ox + x1 * s; Y = oy + y1 * s; W = (x2 - x1) * s; H = (y2 - y1) * s;
+            }
+            ctx.lineWidth = 3; ctx.strokeStyle = color; ctx.strokeRect(X, Y, W, H);
+            let label = String(it.label || (it.kind === "face" ? "PERSON" : "VEHICLE"));
+            if (it.plate) label += " | " + it.plate;
+            ctx.font = "bold 13px Arial, sans-serif";
+            const tw = ctx.measureText(label).width + 12, ty = Math.max(0, Y - 20);
+            ctx.fillStyle = color; ctx.fillRect(X, ty, tw, 20);
+            ctx.fillStyle = "#000"; ctx.fillText(label, X + 6, ty + 15);
+        }
+    };
+    const poll = async () => {
+        if (slot.dataset.mode === "direct" && !document.hidden) {
+            try {
+                const st = await fetch("/api/status", {cache: "no-store"}).then(r => r.json());
+                items = [...(st.active_faces || []).map(f => ({...f, kind: "face"})),
+                         ...(st.active_vehicles || []).map(v => ({...v, kind: "vehicle"}))];
+            } catch (e) { items = []; }
+        }
+        render();
+    };
+    setInterval(poll, 700);
+    window.addEventListener("resize", render);
+    poll();
+}
+
+async function attach(slot) {
+    if (!cfg || !cfg.go2rtc) return useFallback(slot, "no live config");
+    try { await import(cfg.go2rtc + "/video-stream.js"); }
+    catch (e) { return useFallback(slot, "relay player unavailable"); }
+    const el = document.createElement("video-stream");
+    el.mode = "mse";          // MSE over WebSocket works through Docker's localhost-only ports
+    el.background = false;    // pause while the page is hidden, to save CPU
+    el.src = cfg.go2rtc.replace(/^http/, "ws") + "/api/ws?src=" + encodeURIComponent(cfg.stream);
+    slot.prepend(el);
+    slot.dataset.mode = "direct";
+    setMode(slot, "● REAL-TIME");
+    const started = Date.now();
+    const check = setInterval(() => {
+        const v = el.querySelector("video");
+        if (v && v.currentTime > 0) { clearInterval(check); return; }
+        if (Date.now() - started > 8000) { clearInterval(check); useFallback(slot, "no video from relay"); }
+    }, 500);
+    drawOverlays(slot);
+}
+
+document.querySelectorAll("[data-live-camera]").forEach(attach);
+</script>
+"""
+
 HUD_NAV_ITEMS = [
     ("dashboard", "/", "⌂", "Dashboard"),
     ("control", "/legacy", "⌁", "Drones & Control"),
@@ -3739,9 +3932,7 @@ def _write_fresh_frigate(camera_name, source_url):
       "mqtt":{"host":"host.docker.internal","port":1883},
       "go2rtc":{"streams":{camera_name: [source_url]}},
       # Same defaults as edge/runtime/frigate/config.example.yaml.
-      "detectors":{"ov":{"type":"openvino","device":"CPU"}},
-      "model":{"width":300,"height":300,"input_tensor":"nhwc","input_pixel_format":"bgr",
-               "path":"/openvino-model/ssdlite_mobilenet_v2.xml","labelmap_path":"/openvino-model/coco_91cl_bkgr.txt"},
+      "detectors":{"cpu1":{"type":"cpu","num_threads":3}},
       "record":{"enabled":True,"motion":{"days":3},
                 "alerts":{"retain":{"days":14,"mode":"motion"}},"detections":{"retain":{"days":14,"mode":"motion"}}},
       "snapshots":{"enabled":True,"bounding_box":True,"retain":{"default":14}},
@@ -7131,10 +7322,7 @@ MQTT EVENT BUS
 
 <div class="camera-box">
 
-<img
-    class="camera"
-    src="/video_feed"
->
+<div class="camera live-slot" data-live-camera style="aspect-ratio:16/9;min-height:0"></div>
 
 <div class="corner tl"></div>
 <div class="corner tr"></div>
@@ -7798,8 +7986,9 @@ SECURE BIOMETRIC FACE ENROLLMENT
 
 <img
     id="enrollCameraFeed"
-    src="/video_feed"
+    data-src="/video_feed"
     class="enroll-live-camera"
+    alt=""
 >
 
 <div class="enroll-blue-filter"></div>
@@ -9643,12 +9832,33 @@ function biometricFailureSound() {
 
 
 
+/* Stream the enrollment preview only while its window is open, so the dashboard
+   doesn't decode the camera in the background. */
+(function () {
+    const overlay = document.getElementById("faceEnrollOverlay");
+    const feed = document.getElementById("enrollCameraFeed");
+    if (!overlay || !feed) return;
+    const sync = () => {
+        if (overlay.classList.contains("open")) {
+            if (feed.dataset.on !== "1") { feed.src = feed.dataset.src || "/video_feed"; feed.dataset.on = "1"; }
+        } else if (feed.dataset.on === "1") {
+            feed.src = "data:,";  // aborts the open MJPEG connection
+            feed.dataset.on = "0";
+        }
+    };
+    new MutationObserver(sync).observe(overlay, {attributes: true, attributeFilter: ["class"]});
+    sync();
+})();
+
 /* Enrollment source preview */
 const faceEnrollSource = document.getElementById("faceEnrollSource");
 if (faceEnrollSource) {
     faceEnrollSource.addEventListener("change", () => {
         const feed = document.getElementById("enrollCameraFeed");
-        if (feed) feed.src = faceEnrollSource.value === "drone" ? "/drone_video_feed" : "/video_feed";
+        if (feed) {
+            feed.dataset.src = faceEnrollSource.value === "drone" ? "/drone_video_feed" : "/video_feed";
+            if (feed.dataset.on === "1") feed.src = feed.dataset.src;
+        }
         const msg = document.getElementById("enrollMessage");
         if (msg) msg.innerText = faceEnrollSource.value === "drone"
             ? "DRONE selected — turn Drone AI ON and position one face clearly in the drone view."
@@ -10322,6 +10532,8 @@ openPanelFromHash();
 
 
 PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("control"))
+_body_end = PAGE.rfind("</body>")
+PAGE = PAGE[:_body_end] + LIVE_PLAYER_HTML + PAGE[_body_end:]
 
 PAIRING_PAGE = hud_page("Pair Device", """
 <main class="hud-main" style="max-width:560px;padding-top:8vh">
@@ -10367,7 +10579,7 @@ CUSTOMER_PAGE = hud_page("Dashboard", """
 </section>
 <section class="grid-2">
 <div class="panel"><div class="panel-head"><div class="panel-title">▣ Live camera feed</div><div id="liveBadge" class="live">● LIVE</div></div>
-<div class="camera-box"><img src="/video_feed" alt="Front camera live view">
+<div class="camera-box"><div class="live-slot" data-live-camera></div>
 <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
 <div class="overlay-tag" id="recoveryLabel">Automatic recovery active</div></div>
 <div class="camera-footer"><div class="cam-name">CAM 01</div><div>FRONT CAMERA • FACE AI • LPR AI</div></div></div>
@@ -10421,7 +10633,7 @@ async function runRecovery(){
  }catch(e){n.textContent='Could not complete the check.'} setTimeout(()=>{n.classList.remove('show')},5000);refresh()
 }
 refresh();setInterval(refresh,10000);
-</script>""", active="dashboard")
+</script>""" + LIVE_PLAYER_HTML, active="dashboard")
 
 
 

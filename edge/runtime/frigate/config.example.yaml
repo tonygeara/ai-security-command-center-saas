@@ -47,18 +47,12 @@ cameras:
     detect:
       enabled: true
 
-# OpenVINO detector: faster than the default CPU detector, bundled in the Frigate image.
+# Default CPU detector capped at 3 threads. (OpenVINO on CPU grabs every thread and
+# starved the rest of the system under real load.)
 detectors:
-  ov:
-    type: openvino
-    device: CPU
-model:
-  width: 300
-  height: 300
-  input_tensor: nhwc
-  input_pixel_format: bgr
-  path: /openvino-model/ssdlite_mobilenet_v2.xml
-  labelmap_path: /openvino-model/coco_91cl_bkgr.txt
+  cpu1:
+    type: cpu
+    num_threads: 3
 
 # Keep footage: motion clips 3 days, alerts/detections 14 days.
 record:
