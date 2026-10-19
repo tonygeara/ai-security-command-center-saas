@@ -38,6 +38,7 @@ from flask import (
     render_template_string,
     send_from_directory,
     request,
+    redirect,
 )
 
 
@@ -3774,10 +3775,9 @@ document.querySelectorAll("[data-live-camera]").forEach(attach);
 
 HUD_NAV_ITEMS = [
     ("dashboard", "/", "⌂", "Dashboard"),
-    ("control", "/legacy", "⌁", "Drones & Control"),
-    ("events", "/legacy#history", "◷", "Events"),
-    ("people", "/legacy#face-library", "◎", "People"),
-    ("vehicles", "/legacy#vehicle-library", "▱", "Vehicles"),
+    ("events", "/#history", "◷", "Events"),
+    ("people", "/#face-library", "◎", "People"),
+    ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
     ("devices", "/setup/discover", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
 ]
@@ -10512,7 +10512,7 @@ function refreshDroneFeedStatus() {
 setInterval(refreshDroneFeedStatus, 1000);
 refreshDroneFeedStatus();
 
-/* Links like /legacy#history from the other pages open the matching panel. */
+/* Links like /#history from the other pages open the matching panel. */
 function openPanelFromHash() {
     const h = location.hash;
     if (h === "#history") openEventHistory();
@@ -10531,7 +10531,7 @@ openPanelFromHash();
 
 
 
-PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("control"))
+PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard"))
 _body_end = PAGE.rfind("</body>")
 PAGE = PAGE[:_body_end] + LIVE_PLAYER_HTML + PAGE[_body_end:]
 
@@ -10565,75 +10565,7 @@ btn.onclick=async()=>{
 
 
 
-CUSTOMER_PAGE = hud_page("Dashboard", """
-<main class="hud-main">
-<div class="page-head"><div><div class="page-kicker">Overview</div><h1 class="page-title">Security Status</h1>
-<div class="page-sub">Your security system at a glance.</div></div>
-<div class="actions"><button class="hud-btn" onclick="location.href='/setup/discover'">Add device</button><button class="hud-btn primary" onclick="runRecovery()">Check system</button></div></div>
-<div id="notice" class="notice hud-msg" style="margin:0 0 16px"></div>
-<section class="stat-grid">
-<div class="stat"><div class="stat-label">Front camera</div><div class="stat-value"><span id="camDot" class="dot"></span><span id="camText">Checking…</span></div></div>
-<div class="stat"><div class="stat-label">AI detection</div><div class="stat-value"><span id="aiDot" class="dot"></span><span id="aiText">Checking…</span></div></div>
-<div class="stat"><div class="stat-label">Drone</div><div class="stat-value"><span id="droneDot" class="dot"></span><span id="droneText">Checking…</span></div></div>
-<div class="stat"><div class="stat-label">Edge agent</div><div class="stat-value"><span id="edgeDot" class="dot"></span><span id="edgeText">Connected</span></div></div>
-</section>
-<section class="grid-2">
-<div class="panel"><div class="panel-head"><div class="panel-title">▣ Live camera feed</div><div id="liveBadge" class="live">● LIVE</div></div>
-<div class="camera-box"><div class="live-slot" data-live-camera></div>
-<div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
-<div class="overlay-tag" id="recoveryLabel">Automatic recovery active</div></div>
-<div class="camera-footer"><div class="cam-name">CAM 01</div><div>FRONT CAMERA • FACE AI • LPR AI</div></div></div>
-<div class="panel"><div class="panel-head"><div class="panel-title">⚙ System</div><div class="live">AUTOMATIC</div></div><div class="panel-body">
-<div class="hud-row"><div><b>Camera recovery</b><div class="muted" id="recoveryDetail">Monitoring network changes</div></div><span class="state" id="recoveryState">●</span></div>
-<div class="hud-row"><div><b>People recognition</b><div class="muted">Known &amp; unknown people</div></div><span class="state" id="faceState">—</span></div>
-<div class="hud-row"><div><b>License plate recognition</b><div class="muted">Vehicle events</div></div><span class="state" id="lprState">—</span></div>
-<div class="hud-row"><div><b>Cloud connection</b><div class="muted" id="planText">Checking subscription</div></div><span class="state" id="cloudState">●</span></div>
-<div class="actions" style="margin-top:14px"><button class="hud-btn" onclick="location.href='/legacy'">Open drones &amp; control</button></div>
-</div></div>
-</section>
-<section class="panel"><div class="panel-head"><div class="panel-title">◷ Recent security events</div><button class="hud-btn" onclick="location.href='/legacy#history'">View all</button></div>
-<div class="panel-body" style="padding-top:4px;padding-bottom:6px">
-{% if events %}
-{% for e in events[:5] %}
-<div class="event-row">{% if e.image_file %}<img class="thumb" src="/events/{{e.image_file}}" alt="">{% else %}<div class="thumb"></div>{% endif %}
-<div><div class="event-type{% if 'UNKNOWN' in (e.get('Type', '')|upper) %} unknown{% endif %}">{{ e.get('Type', e.get('Event','Security event')) }}</div><div class="muted">{{ e.get('Name', e.get('Details','')) }}</div></div>
-<div class="muted">{{ e.get('Date', '') }} {{ e.get('Time', e.get('Timestamp','')) }}</div></div>
-{% endfor %}
-{% else %}<div class="muted" style="padding:18px 0">No recent security events.</div>{% endif %}
-</div></section>
-</main>
-<script>
-function setState(id,text,state){document.getElementById(id+'Text').textContent=text;const d=document.getElementById(id+'Dot');d.className='dot '+state}
-async function refresh(){
- try{
-  const [c,a,d,r,cl]=await Promise.all([
-   fetch('/api/camera/status').then(x=>x.json()),fetch('/api/object_ai/status').then(x=>x.json()),
-   fetch('/api/drone/status').then(x=>x.json()),fetch('/api/recovery/status').then(x=>x.json()),
-   fetch('/api/cloud/status').then(x=>x.json())
-  ]);
-  setState('cam',c.connected?'Online':(c.enabled?'Reconnecting…':'Off'),c.connected?'good':(c.enabled?'warn':'bad'));
-  setState('ai',a.enabled?'Active':'Off',a.enabled?'good':'warn');
-  setState('drone',d.video?'Online':(d.enabled?'Waiting…':'Offline'),d.video?'good':(d.enabled?'warn':''));
-  document.getElementById('edgeDot').className='dot good';
-  const rc=(r.cameras||{}).tony||{}; const rs=rc.status||'monitoring';
-  document.getElementById('recoveryDetail').textContent=rs==='stream_unavailable'?'Camera found — enable RTSP or check camera account':rs==='reconnected'?'IP changed — reconnected automatically':rs==='network_changed'?'Network changed — finding your camera…':rs==='recovering'?'Finding your camera…':rs==='checking'?'Checking camera…':rs==='offline'?'Camera offline — recovery will retry':'Monitoring network changes';
-  document.getElementById('recoveryLabel').textContent=rs==='stream_unavailable'?'Camera found — video unavailable':rs==='reconnected'?'Reconnected automatically':rs==='network_changed'?'Network changed — reconnecting…':rs==='recovering'?'Reconnecting automatically…':rs==='checking'?'Checking connection…':'Automatic recovery active';
-  const plan=cl.plan_code&&cl.plan_code!=='unknown'?'Plan: '+String(cl.plan_code).toUpperCase():'';
-  document.getElementById('planText').textContent=cl.connected?(plan||'Cloud connected')
-    :cl.offline_grace?('Offline — license valid until '+new Date(cl.grace_expires_at*1000).toLocaleDateString())
-    :'Offline — features locked until the cloud is reachable';
-  const cs=document.getElementById('cloudState');cs.textContent=cl.connected?'● ONLINE':cl.offline_grace?'● OFFLINE MODE':'○ OFFLINE';
-  cs.style.color=cl.connected?'#2aea88':cl.offline_grace?'#ffb23c':'#ff5d6c';
- }catch(e){setState('cam','Needs attention','bad')}
-}
-async function runRecovery(){
- const n=document.getElementById('notice');n.classList.add('show');n.textContent='Checking your system…';
- try{const x=await fetch('/api/recovery/run',{method:'POST'});const d=await x.json();
- n.textContent=d.state==='already_running'?'Automatic recovery is already checking the camera.':d.ok?'System check complete — camera is online.':'Check complete — automatic recovery will keep trying.';
- }catch(e){n.textContent='Could not complete the check.'} setTimeout(()=>{n.classList.remove('show')},5000);refresh()
-}
-refresh();setInterval(refresh,10000);
-</script>""" + LIVE_PLAYER_HTML, active="dashboard")
+
 
 
 
@@ -10730,15 +10662,12 @@ def dashboard():
     if not str(edge_cfg.get("device_token") or "").strip():
         return Response(PAIRING_PAGE, mimetype="text/html")
     events, history_events = _dashboard_context()
-    return render_template_string(CUSTOMER_PAGE, events=events, history_events=history_events)
+    return render_template_string(PAGE, events=events, history_events=history_events)
 
 @app.route("/legacy")
 def legacy_dashboard():
-    edge_cfg = load_edge_agent_config()
-    if not str(edge_cfg.get("device_token") or "").strip():
-        return Response(PAIRING_PAGE, mimetype="text/html")
-    events, history_events = _dashboard_context()
-    return render_template_string(PAGE, events=events, history_events=history_events)
+    # Old address of the full dashboard, which is now the main page.
+    return redirect("/", code=301)
 
 
 @app.route(
