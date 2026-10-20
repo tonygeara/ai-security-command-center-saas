@@ -21,6 +21,9 @@ services:
     restart: unless-stopped
     environment:
       MTX_RTSPTRANSPORTS: tcp
+      # Default 10 s dropped the drone whenever Wi-Fi or a busy PC paused the stream briefly.
+      MTX_READTIMEOUT: 30s
+      MTX_WRITETIMEOUT: 30s
     ports:
       - "1935:1935"             # LAN: the drone app pushes RTMP here
       - "127.0.0.1:8556:8554"   # local: dashboard + Frigate read the drone RTSP
