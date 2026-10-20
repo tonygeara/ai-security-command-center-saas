@@ -30,8 +30,10 @@ cameras:
         - motorcycle
     detect:
       enabled: true
+  # Enabled in config so the dashboard's Drone AI switch can turn it on and off at runtime
+  # (Frigate cannot start a camera that is disabled in its config).
   drone:
-    enabled: false
+    enabled: true
     ffmpeg:
       inputs:
         - path: rtsp://127.0.0.1:8554/drone
@@ -46,6 +48,10 @@ cameras:
         - motorcycle
     detect:
       enabled: true
+      # DJI streams are 1440x1080 (4:3); detect at the same shape so nothing is stretched.
+      width: 960
+      height: 720
+      fps: 5
 
 # Default CPU detector capped at 3 threads. (OpenVINO on CPU grabs every thread and
 # starved the rest of the system under real load.)

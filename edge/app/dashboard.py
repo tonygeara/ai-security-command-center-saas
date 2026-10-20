@@ -226,8 +226,10 @@ drone_tracking = {
     "box": None, "direction": "WAITING", "updated_at": 0.0,
 }
 DRONE_TRACK_TIMEOUT = 3.0
-DRONE_FRAME_WIDTH = 1920
-DRONE_FRAME_HEIGHT = 1080
+# Frigate's drone detect resolution (4:3, matching the DJI 1440x1080 stream); detection
+# boxes arrive in this coordinate space.
+DRONE_FRAME_WIDTH = 960
+DRONE_FRAME_HEIGHT = 720
 
 recognized_name = ""
 recognized_until = 0
@@ -1057,7 +1059,7 @@ GO2RTC_URL = os.environ.get("AI_SECURITY_GO2RTC_URL", "http://127.0.0.1:1984")
 live_viewers = 0
 live_viewers_lock = threading.Lock()
 frame_demand_until = 0.0
-_frigate_online_cache = {"at": 0.0, "online": False}
+_frigate_online_cache = {}
 
 
 def request_frames(seconds=8.0):
@@ -1070,18 +1072,20 @@ def frames_wanted():
     return live_viewers > 0 or bool(enrollment.get("running")) or time.time() < frame_demand_until
 
 
-def frigate_camera_online():
-    """Camera status from Frigate (cached 5 s), used while the local reader is idle."""
+def frigate_camera_online(camera=None):
+    """Camera status from Frigate (cached 5 s per camera), used while the local reader is idle."""
+    camera = camera or CAMERA_NAME
     now = time.time()
-    if now - _frigate_online_cache["at"] < 5:
-        return _frigate_online_cache["online"]
+    cached = _frigate_online_cache.get(camera)
+    if cached and now - cached[0] < 5:
+        return cached[1]
     online = False
     try:
         stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=2).json()
-        online = float(((stats.get("cameras") or {}).get(CAMERA_NAME) or {}).get("camera_fps") or 0) > 0
+        online = float(((stats.get("cameras") or {}).get(camera) or {}).get("camera_fps") or 0) > 0
     except Exception:
         pass
-    _frigate_online_cache.update(at=now, online=online)
+    _frigate_online_cache[camera] = (now, online)
     return online
 
 
@@ -1304,13 +1308,36 @@ threading.Thread(
 # DRONE DASHBOARD VIDEO
 # ============================================================
 
+drone_viewers = 0
+drone_viewers_lock = threading.Lock()
+
+
+def drone_frames_wanted():
+    """The browser plays the drone from the go2rtc relay; decode it here only for the
+    MJPEG fallback viewer or drone face enrollment."""
+    return drone_viewers > 0 or (bool(enrollment.get("running")) and enrollment.get("source") == "drone")
+
+
+def drone_video_online():
+    """Is the drone publishing? Checked without opening a stream: Frigate's drone camera
+    fps while Drone AI is on, otherwise a quick look at the go2rtc relay."""
+    if frigate_camera_online(DRONE_CAMERA_NAME):
+        return True
+    try:
+        info = requests.get(f"{GO2RTC_URL}/api/streams", params={"src": DRONE_CAMERA_NAME}, timeout=2).json()
+        return any(p.get("medias") for p in (info.get("producers") or []))
+    except Exception:
+        return False
+
+
 def drone_camera_worker():
     global drone_latest_frame, drone_source_connected
     cap = None
     while True:
         try:
             # V10.8: do not probe the RTSP drone path while Drone runtime is OFF.
-            if not drone_enabled_runtime:
+            # V11.1: and only decode here when something on this PC needs the frames.
+            if not drone_enabled_runtime or not drone_frames_wanted():
                 if cap is not None:
                     try:
                         cap.release()
@@ -1319,24 +1346,9 @@ def drone_camera_worker():
                     cap = None
                 with drone_frame_lock:
                     drone_latest_frame = None
-                drone_source_connected = False
+                drone_source_connected = bool(drone_enabled_runtime and drone_video_online())
                 time.sleep(2.0)
                 continue
-
-            # Drone video is opened only when the customer enables drone runtime.
-            # This lets the dashboard show the DJI/MediaMTX feed as soon as it exists.
-            if cap is None or not cap.isOpened():
-                try:
-                    _dcfg_path = LIVE_FRIGATE_CONFIG if os.path.exists(LIVE_FRIGATE_CONFIG) else r'C:\frigate\config\config.yaml'
-                    if os.path.exists(_dcfg_path):
-                        with open(_dcfg_path,'r',encoding='utf-8') as _df:
-                            _dcfg = yaml.safe_load(_df) or {}
-                        if not bool((((_dcfg.get('cameras') or {}).get('drone') or {}).get('enabled',False))):
-                            time.sleep(5)
-                            continue
-                except Exception:
-                    time.sleep(5)
-                    continue
                 print("Connecting dashboard drone camera...")
                 # V8: use TCP because the MediaMTX service is configured for TCP RTSP transport.
                 # This targets latency at the source rather than merely increasing UI FPS.
@@ -1467,25 +1479,33 @@ def drone_encoder_worker():
 
 
 def generate_drone_frames():
-    last_sent = None
-    while True:
-        jpg = None
-        with drone_jpeg_lock:
-            if drone_latest_jpeg is not None:
-                jpg = drone_latest_jpeg
-        if jpg is None or jpg is last_sent:
-            # Only send newly encoded frames. Re-sending the same JPEG every few ms
-            # floods the socket, and the browser-side buffering adds latency.
-            time.sleep(0.005)
-            continue
-        last_sent = jpg
-        yield (
-            b"--frame\r\n"
-            b"Content-Type: image/jpeg\r\n"
-            b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
-            b"Pragma: no-cache\r\n"
-            b"Expires: 0\r\n\r\n" + jpg + b"\r\n"
-        )
+    # MJPEG fallback / enrollment preview: keeps the local drone reader running while open.
+    global drone_viewers
+    with drone_viewers_lock:
+        drone_viewers += 1
+    try:
+        last_sent = None
+        while True:
+            jpg = None
+            with drone_jpeg_lock:
+                if drone_latest_jpeg is not None:
+                    jpg = drone_latest_jpeg
+            if jpg is None or jpg is last_sent:
+                # Only send newly encoded frames. Re-sending the same JPEG every few ms
+                # floods the socket, and the browser-side buffering adds latency.
+                time.sleep(0.005)
+                continue
+            last_sent = jpg
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                b"Pragma: no-cache\r\n"
+                b"Expires: 0\r\n\r\n" + jpg + b"\r\n"
+            )
+    finally:
+        with drone_viewers_lock:
+            drone_viewers -= 1
 
 
 threading.Thread(target=drone_camera_worker, daemon=True).start()
@@ -2281,29 +2301,38 @@ def generate_frames():
             live_viewers -= 1
 
 
-_detect_size_cache = {"at": 0.0, "size": (1280, 720)}
+_detect_size_cache = {}
 
 
-def camera_detect_size():
+def camera_detect_size(camera=None):
     """Frigate's detect resolution: the coordinate space of detection boxes (cached 60 s)."""
+    camera = camera or CAMERA_NAME
     now = time.time()
-    if now - _detect_size_cache["at"] > 60:
-        _detect_size_cache["at"] = now
-        try:
-            cfg = requests.get(f"{FRIGATE_API_URL}/api/config", timeout=3).json()
-            detect = ((cfg.get("cameras") or {}).get(CAMERA_NAME) or {}).get("detect") or {}
-            if detect.get("width") and detect.get("height"):
-                _detect_size_cache["size"] = (int(detect["width"]), int(detect["height"]))
-        except Exception:
-            pass
-    return _detect_size_cache["size"]
+    cached = _detect_size_cache.get(camera)
+    if cached and now - cached[0] < 60:
+        return cached[1]
+    size = cached[1] if cached else (1280, 720)
+    try:
+        cfg = requests.get(f"{FRIGATE_API_URL}/api/config", timeout=3).json()
+        detect = ((cfg.get("cameras") or {}).get(camera) or {}).get("detect") or {}
+        if detect.get("width") and detect.get("height"):
+            size = (int(detect["width"]), int(detect["height"]))
+    except Exception:
+        pass
+    _detect_size_cache[camera] = (now, size)
+    return size
 
 
 @app.route("/api/live/config")
 def api_live_config():
     width, height = camera_detect_size()
-    return jsonify({"go2rtc": GO2RTC_URL, "stream": CAMERA_NAME, "width": width, "height": height,
-                    "fallback": "/video_feed"})
+    dwidth, dheight = camera_detect_size(DRONE_CAMERA_NAME)
+    main = {"stream": CAMERA_NAME, "width": width, "height": height, "fallback": "/video_feed",
+            "overlays": "/api/status", "fallback_on_timeout": True}
+    drone = {"stream": DRONE_CAMERA_NAME, "width": dwidth, "height": dheight, "fallback": "/drone_video_feed",
+             # The drone is often not flying: keep waiting on the relay instead of falling back.
+             "overlays": "/api/drone/tracking/status", "fallback_on_timeout": False}
+    return jsonify({"go2rtc": GO2RTC_URL, **main, "cameras": {"main": main, "drone": drone}})
 
 
 # ============================================================
@@ -3692,12 +3721,12 @@ function setMode(slot, text, compat) {
     tag.classList.toggle("compat", !!compat);
 }
 
-function useFallback(slot, why) {
+function useFallback(slot, why, cam) {
     slot.querySelector("video-stream")?.remove();
     if (!slot.querySelector(":scope > img")) {
         const img = new Image();
         img.alt = "Live camera";
-        img.src = (cfg && cfg.fallback) || "/video_feed";
+        img.src = (cam && cam.fallback) || (cfg && cfg.fallback) || "/video_feed";
         slot.prepend(img);
     }
     slot.dataset.mode = "mjpeg";
@@ -3705,7 +3734,7 @@ function useFallback(slot, why) {
     console.info("Live view fallback:", why);
 }
 
-function drawOverlays(slot) {
+function drawOverlays(slot, cam) {
     const canvas = document.createElement("canvas");
     slot.appendChild(canvas);
     const ctx = canvas.getContext("2d");
@@ -3716,14 +3745,18 @@ function drawOverlays(slot) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
         if (slot.dataset.mode !== "direct") return;  // the MJPEG fallback has boxes drawn in
-        const vw = cfg.width || 1280, vh = cfg.height || 720, s = Math.min(w / vw, h / vh);
-        const ox = (w - vw * s) / 2, oy = (h - vh * s) / 2;
+        // Boxes arrive in Frigate's detect resolution; the video is scaled to fit the slot.
+        const v = slot.querySelector("video");
+        const vw = cam.width || 1280, vh = cam.height || 720;
+        const ar = (v && v.videoWidth && v.videoHeight) ? v.videoWidth / v.videoHeight : vw / vh;
+        const dispW = Math.min(w, h * ar), dispH = dispW / ar, s = dispW / vw, sy = dispH / vh;
+        const ox = (w - dispW) / 2, oy = (h - dispH) / 2;
         for (const it of items) {
             const color = it.known ? "#00dc50" : "#ffa500";
-            let X = ox + 18, Y = oy + 18, W = vw * s - 36, H = vh * s - 36;  // no box: frame the view
+            let X = ox + 18, Y = oy + 18, W = dispW - 36, H = dispH - 36;  // no box: frame the view
             if (Array.isArray(it.box) && it.box.length === 4) {
                 const [x1, y1, x2, y2] = it.box.map(Number);
-                X = ox + x1 * s; Y = oy + y1 * s; W = (x2 - x1) * s; H = (y2 - y1) * s;
+                X = ox + x1 * s; Y = oy + y1 * sy; W = (x2 - x1) * s; H = (y2 - y1) * sy;
             }
             ctx.lineWidth = 3; ctx.strokeStyle = color; ctx.strokeRect(X, Y, W, H);
             let label = String(it.label || (it.kind === "face" ? "PERSON" : "VEHICLE"));
@@ -3737,9 +3770,11 @@ function drawOverlays(slot) {
     const poll = async () => {
         if (slot.dataset.mode === "direct" && !document.hidden) {
             try {
-                const st = await fetch("/api/status", {cache: "no-store"}).then(r => r.json());
-                items = [...(st.active_faces || []).map(f => ({...f, kind: "face"})),
-                         ...(st.active_vehicles || []).map(v => ({...v, kind: "vehicle"}))];
+                const st = await fetch(cam.overlays || "/api/status", {cache: "no-store"}).then(r => r.json());
+                items = st.targets  // drone: every tracked person/vehicle
+                    ? st.targets.map(t => ({...t, kind: t.type === "person" ? "face" : "vehicle"}))
+                    : [...(st.active_faces || []).map(f => ({...f, kind: "face"})),
+                       ...(st.active_vehicles || []).map(v => ({...v, kind: "vehicle"}))];
             } catch (e) { items = []; }
         }
         render();
@@ -3750,23 +3785,31 @@ function drawOverlays(slot) {
 }
 
 async function attach(slot) {
-    if (!cfg || !cfg.go2rtc) return useFallback(slot, "no live config");
+    const cam = (cfg && cfg.cameras && cfg.cameras[slot.dataset.liveCamera || "main"]) || cfg;
+    if (!cfg || !cfg.go2rtc || !cam) return useFallback(slot, "no live config", cam);
     try { await import(cfg.go2rtc + "/video-stream.js"); }
-    catch (e) { return useFallback(slot, "relay player unavailable"); }
+    catch (e) { return useFallback(slot, "relay player unavailable", cam); }
     const el = document.createElement("video-stream");
     el.mode = "mse";          // MSE over WebSocket works through Docker's localhost-only ports
     el.background = false;    // pause while the page is hidden, to save CPU
-    el.src = cfg.go2rtc.replace(/^http/, "ws") + "/api/ws?src=" + encodeURIComponent(cfg.stream);
+    el.src = cfg.go2rtc.replace(/^http/, "ws") + "/api/ws?src=" + encodeURIComponent(cam.stream);
     slot.prepend(el);
     slot.dataset.mode = "direct";
-    setMode(slot, "● REAL-TIME");
+    setMode(slot, "CONNECTING…", true);
     const started = Date.now();
     const check = setInterval(() => {
         const v = el.querySelector("video");
-        if (v && v.currentTime > 0) { clearInterval(check); return; }
-        if (Date.now() - started > 8000) { clearInterval(check); useFallback(slot, "no video from relay"); }
-    }, 500);
-    drawOverlays(slot);
+        if (v && v.currentTime > 0 && !v.paused) {
+            setMode(slot, "● REAL-TIME");
+            if (cam.fallback_on_timeout !== false) clearInterval(check);
+            return;
+        }
+        if (Date.now() - started > 8000) {
+            if (cam.fallback_on_timeout !== false) { clearInterval(check); useFallback(slot, "no video from relay", cam); }
+            else setMode(slot, "WAITING FOR VIDEO", true);  // the player keeps retrying on its own
+        }
+    }, 1000);
+    drawOverlays(slot, cam);
 }
 
 document.querySelectorAll("[data-live-camera]").forEach(attach);
@@ -7353,12 +7396,8 @@ FRONT CAMERA • FACE AI • LPR AI
 <div class="live" id="droneFeedState">DRONE</div>
 </div>
 <div class="camera-box" style="min-height:280px;">
-<img
-id="droneCameraFeed"
-class="camera"
-src="/drone_video_feed"
-style="width:100%;height:420px;min-height:280px;max-height:520px;object-fit:contain;background:#000;"
-alt="Drone feed waiting for DJI/MediaMTX stream">
+<div id="droneCameraFeed" class="camera live-slot" data-live-camera="drone"
+style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
 <div class="corner tl"></div><div class="corner tr"></div>
 <div class="corner bl"></div><div class="corner br"></div>
 </div>
@@ -10471,26 +10510,8 @@ document.getElementById(
 /* DRONE FEED STATUS
    Uses already-cached Drone AI + tracking state.
    No extra HTTP requests are generated here. */
-let droneFeedWasOnline = false;
-let droneFeedRetryAt = 0;
-function reconnectDroneFeed() {
-    const img = document.getElementById("droneCameraFeed");
-    if (img) img.src = "/drone_video_feed?t=" + Date.now();
-}
-const droneFeedImgEl = document.getElementById("droneCameraFeed");
-// Retry only while the drone video is up; otherwise (no stream, or Drone Live not licensed)
-// the next offline->online change reconnects it.
-if (droneFeedImgEl) droneFeedImgEl.addEventListener("error", () => { if (droneVideoOnline) droneFeedRetryAt = Date.now() + 3000; });
-
 function refreshDroneFeedStatus() {
-    // Re-open the MJPEG stream when the drone comes back online or after a load error,
-    // instead of requiring a full page refresh.
-    if ((droneVideoOnline && !droneFeedWasOnline) || (droneFeedRetryAt && Date.now() >= droneFeedRetryAt)) {
-        droneFeedRetryAt = 0;
-        reconnectDroneFeed();
-    }
-    droneFeedWasOnline = droneVideoOnline;
-
+    // The drone video itself is played (and reconnected) by the shared live player.
     const stateEl = document.getElementById("droneFeedState");
     if (stateEl) {
         stateEl.innerText = droneVideoOnline ? "● VIDEO LIVE" : (droneEnabled ? "WAITING FOR VIDEO" : "NO VIDEO");
