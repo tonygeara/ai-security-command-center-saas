@@ -2332,7 +2332,14 @@ def api_live_config():
     drone = {"stream": DRONE_CAMERA_NAME, "width": dwidth, "height": dheight, "fallback": "/drone_video_feed",
              # The drone is often not flying: keep waiting on the relay instead of falling back.
              "overlays": "/api/drone/tracking/status", "fallback_on_timeout": False}
-    return jsonify({"go2rtc": GO2RTC_URL, **main, "cameras": {"main": main, "drone": drone}})
+    cameras = {"main": main, "drone": drone}
+    # Extra cameras and drones (multi-camera grid): relay only, no MJPEG fallback.
+    for name in _frigate_camera_names():
+        if name not in (CAMERA_NAME, DRONE_CAMERA_NAME):
+            w, h = camera_detect_size(name)
+            cameras[name] = {"stream": name, "width": w, "height": h, "fallback": None,
+                             "overlays": None, "fallback_on_timeout": False}
+    return jsonify({"go2rtc": GO2RTC_URL, **main, "cameras": cameras})
 
 
 # ============================================================
@@ -3722,6 +3729,11 @@ function setMode(slot, text, compat) {
 }
 
 function useFallback(slot, why, cam) {
+    if (cam && cam.fallback === null) {  // extra cameras/drones: no MJPEG feed to fall back to
+        setMode(slot, "NO VIDEO", true);
+        console.info("Live view unavailable:", why);
+        return;
+    }
     slot.querySelector("video-stream")?.remove();
     if (!slot.querySelector(":scope > img")) {
         const img = new Image();
@@ -3785,7 +3797,10 @@ function drawOverlays(slot, cam) {
 }
 
 async function attach(slot) {
-    const cam = (cfg && cfg.cameras && cfg.cameras[slot.dataset.liveCamera || "main"]) || cfg;
+    const key = slot.dataset.liveCamera || "main";
+    // A camera added after this page loaded isn't in cfg yet: play its relay stream by name.
+    const cam = (cfg && cfg.cameras && cfg.cameras[key])
+        || (key !== "main" ? {stream: key, fallback: null, overlays: null, fallback_on_timeout: false} : cfg);
     if (!cfg || !cfg.go2rtc || !cam) return useFallback(slot, "no live config", cam);
     try { await import(cfg.go2rtc + "/video-stream.js"); }
     catch (e) { return useFallback(slot, "relay player unavailable", cam); }
@@ -3809,10 +3824,13 @@ async function attach(slot) {
             else setMode(slot, "WAITING FOR VIDEO", true);  // the player keeps retrying on its own
         }
     }, 1000);
-    drawOverlays(slot, cam);
+    if (cam.overlays) drawOverlays(slot, cam);
 }
 
 document.querySelectorAll("[data-live-camera]").forEach(attach);
+// The multi-camera grid adds tiles after load and attaches them with this.
+window.attachLiveCamera = attach;
+window.dispatchEvent(new Event("live-player-ready"));
 </script>
 """
 
@@ -3887,13 +3905,15 @@ DISCOVER_PAGE = hud_page("Devices", r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">▣ Network scan</div><div class="live">LAN</div></div>
 <div class="panel-body"><button class="hud-btn primary" onclick="s()">Scan network</button><div id="x" style="margin-top:14px"></div></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">✈ Drone</div><div class="live">RTMP</div></div>
-<div class="panel-body"><div id="z" class="muted">Checking…</div><div style="margin-top:14px"><button class="hud-btn" onclick="t()">Test drone stream</button></div></div></section>
+<div class="panel-body"><div id="z" class="muted">Checking…</div><div class="actions" style="margin-top:14px"><button class="hud-btn" onclick="t()">Test drone stream</button><button class="hud-btn primary" onclick="addDrone(this)">Add another drone</button></div><div id="dmsg" class="hud-msg"></div></div></section>
 </main>
 <script>
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 async function s(){x.innerHTML='<p class="muted">Scanning nearby devices…</p>';const c=new AbortController();const timer=setTimeout(()=>c.abort(),30000);try{let r=await fetch('/api/discovery/scan',{method:'POST',signal:c.signal});let d=await r.json();x.innerHTML=`<p class="muted">Scan complete · PC: ${esc(d.host_ip)} · Network: ${esc(d.network)} · ${d.devices?.length||0} candidate(s)</p>`;(d.devices||[]).forEach(v=>x.innerHTML+=`<div class="hud-row"><div><b>${esc(v.ip)}</b><div class="muted">${esc(v.kind)} · Ports: ${esc((v.ports||[]).join(', '))} ${v.mac?'· '+esc(v.mac):''}</div></div><button class="hud-btn" onclick="location.href='/setup/camera'">Add</button></div>`);if(!(d.devices||[]).length)x.innerHTML+='<p class="muted">No stream candidates found yet. Make sure the camera is online and RTSP is enabled.</p>'}catch(e){x.innerHTML='<p class="muted">Scan timed out safely. Try once more after confirming the camera is online.</p>'}finally{clearTimeout(timer)}}
 async function q(){let d=await(await fetch('/api/discovery/drone')).json();z.innerHTML=`<div class="hud-row"><div><b>DJI / controller publish address</b></div><code>${esc(d.publish_url)}</code></div><div class="hud-row"><div><b>Local AI stream</b></div><code>${esc(d.local_rtsp_url)}</code></div><div class="hud-row"><div><b>Streaming service</b></div><span class="state">${d.mediamtx_ready?'<i class="dot good"></i>READY':'<i class="dot bad"></i>NOT RUNNING'}</span></div>`}
-async function t(){let d=await(await fetch('/api/discovery/drone/test')).json();alert(d.message)}q()
+async function t(){let d=await(await fetch('/api/discovery/drone/test')).json();alert(d.message)}
+async function addDrone(btn){btn.disabled=true;dmsg.className='hud-msg';dmsg.textContent='Adding drone…';try{const r=await fetch('/api/setup/drone',{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Could not add drone');dmsg.className='hud-msg ok';dmsg.innerHTML=esc(d.message)+'<br>RTMP address: <code>'+esc(d.publish_url)+'</code>'}catch(e){dmsg.className='hud-msg bad';dmsg.textContent=e.message}finally{btn.disabled=false}}
+q()
 </script>""", active="devices")
 
 
@@ -4031,13 +4051,16 @@ def api_setup_camera():
     if not cloud.get("ok"):
         return jsonify({"ok":False,"error":cloud.get("error") or "Cloud registration failed."}),409
     try:
+        # The first camera becomes the main camera; later ones join the multi-camera grid.
+        is_first = CAMERA_NAME not in _frigate_camera_names()
         _write_managed_frigate(slug,url)
-        settings=load_local_settings();settings.update({"camera_name":slug,"camera_stream":f"rtsp://localhost:8554/{slug}","camera_display_name":display})
-        tmp=LOCAL_SETTINGS_FILE+".tmp"
-        with open(tmp,"w",encoding="utf-8") as f: json.dump(settings,f,indent=2)
-        os.replace(tmp,LOCAL_SETTINGS_FILE)
-        CAMERA_NAME=slug;STREAM=f"rtsp://localhost:8554/{slug}"
-        CAMERA_STATE_TOPIC=f"frigate/{slug}/enabled/state";CAMERA_SET_TOPIC=f"frigate/{slug}/enabled/set"
+        if is_first:
+            settings=load_local_settings();settings.update({"camera_name":slug,"camera_stream":f"rtsp://localhost:8554/{slug}","camera_display_name":display})
+            tmp=LOCAL_SETTINGS_FILE+".tmp"
+            with open(tmp,"w",encoding="utf-8") as f: json.dump(settings,f,indent=2)
+            os.replace(tmp,LOCAL_SETTINGS_FILE)
+            CAMERA_NAME=slug;STREAM=f"rtsp://localhost:8554/{slug}"
+            CAMERA_STATE_TOPIC=f"frigate/{slug}/enabled/state";CAMERA_SET_TOPIC=f"frigate/{slug}/enabled/set"
         restarted,msg=_restart_frigate()
         return jsonify({"ok":True,"source":cloud.get("source"),"camera_name":slug,"frigate_restarted":restarted,
                         "message":"Camera added. Frigate restarted." if restarted else "Camera saved. Restart Frigate to activate it.",
@@ -4047,6 +4070,84 @@ def api_setup_camera():
         sid=((cloud.get("source") or {}).get("id"))
         if sid:_cloud_source("DELETE",{"id":sid})
         return jsonify({"ok":False,"error":f"Camera setup failed safely: {e}"}),500
+
+def _frigate_camera_names():
+    """Camera names in the live Frigate config (main camera, extra cameras and drones)."""
+    try:
+        with open(LIVE_FRIGATE_CONFIG, "r", encoding="utf-8") as f:
+            return list(((yaml.safe_load(f) or {}).get("cameras") or {}).keys())
+    except Exception:
+        return []
+
+
+def _is_drone_name(name):
+    return str(name).lower().startswith("drone")
+
+
+def _write_drone_frigate(name):
+    """Add one more drone to the live Frigate config, using the first drone's settings.
+    The DJI app publishes to rtmp://<PC>:1935/<name>; MediaMTX serves it at :8556/<name>."""
+    import copy, shutil
+    with open(LIVE_FRIGATE_CONFIG, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    cameras = cfg.setdefault("cameras", {})
+    camera = copy.deepcopy(cameras.get(DRONE_CAMERA_NAME) or {
+        "objects": {"track": ["person", "car", "motorcycle"]},
+        "detect": {"enabled": True, "width": DRONE_FRAME_WIDTH, "height": DRONE_FRAME_HEIGHT, "fps": 5}})
+    camera["enabled"] = True
+    camera["ffmpeg"] = {"inputs": [{"path": f"rtsp://127.0.0.1:8554/{name}",
+                                    "input_args": "preset-rtsp-restream", "roles": ["detect", "record"]}]}
+    cameras[name] = camera
+    cfg.setdefault("go2rtc", {}).setdefault("streams", {})[name] = [f"rtsp://host.docker.internal:8556/{name}"]
+    shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-drone-setup")
+    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    os.replace(tmp, LIVE_FRIGATE_CONFIG)
+
+
+@app.route("/api/setup/drone", methods=["POST"])
+def api_setup_drone():
+    allowed = requests.get("http://127.0.0.1:%d/api/cloud/can-add-source/drone" % PORT, timeout=4).json()
+    if not allowed.get("allowed"):
+        return jsonify({"ok": False, "error": allowed.get("message") or "Your plan does not allow another drone."}), 403
+    existing = set(_frigate_camera_names())
+    n = 2
+    while f"{DRONE_CAMERA_NAME}{n}" in existing:
+        n += 1
+    name = f"{DRONE_CAMERA_NAME}{n}"
+    cloud = _cloud_source("POST", {"source_type": "drone", "name": f"Drone {n}"})
+    if not cloud.get("ok"):
+        return jsonify({"ok": False, "error": cloud.get("error") or "Cloud registration failed."}), 409
+    try:
+        _write_drone_frigate(name)
+        restarted, msg = _restart_frigate()
+        return jsonify({"ok": True, "name": name, "publish_url": f"rtmp://{_lan_ip()}:1935/{name}",
+                        "frigate_restarted": restarted,
+                        "message": f"Drone {n} added. In DJI Fly, stream RTMP to the address shown."})
+    except Exception as e:
+        sid = ((cloud.get("source") or {}).get("id"))
+        if sid:
+            _cloud_source("DELETE", {"id": sid})
+        return jsonify({"ok": False, "error": f"Drone setup failed safely: {e}"}), 500
+
+
+@app.route("/api/cameras")
+def api_cameras():
+    """Every camera and drone Frigate knows, with live status, for the multi-camera grid."""
+    names = _frigate_camera_names()
+    try:
+        stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
+    except Exception:
+        stats = {}
+    items = []
+    for name in names:
+        fps = float((stats.get(name) or {}).get("camera_fps") or 0)
+        items.append({"name": name, "kind": "drone" if _is_drone_name(name) else "camera",
+                      "online": fps > 0, "fps": round(fps, 1),
+                      "primary": name in (CAMERA_NAME, DRONE_CAMERA_NAME)})
+    return jsonify({"ok": True, "main": CAMERA_NAME, "drone": DRONE_CAMERA_NAME, "cameras": items})
+
 
 @app.route("/setup/camera")
 def camera_setup_page():
@@ -7406,6 +7507,100 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
 <div id="droneTrackingReadout">TRACKING ASSIST • WAITING</div>
 </div>
 </div>
+
+
+<!-- =======================================================
+     MULTI-CAMERA GRID: every extra camera and drone
+     ======================================================= -->
+<style>
+.multi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;padding:10px}
+.grid-tile{position:relative;background:#000;border:1px solid #123447;border-radius:5px;overflow:hidden}
+.grid-tile .live-slot{aspect-ratio:16/9;height:auto;cursor:zoom-in}
+.grid-tile .tile-foot{display:flex;justify-content:space-between;align-items:center;padding:6px 9px;font-size:9px;letter-spacing:1px;color:#5d8499;background:#03101a}
+.grid-tile .tile-name{color:#35caff;text-transform:uppercase}
+.grid-tile .tile-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#ff5d6c;margin-right:6px}
+.grid-tile .tile-dot.on{background:#26ee89;box-shadow:0 0 8px #26ee89}
+.grid-empty{padding:22px 14px;color:#6d8b9d;font-size:11px;letter-spacing:.5px;line-height:1.6}
+.grid-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 10px 12px}
+.grid-actions code{color:#2eef88;font-size:11px;word-break:break-all}
+</style>
+<div class="panel" style="margin-top:9px;" id="multiGridPanel">
+<div class="panel-head">
+<div class="panel-title">▦ CAMERAS &amp; DRONES</div>
+<div class="live" id="multiGridCount">—</div>
+</div>
+<div id="multiGrid" class="multi-grid"></div>
+<div class="grid-actions">
+<button type="button" class="history-action-button" onclick="location.href='/setup/camera'">+ ADD CAMERA</button>
+<button type="button" class="history-action-button" id="addDroneBtn">+ ADD DRONE</button>
+<span id="addDroneMsg" style="font-size:10px;color:#9edfff"></span>
+</div>
+</div>
+<script>
+(function () {
+    const grid = document.getElementById("multiGrid");
+    const count = document.getElementById("multiGridCount");
+    const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+    const tiles = {};
+
+    function attachWhenReady(slot) {
+        if (window.attachLiveCamera) window.attachLiveCamera(slot);
+        else window.addEventListener("live-player-ready", () => window.attachLiveCamera(slot), {once: true});
+    }
+
+    async function refresh() {
+        let data;
+        try { data = await fetch("/api/cameras", {cache: "no-store"}).then(r => r.json()); } catch (e) { return; }
+        // The main camera and first drone have their own panels above; the grid shows the rest.
+        const extra = (data.cameras || []).filter(c => !c.primary);
+        const online = (data.cameras || []).filter(c => c.online).length;
+        count.textContent = online + " / " + (data.cameras || []).length + " ONLINE";
+        if (!extra.length) {
+            grid.innerHTML = '<div class="grid-empty">No additional cameras or drones yet. Use <b>+ ADD CAMERA</b> or <b>+ ADD DRONE</b> below; '
+                + 'each one appears here live.</div>';
+            for (const k in tiles) delete tiles[k];
+            return;
+        }
+        grid.querySelector(".grid-empty")?.remove();
+        for (const c of extra) {
+            let t = tiles[c.name];
+            if (!t) {
+                t = document.createElement("div");
+                t.className = "grid-tile";
+                t.innerHTML = '<div class="live-slot" data-live-camera="' + esc(c.name) + '" title="Double-click for full screen"></div>'
+                    + '<div class="tile-foot"><span><i class="tile-dot"></i><span class="tile-name">'
+                    + (c.kind === "drone" ? "✈ " : "▣ ") + esc(c.name) + '</span></span><span class="tile-fps"></span></div>';
+                const slot = t.querySelector(".live-slot");
+                slot.addEventListener("dblclick", () => slot.requestFullscreen?.());
+                grid.appendChild(t);
+                tiles[c.name] = t;
+                attachWhenReady(slot);
+            }
+            t.querySelector(".tile-dot").classList.toggle("on", !!c.online);
+            t.querySelector(".tile-fps").textContent = c.online ? c.fps + " FPS" : "OFFLINE";
+        }
+        for (const name of Object.keys(tiles)) {
+            if (!extra.some(c => c.name === name)) { tiles[name].remove(); delete tiles[name]; }
+        }
+    }
+
+    document.getElementById("addDroneBtn").addEventListener("click", async () => {
+        const btn = document.getElementById("addDroneBtn"), msg = document.getElementById("addDroneMsg");
+        btn.disabled = true; msg.textContent = "Adding drone…";
+        try {
+            const r = await fetch("/api/setup/drone", {method: "POST"});
+            const d = await r.json();
+            if (!r.ok || !d.ok) throw new Error(d.error || "Could not add drone");
+            msg.innerHTML = esc(d.message) + " RTMP: <code>" + esc(d.publish_url) + "</code>";
+            setTimeout(refresh, 20000);  // Frigate restarts to load the new drone
+        } catch (e) { msg.textContent = e.message; }
+        finally { btn.disabled = false; }
+    });
+
+    refresh();
+    setInterval(refresh, 10000);
+})();
+</script>
 
 
 <div class="stats">
