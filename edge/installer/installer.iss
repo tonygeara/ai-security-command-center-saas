@@ -5,20 +5,29 @@
 #ifndef MyAppVersion
   #define MyAppVersion "0.0.0"
 #endif
-#define MyAppName "AI Security Command Center"
-#define MyAppExeName "AI-Security-Command-Center.exe"
+; build_onprem.ps1 overrides these for the "AI Command Centre Lebanon" on-prem edition.
+#ifndef MyAppName
+  #define MyAppName "AI Security Command Center"
+#endif
+#ifndef MyAppSlug
+  #define MyAppSlug "AI-Security-Command-Center"
+#endif
+#ifndef MyAppId
+  #define MyAppId "{E8BB2C1A-704F-4C0A-A971-49388F9DAE39}"
+#endif
+#define MyAppExeName MyAppSlug + ".exe"
 
 [Setup]
-AppId={{E8BB2C1A-704F-4C0A-A971-49388F9DAE39}
+AppId={#StringChange(MyAppId, '{', '{{')}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher=AI Security
-DefaultDirName={localappdata}\Programs\AI Security Command Center
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=output
-OutputBaseFilename=AI-Security-Command-Center-Setup-{#MyAppVersion}
+OutputBaseFilename={#MyAppSlug}-Setup-{#MyAppVersion}
 SetupIconFile=..\assets\ai_security.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2
@@ -29,7 +38,9 @@ WizardStyle=modern
 CloseApplications=yes
 
 [Files]
-Source: "dist\AI-Security-Command-Center\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\{#MyAppSlug}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Offline install: if the AI services package sits next to Setup.exe (USB stick), copy it in.
+Source: "{src}\ai-command-centre-images.tar"; DestDir: "{app}\offline"; Flags: external skipifsourcedoesntexist ignoreversion
 Source: "..\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

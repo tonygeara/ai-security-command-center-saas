@@ -23,3 +23,7 @@ frigate.db
 .jwt_secret
 license_cache.json
 deno.lock
+
+# On-prem build env and issued customer licenses (never commit)
+edge/.venv-onprem/
+*.lic

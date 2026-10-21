@@ -2,7 +2,10 @@ import os, sys, json, time, socket, subprocess, threading, queue, webbrowser, sh
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+import edition
+
 APP_VERSION = 'V11.1.0'
+PRODUCT_NAME = edition.PRODUCT_NAME
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 FROZEN = getattr(sys, 'frozen', False)
 
@@ -10,7 +13,7 @@ FROZEN = getattr(sys, 'frozen', False)
 # installer can replace the program without touching cameras, faces or events.
 APP_HOME = os.path.dirname(sys.executable if FROZEN else os.path.abspath(__file__))
 DATA_HOME = os.environ.get('AI_SECURITY_DATA') or os.path.join(
-    os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'AI-Security-System')
+    os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), edition.DATA_DIR_NAME)
 FRIGATE_DIR = os.path.join(DATA_HOME, 'frigate')
 FRIGATE_CONFIG = os.path.join(FRIGATE_DIR, 'config', 'config.yaml')
 OVERLAY_DIR = os.path.join(DATA_HOME, 'frigate-overlay')
@@ -36,6 +39,9 @@ RUNTIME_DIR = _first_existing(os.path.join(APP_HOME, 'runtime'),
 COMPOSE_FILE = os.path.join(RUNTIME_DIR, 'docker-compose.yml')
 FRIGATE_TEMPLATE = os.path.join(RUNTIME_DIR, 'frigate', 'config.example.yaml')
 DASHBOARD_SCRIPT = os.path.join(APP_HOME, 'dashboard.py')
+# Offline install package (docker save of the pinned images), from the installer or USB stick.
+OFFLINE_IMAGE_BUNDLES = [os.path.join(d, 'ai-command-centre-images.tar')
+                         for d in (os.path.join(APP_HOME, 'offline'), os.path.join(DATA_HOME, 'offline'))]
 
 for d in (LOG_DIR, OVERLAY_DIR, os.path.join(FRIGATE_DIR, 'config'), os.path.join(FRIGATE_DIR, 'storage')):
     os.makedirs(d, exist_ok=True)
@@ -112,14 +118,14 @@ def run_dashboard_in_process():
     sys.stdout = sys.stderr = log  # windowed builds have no console streams
     os.environ.setdefault('AI_SECURITY_HOME', OVERLAY_DIR)
     os.chdir(OVERLAY_DIR)
-    import runpy
-    runpy.run_module('dashboard', run_name='__main__')
+    import dashboard  # may be a compiled extension module in the on-prem build
+    dashboard.main()
 
 
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f'AI Security Command Center {APP_VERSION}')
+        self.title(f'{PRODUCT_NAME} {APP_VERSION}')
         self.geometry('820x610')
         self.minsize(760, 540)
         self.protocol('WM_DELETE_WINDOW', self.on_close)
@@ -131,7 +137,7 @@ class App(tk.Tk):
 
     def _build(self):
         top = ttk.Frame(self, padding=(18,16,18,10)); top.pack(fill='x')
-        ttk.Label(top, text='AI Security Command Center', font=('Segoe UI', 20, 'bold')).pack(anchor='w')
+        ttk.Label(top, text=PRODUCT_NAME, font=('Segoe UI', 20, 'bold')).pack(anchor='w')
         ttk.Label(top, text=f'{APP_VERSION} • Camera + Drone • Frigate + MQTT + MediaMTX').pack(anchor='w', pady=(2,0))
 
         status = ttk.LabelFrame(self, text='System status', padding=12); status.pack(fill='x', padx=18, pady=(0,10))
@@ -173,8 +179,8 @@ class App(tk.Tk):
                 elif kind == 'busy':
                     self.busy = args[0]; self.start_btn.configure(state='disabled' if self.busy else 'normal')
                     self.progress.start(12) if self.busy else self.progress.stop()
-                elif kind == 'error': messagebox.showerror('AI Security', args[0], parent=self)
-                elif kind == 'info': messagebox.showinfo('AI Security', args[0], parent=self)
+                elif kind == 'error': messagebox.showerror(PRODUCT_NAME, args[0], parent=self)
+                elif kind == 'info': messagebox.showinfo(PRODUCT_NAME, args[0], parent=self)
         except queue.Empty:
             pass
         self.after(200, self._poll)
@@ -197,6 +203,7 @@ class App(tk.Tk):
                 raise RuntimeError('Runtime file missing: ' + COMPOSE_FILE + '. Reinstall the application.')
             self.seed_frigate_config()
             self.replace_legacy_containers()
+            self.load_offline_images()
 
             self.emit('msg','Starting MQTT, MediaMTX and Frigate...'); self.emit('log','docker compose up -d (first start downloads images and can take several minutes)')
             r = compose('up','-d')
@@ -240,6 +247,28 @@ class App(tk.Tk):
             with open(settings_file, 'w', encoding='utf-8') as f:
                 json.dump({'camera_name': 'camera'}, f, indent=2)
         self.emit('log', 'Created starter Frigate config. Use Camera / Drone Setup to add your camera.')
+
+    def load_offline_images(self):
+        """Offline install: load the AI service images from the USB package if missing,
+        so the first start needs no internet."""
+        r = compose('config', '--images', timeout=60)
+        images = [i.strip() for i in r.stdout.splitlines() if i.strip()] if r.returncode == 0 else []
+        missing = [i for i in images if run_hidden(['docker', 'image', 'inspect', i], timeout=20).returncode != 0]
+        if not missing:
+            return
+        bundle = next((p for p in OFFLINE_IMAGE_BUNDLES if os.path.isfile(p)), None)
+        if not bundle:
+            self.emit('log', 'AI services will be downloaded from the internet (no offline package found).')
+            return
+        self.emit('msg', 'Loading AI services from the offline package (several minutes)...')
+        self.emit('log', f'Loading {len(missing)} image(s) from {bundle}')
+        r = run_hidden(['docker', 'load', '-i', bundle], timeout=3600)
+        if r.returncode:
+            raise RuntimeError('Could not load the offline AI services package:\n' + r.stdout.strip()[-600:])
+        self.emit('log', 'AI services loaded from the offline package.')
+        if bundle.startswith(APP_HOME):  # installer's copy: free ~2 GB now that Docker has it
+            try: os.remove(bundle)
+            except OSError: pass
 
     def replace_legacy_containers(self):
         """Containers created by older versions (C:\\frigate, V8-V11 scripts) use the same

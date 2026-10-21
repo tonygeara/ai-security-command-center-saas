@@ -1,0 +1,55 @@
+AI COMMAND CENTRE LEBANON - INSTALLATION GUIDE (on-prem, no cloud account needed)
+==================================================================================
+
+WHAT IS IN THIS PACKAGE
+  AI-Command-Centre-Lebanon-Setup-<version>.exe   the program
+  ai-command-centre-images.tar                    the local AI services (Frigate, MQTT,
+                                                  drone receiver) - no internet needed for them
+  INSTALL.txt                                     this guide
+
+COMPUTER REQUIREMENTS
+  - Windows 10 or 11, 64-bit, with virtualization enabled in the BIOS/UEFI
+  - 1-2 cameras: 4 cores / 8 threads (Intel Core i5 8th gen / Ryzen 5 2000 or newer), 16 GB RAM
+  - 4+ cameras: 8 cores, 32 GB RAM and an NVIDIA graphics card (RTX 3050 / 3060 or better)
+  - SSD with at least 256 GB free (recordings: ~150-250 GB per camera)
+  - IP cameras with RTSP video, 1080p or better, on the same network as the computer
+  - Optional: DJI drone with RTMP live streaming (DJI Fly > Live Streaming > RTMP)
+
+STEP 1 - INSTALL DOCKER DESKTOP (one time)
+  Docker Desktop runs the local AI services.
+  - Download from https://www.docker.com/products/docker-desktop/ (or bring the installer
+    on this USB stick) and install it with the default options (WSL 2).
+  - Restart the computer if asked, open Docker Desktop once and wait for "Engine running".
+  - Set Docker Desktop to start automatically: Settings > General > "Start Docker Desktop
+    when you sign in".
+  Note: installing Docker Desktop and WSL 2 is easiest with internet; everything after
+  this step works offline.
+
+STEP 2 - INSTALL THE PROGRAM
+  - Run AI-Command-Centre-Lebanon-Setup-<version>.exe FROM THIS FOLDER (keep the .tar file
+    next to it so the AI services install without internet).
+  - Windows may show "Windows protected your PC": click More info > Run anyway.
+  - No administrator rights are needed.
+
+STEP 3 - FIRST START
+  - Open "AI Command Centre Lebanon" from the desktop.
+  - The first start loads the AI services (several minutes), then opens the dashboard.
+
+STEP 4 - ACTIVATE THE LICENSE
+  - The dashboard opens the License page and shows this computer's Machine ID,
+    for example: F9C9-B5F1-CBB1-BA7C-7356
+  - Send the Machine ID to your supplier. You receive a license file (.lic).
+  - On the License page click "Choose file", pick the .lic file, click "Install license".
+  - The license works only on this computer and until its expiry date.
+
+STEP 5 - ADD CAMERAS
+  - Launcher > "Camera / Drone Setup": enter the camera's RTSP address, e.g.
+    rtsp://username:password@192.168.1.50:554/stream1, then Stop System / Start System.
+  - More cameras: dashboard > Devices > Add camera (up to the number in your license).
+  - Drone: in DJI Fly, stream RTMP to the address shown in Camera / Drone Setup.
+
+GOOD TO KNOW
+  - Everything (video, faces, plates, recordings) stays on this computer.
+  - Motion recordings are kept 3 days, alerts and snapshots 14 days, event history 30 days.
+  - Internet is only used for optional phone alerts (Telegram).
+  - Data folder: %LOCALAPPDATA%\AI-Command-Centre-Lebanon (back it up to keep faces/events).

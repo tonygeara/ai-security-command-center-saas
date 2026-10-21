@@ -2285,8 +2285,63 @@ def force_drone_ai_off(reason="Cloud entitlement disabled"):
         }
     print("Drone AI forced OFF:", reason)
 
+# ---------------- On-prem (offline license file) ----------------
+import licensing
+import edition
+
+LICENSE_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "license.lic")
+offline_license = {"ok": False, "reason": "No license installed.", "payload": None}
+
+
+def check_offline_license():
+    """Verify the installed license file and, when valid, use it instead of the cloud."""
+    ok, reason, payload = licensing.check_file(LICENSE_FILE)
+    offline_license.update(ok=ok, reason=reason, payload=payload if ok else None)
+    if ok:
+        with cloud_lock:
+            cloud_state.update({
+                "connected": False,
+                "licensed": True,
+                "organization_status": "active",
+                "plan_code": str(payload.get("plan") or "on-prem"),
+                "features": licensing.features_for_dashboard(payload),
+                "limits": {"cameras": (payload.get("limits") or {}).get("cameras"),
+                           "drones": (payload.get("limits") or {}).get("drones")},
+                "last_error": "",
+                "offline_grace": False,
+                "license_mode": "offline",
+                "license": {k: payload.get(k) for k in ("customer", "expires", "license_id", "plan")},
+            })
+    return ok
+
+
+def onprem_mode():
+    return bool(offline_license.get("ok"))
+
+
+check_offline_license()
+
+
+def local_source_usage():
+    """Cameras/drones configured on this PC (on-prem plan limits are counted locally)."""
+    names = _frigate_camera_names() if "_frigate_camera_names" in globals() else []
+    drones = sum(1 for n in names if str(n).lower().startswith(DRONE_CAMERA_NAME))
+    return {"cameras": len(names) - drones, "drones": drones}
+
+
 def cloud_control_worker():
     global camera_enabled_runtime
+    if check_offline_license() or edition.EDITION == "onprem":
+        # On-prem: never contact the cloud. Re-check the license (expiry) every hour.
+        while True:
+            if check_offline_license():
+                with cloud_lock:
+                    cloud_state["usage"] = local_source_usage()
+            else:
+                with cloud_lock:
+                    cloud_state.update({"licensed": False, "license_mode": "offline",
+                                        "last_error": offline_license.get("reason") or ""})
+            time.sleep(3600)
     config = load_edge_agent_config()
     token = str(config.get("device_token") or "").strip()
     if not token:
@@ -3613,7 +3668,8 @@ def api_cloud_can_add_source(source_type):
     c = cloud_status_snapshot()
     usage_key = "cameras" if source_type == "camera" else "drones"
     feature_key = "camera_ai" if source_type == "camera" else "drone_live"
-    used = int((c.get("usage") or {}).get(usage_key) or 0)
+    usage = local_source_usage() if onprem_mode() else (c.get("usage") or {})
+    used = int(usage.get(usage_key) or 0)
     limit = (c.get("limits") or {}).get(usage_key)
     allowed = bool(c.get("licensed")) and cloud_feature_enabled(feature_key) and (limit is None or used < int(limit))
     plan = str(c.get("plan_code") or "current").upper()
@@ -3988,6 +4044,7 @@ HUD_NAV_ITEMS = [
     ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
     ("devices", "/setup/discover", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
+    ("license", "/license", "⚿", "License"),
 ]
 
 
@@ -4000,7 +4057,7 @@ def hud_topbar(active="", nav=True):
     return (
         '<header class="hud-top">'
         '<a class="hud-brand" href="/"><div class="brand-shield">A</div>'
-        '<div><div class="brand-name">AI SECURITY</div><div class="brand-sub">COMMAND CENTER</div></div></a>'
+        f'<div><div class="brand-name">{edition.BRAND_TOP}</div><div class="brand-sub">{edition.BRAND_SUB}</div></div></a>'
         f'<nav class="hud-nav">{links}</nav>'
         '<div class="hud-clock"><b id="hudClock">--:--:--</b><span><i class="dot good"></i>SYSTEM PROTECTED</span></div>'
         '</header>'
@@ -4014,7 +4071,7 @@ def hud_page(title, body, active="", head="", nav=True):
     return (
         '<!doctype html><html><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f'<title>{title} — AI Security Command Center</title>'
+        f'<title>{title} — {edition.PRODUCT_NAME}</title>'
         '<link rel="stylesheet" href="/hud.css">' + head + '</head><body>'
         + hud_topbar(active, nav) + body + '</body></html>'
     )
@@ -4097,6 +4154,9 @@ def _test_rtsp(url):
         cap.release()
 
 def _cloud_source(method="GET", payload=None):
+    if onprem_mode():
+        # On-prem license: sources are tracked on this PC only (limits checked locally).
+        return {"ok": True, "offline": True, "sources": [], "source": None}
     token = _edge_token()
     if not token:
         return {"ok": False, "error": "Pair this Windows device to your customer account first."}
@@ -11080,6 +11140,10 @@ openPanelFromHash();
 
 
 PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard"))
+# Edition branding (e.g. "AI Command Centre Lebanon" for the on-prem build).
+PAGE = (PAGE.replace("<title>\nAI Security Command Center\n</title>", f"<title>\n{edition.PRODUCT_NAME}\n</title>")
+            .replace('<div class="brand-name">\nAI SECURITY\n</div>', f'<div class="brand-name">\n{edition.BRAND_TOP}\n</div>')
+            .replace('<div class="brand-sub">\nCOMMAND CENTER\n</div>', f'<div class="brand-sub">\n{edition.BRAND_SUB}\n</div>'))
 _body_end = PAGE.rfind("</body>")
 PAGE = PAGE[:_body_end] + LIVE_PLAYER_HTML + PAGE[_body_end:]
 
@@ -11109,7 +11173,53 @@ btn.onclick=async()=>{
   setTimeout(()=>location.href="/",1200);
  }catch(e){msg.innerText=e.message||"Pairing failed";btn.disabled=false}
 };
-</script>""", nav=False)
+</script>
+<p class="muted" style="text-align:center;margin-top:-6px">Installing without internet? <a href="/license">Use a license file instead</a>.</p>""", nav=False)
+
+
+LICENSE_PAGE = hud_page("License", r"""
+<main class="hud-main narrow">
+<div class="page-head"><div><div class="page-kicker">On-prem license</div><h1 class="page-title" id="prod">License</h1>
+<div class="page-sub">Runs fully on this computer with a license file: no internet or cloud account needed.</div></div></div>
+<section class="panel"><div class="panel-head"><div class="panel-title">⚿ This computer</div><div class="live" id="state">CHECKING</div></div>
+<div class="panel-body">
+<div class="hud-row"><div><b>Machine ID</b><div class="muted">Send this to your supplier to receive your license file.</div></div><code id="mid">…</code></div>
+<div class="hud-row"><div><b>Status</b><div class="muted" id="reason">…</div></div><span class="state" id="valid">…</span></div>
+<div id="details"></div>
+</div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⤓ Install license file</div></div>
+<div class="panel-body">
+<p class="muted" style="margin-top:0">Choose the <b>.lic</b> file you received. It only works on the computer whose Machine ID it was issued for.</p>
+<input type="file" id="file" accept=".lic,application/json" style="color:#9edfff">
+<div class="actions" style="margin-top:14px"><button class="hud-btn primary" id="install">Install license</button><button class="hud-btn" onclick="location.href='/'">Open dashboard</button></div>
+<div id="msg" class="hud-msg"></div>
+</div></section>
+</main>
+<script>
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+async function load(){
+  const d=await fetch('/api/license',{cache:'no-store'}).then(r=>r.json());
+  document.getElementById('prod').textContent=d.product+' — License';
+  document.getElementById('mid').textContent=d.machine_id;
+  document.getElementById('valid').innerHTML=d.valid?'<i class="dot good"></i>LICENSED':'<i class="dot bad"></i>NOT LICENSED';
+  document.getElementById('state').textContent=d.valid?'ACTIVE':'REQUIRED';
+  document.getElementById('reason').textContent=d.valid?('Valid until '+d.expires):d.reason;
+  const u=d.usage||{},l=d.limits||{};
+  document.getElementById('details').innerHTML=d.valid?
+    '<div class="hud-row"><div><b>Licensed to</b></div><span class="state">'+esc(d.customer)+'</span></div>'+
+    '<div class="hud-row"><div><b>Plan</b><div class="muted">'+esc((d.features||[]).join(', '))+'</div></div><span class="state">'+esc(String(d.plan||'').toUpperCase())+'</span></div>'+
+    '<div class="hud-row"><div><b>Cameras</b></div><span class="state">'+esc(u.cameras)+' / '+esc(l.cameras??'∞')+'</span></div>'+
+    '<div class="hud-row"><div><b>Drones</b></div><span class="state">'+esc(u.drones)+' / '+esc(l.drones??'∞')+'</span></div>':'';
+}
+document.getElementById('install').onclick=async()=>{
+  const f=document.getElementById('file').files[0],m=document.getElementById('msg');
+  if(!f){m.className='hud-msg bad';m.textContent='Choose a license file first.';return}
+  const r=await fetch('/api/license',{method:'POST',headers:{'Content-Type':'application/json'},body:await f.text()});
+  const d=await r.json();m.className='hud-msg '+(d.ok?'ok':'bad');m.textContent=d.ok?'License installed. Opening the dashboard…':d.error;
+  if(d.ok){load();setTimeout(()=>location.href='/',1500)}
+};
+load();
+</script>""", active="license")
 
 
 
@@ -11206,11 +11316,48 @@ def _dashboard_context():
 
 @app.route("/")
 def dashboard():
-    edge_cfg = load_edge_agent_config()
-    if not str(edge_cfg.get("device_token") or "").strip():
-        return Response(PAIRING_PAGE, mimetype="text/html")
+    if not onprem_mode():
+        if edition.EDITION == "onprem":
+            return redirect("/license")  # on-prem edition: a license file, never cloud pairing
+        edge_cfg = load_edge_agent_config()
+        if not str(edge_cfg.get("device_token") or "").strip():
+            return Response(PAIRING_PAGE, mimetype="text/html")
     events, history_events = _dashboard_context()
     return render_template_string(PAGE, events=events, history_events=history_events)
+
+@app.route("/api/license", methods=["GET", "POST"])
+def api_license():
+    """On-prem license status (with this PC's Machine ID) and license installation."""
+    if request.method == "POST":
+        raw = request.get_data(as_text=True) or ""
+        try:
+            doc = json.loads(raw)
+        except Exception:
+            return jsonify({"ok": False, "error": "That is not a license file."}), 400
+        ok, reason, payload = licensing.verify(doc)
+        if not ok:
+            return jsonify({"ok": False, "error": reason}), 400
+        tmp = LICENSE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, LICENSE_FILE)
+        check_offline_license()
+        with cloud_lock:
+            cloud_state["usage"] = local_source_usage()
+        return jsonify({"ok": True, "message": "License installed.", "license": offline_license["payload"]})
+    payload = offline_license.get("payload") or {}
+    return jsonify({"ok": True, "machine_id": licensing.machine_id(), "edition": edition.EDITION,
+                    "product": edition.PRODUCT_NAME, "valid": onprem_mode(),
+                    "reason": offline_license.get("reason"), "customer": payload.get("customer"),
+                    "plan": payload.get("plan"), "expires": payload.get("expires"),
+                    "features": payload.get("features") or [], "limits": payload.get("limits") or {},
+                    "usage": local_source_usage()})
+
+
+@app.route("/license")
+def license_page():
+    return Response(LICENSE_PAGE, mimetype="text/html")
+
 
 @app.route("/legacy")
 def legacy_dashboard():
@@ -11672,14 +11819,16 @@ def _start_v105_recovery():
     return t
 # ---------------- END V10.5 LOCAL CAMERA AUTO-RECOVERY ----------------
 
-if __name__ == "__main__":
+def main():
+    """Start the dashboard web server. Called by `python dashboard.py` and by the packaged
+    launcher (which imports this module, also when it is compiled to native code)."""
     _start_v105_recovery()
     print()
     print(
         "======================================"
     )
     print(
-        "       AI SECURITY COMMAND CENTER"
+        "       " + edition.PRODUCT_NAME.upper()
     )
     print(
         "======================================"
@@ -11703,3 +11852,7 @@ if __name__ == "__main__":
         debug=False,
         threaded=True,
     )
+
+
+if __name__ == "__main__":
+    main()

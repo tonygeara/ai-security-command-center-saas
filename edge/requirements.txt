@@ -4,3 +4,4 @@ requests>=2.31,<3
 pyttsx3>=2.90,<3
 opencv-python>=4.11,<5
 PyYAML>=6.0,<7
+cryptography>=42,<47
