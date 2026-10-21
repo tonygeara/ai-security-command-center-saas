@@ -77,7 +77,9 @@ BEEP_COOLDOWN = 2
 # Unknown-event capture settings
 UNKNOWN_EVENT_COOLDOWN = 120      # fallback dedupe when Frigate object ID is unavailable
 UNKNOWN_EVENT_ID_TTL = 900        # remember a tracked object for 15 minutes
-UNKNOWN_FACE_WAIT_SECONDS = 8     # wait for face recognition before saving person as unknown
+UNKNOWN_FACE_WAIT_SECONDS = 30    # first look at a person's face-recognition result
+UNKNOWN_FACE_MIN_ATTEMPTS = 6     # failed face attempts before an in-view person counts as unknown
+UNKNOWN_FACE_MAX_SECONDS = 300    # decide by then even if the person is still in view
 
 BASE_FOLDER = os.environ.get(
     "AI_SECURITY_HOME",
@@ -857,6 +859,39 @@ def mark_person_recognized(object_id=""):
         pending_unknown_people.pop(object_id, None)
 
 
+face_attempts = {}  # object_id -> failed face-recognition attempts seen over MQTT
+
+
+def record_face_attempt(object_id):
+    """A face was seen but not matched. Counted, not saved: Frigate keeps trying."""
+    object_id = str(object_id or "").strip()
+    if object_id:
+        with unknown_event_lock:
+            face_attempts[object_id] = face_attempts.get(object_id, 0) + 1
+
+
+def person_left(object_id):
+    """Frigate ended this person's event: decide on the unknown-face question now."""
+    object_id = str(object_id or "").strip()
+    with unknown_event_lock:
+        item = pending_unknown_people.get(object_id)
+        if item:
+            item["ended"] = True
+            item["due"] = time.time()
+
+
+def frigate_sub_label(object_id):
+    """The name Frigate finally assigned to this person, if any."""
+    try:
+        ev = requests.get(f"{FRIGATE_API_URL}/api/events/{object_id}", timeout=3).json()
+        sub = ev.get("sub_label")
+        if isinstance(sub, (list, tuple)):
+            sub = sub[0] if sub else None
+        return None if is_unknown(sub) else str(sub)
+    except Exception:
+        return None
+
+
 def queue_unknown_person(object_id, box=None):
     object_id = str(object_id or "").strip()
     if not object_id:
@@ -888,7 +923,33 @@ def unknown_person_worker():
             for object_id, item in due:
                 with unknown_event_lock:
                     if object_id in recognized_person_ids:
+                        face_attempts.pop(object_id, None)
                         continue
+                    attempts = face_attempts.get(object_id, 0)
+                age = now - float(item.get("created", now))
+                ended = bool(item.get("ended"))
+                # Unknown only when Frigate saw the face and kept failing to match it:
+                # when the person leaves, after enough attempts, or after a long stay.
+                if attempts == 0:
+                    decide = None if (ended or age >= UNKNOWN_FACE_MAX_SECONDS) else "wait"
+                elif ended or age >= UNKNOWN_FACE_MAX_SECONDS or (attempts >= UNKNOWN_FACE_MIN_ATTEMPTS and age >= 60):
+                    decide = "unknown"
+                else:
+                    decide = "wait"
+                if decide == "wait":
+                    item["due"] = now + 10
+                    with unknown_event_lock:
+                        if object_id not in recognized_person_ids:
+                            pending_unknown_people[object_id] = item
+                    continue
+                with unknown_event_lock:
+                    face_attempts.pop(object_id, None)
+                if decide is None:
+                    continue  # no face ever seen (back turned, too far): not an unknown face
+                name = frigate_sub_label(object_id)  # final check: Frigate may have matched late
+                if name:
+                    mark_person_recognized(object_id)
+                    continue
                 with state_lock:
                     unknown_face_until = time.time() + DISPLAY_SECONDS
                 set_face_overlay(False, "UNKNOWN FACE", item.get("box"), object_id=object_id)
@@ -907,6 +968,59 @@ def unknown_person_worker():
 
 
 threading.Thread(target=unknown_person_worker, daemon=True).start()
+
+
+# Event snapshots and history are pruned after this many days (0 keeps everything).
+EVENT_RETENTION_DAYS = int(os.environ.get("AI_SECURITY_EVENT_RETENTION_DAYS", "30"))
+
+
+def prune_old_events(days=None, now=None):
+    """Delete event snapshots and history rows older than the retention period."""
+    days = EVENT_RETENTION_DAYS if days is None else days
+    if days <= 0:
+        return 0, 0
+    cutoff = (now or time.time()) - days * 86400
+    cutoff_date = time.strftime("%Y-%m-%d", time.localtime(cutoff))
+    removed_rows = removed_files = 0
+    with event_log_lock:
+        if os.path.exists(EVENT_LOG):
+            with open(EVENT_LOG, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                fieldnames = reader.fieldnames
+                rows = list(reader)
+            keep = [r for r in rows if not r.get("Date") or r["Date"] >= cutoff_date]
+            removed_rows = len(rows) - len(keep)
+            if removed_rows and fieldnames:
+                tmp = EVENT_LOG + ".tmp"
+                with open(tmp, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(keep)
+                os.replace(tmp, EVENT_LOG)
+    if os.path.isdir(EVENT_FOLDER):
+        for name in os.listdir(EVENT_FOLDER):
+            path = os.path.join(EVENT_FOLDER, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed_files += 1
+            except OSError:
+                pass
+    if removed_rows or removed_files:
+        print(f"Event retention: removed {removed_rows} history rows and {removed_files} snapshots older than {days} days")
+    return removed_rows, removed_files
+
+
+def event_retention_worker():
+    while True:
+        try:
+            prune_old_events()
+        except Exception as e:
+            print("Event retention error:", e)
+        time.sleep(6 * 3600)
+
+
+threading.Thread(target=event_retention_worker, daemon=True).start()
 
 
 # ============================================================
@@ -1746,6 +1860,14 @@ def on_message(
                     }
                     set_face_overlay(False, "PERSON", box, object_id=object_id, preserve_identity=True)
                     queue_unknown_person(object_id, box)
+                    sub = after.get("sub_label")
+                    if isinstance(sub, (list, tuple)):
+                        sub = sub[0] if sub else None
+                    if sub and not is_unknown(sub):
+                        mark_person_recognized(object_id)  # Frigate matched the face
+                    if data.get("type") == "end":
+                        person_left(object_id)
+                        tracked_person_boxes.pop(object_id, None)
 
             elif label in {"car", "motorcycle", "truck", "bus"}:
                 if box:
@@ -1758,6 +1880,8 @@ def on_message(
                         "updated_at": time.time(),
                     }
                     set_plate_overlay(False, label.upper(), "", box, object_id=object_id, preserve_identity=True)
+                    if data.get("type") == "end":
+                        tracked_vehicle_boxes.pop(object_id, None)
 
             return
 
@@ -1776,23 +1900,12 @@ def on_message(
             )
 
             if is_unknown(name):
-                with state_lock:
-                    unknown_face_until = (
-                        time.time()
-                        + DISPLAY_SECONDS
-                    )
-
+                # One failed attempt, not a verdict: Frigate keeps trying while the person
+                # is in view. unknown_person_worker decides (and alerts) once it has its answer.
                 face_object_id = payload_object_id(data) or recent_person_object_id
-                set_face_overlay(False, "UNKNOWN FACE", payload_box(data), object_id=face_object_id)
-                detection_beep("face_unknown", False)
-                warning_sound()
-                save_unknown_event(
-                    "UNKNOWN FACE",
-                    "Unknown Person",
-                    identifier=face_object_id,
-                    object_id=face_object_id,
-                )
-
+                record_face_attempt(face_object_id)
+                queue_unknown_person(face_object_id, payload_box(data))
+                set_face_overlay(False, "SCANNING FACE…", payload_box(data), object_id=face_object_id)
                 return
 
             display_name = clean_name(
