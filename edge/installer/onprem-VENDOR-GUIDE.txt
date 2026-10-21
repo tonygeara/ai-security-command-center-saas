@@ -1,0 +1,149 @@
+AI COMMAND CENTRE LEBANON - VENDOR GUIDE (for Tony only - do NOT give this to customers)
+=========================================================================================
+
+This guide covers: building the package, installing it at a customer (e.g. Karim),
+and issuing / renewing his license.
+
+YOUR IMPORTANT FILES
+  C:\AI-Security-Keys\license-signing-key.pem   YOUR SECRET KEY. Only this key can create
+                                                licenses the app accepts.
+                                                - Back it up (USB stick + another safe place).
+                                                - Never email it, never put it on the customer USB.
+                                                - If you lose it you cannot renew existing customers.
+  C:\AI-Security\edge\tools\license_tool.py     the tool that issues licenses
+  C:\AI-Security\edge\installer\output\onprem-usb\   the package that goes to the customer
+
+
+-----------------------------------------------------------------------------------------
+PART 1 - PREPARE THE USB STICK (on your PC)
+-----------------------------------------------------------------------------------------
+1. Use a USB stick with at least 4 GB free.
+2. Copy these 3 files from C:\AI-Security\edge\installer\output\onprem-usb\ to the USB,
+   all in the SAME folder:
+     AI-Command-Centre-Lebanon-Setup-11.1.0.exe
+     ai-command-centre-images.tar
+     INSTALL.txt
+3. Optional but recommended: also put the Docker Desktop installer on the USB
+   (download "Docker Desktop Installer.exe" from https://www.docker.com/products/docker-desktop/).
+
+Rebuilding the package later (after updates):
+   Open PowerShell in C:\AI-Security and run:
+     powershell -ExecutionPolicy Bypass -File edge\installer\build_onprem.ps1
+   (Docker Desktop must be running. Add  -SkipImages  if the .tar did not change.)
+
+
+-----------------------------------------------------------------------------------------
+PART 2 - INSTALL ON THE CUSTOMER LAPTOP (e.g. Karim)
+-----------------------------------------------------------------------------------------
+Laptop requirements:
+  - Windows 10/11 64-bit, virtualization enabled in BIOS
+  - 1-2 cameras: Core i5 8th gen / Ryzen 5 or better, 16 GB RAM, SSD
+  - 4+ cameras: 8 cores, 32 GB RAM, NVIDIA RTX 3050/3060 or better, SSD 512 GB+
+  - Cameras with RTSP on the same network
+
+Steps:
+1. Install Docker Desktop (default options, WSL 2). Restart if asked.
+   Open Docker Desktop once and wait until it shows "Engine running".
+   Settings > General > tick "Start Docker Desktop when you sign in".
+   (Internet makes this step easiest; everything after it works offline.)
+2. Plug in the USB and run AI-Command-Centre-Lebanon-Setup-11.1.0.exe FROM THE USB FOLDER
+   (the .tar must be next to it).
+   If Windows says "Windows protected your PC": More info > Run anyway.
+3. Open "AI Command Centre Lebanon" from the desktop.
+   The first start loads the AI services - this takes several minutes.
+4. The License page opens and shows the MACHINE ID, for example:
+       F9C9-B5F1-CBB1-BA7C-7356
+   Write it down exactly (or take a photo). You need it for Part 3.
+
+
+-----------------------------------------------------------------------------------------
+PART 3 - GENERATE KARIM'S LICENSE (on YOUR PC)
+-----------------------------------------------------------------------------------------
+1. Open PowerShell and go to the tools folder:
+       cd C:\AI-Security\edge\tools
+
+2. Run this command (replace the Machine ID with Karim's, and set the date/limits):
+
+       & "C:\AI-Security\edge\.venv-onprem\Scripts\python.exe" license_tool.py issue --customer "Karim" --machine XXXX-XXXX-XXXX-XXXX-XXXX --expires 2027-10-20 --cameras 4 --drones 1
+
+   It creates a file in the same folder named like:
+       license-Karim-XXXX-XXXX.lic
+
+3. Check the file (optional):
+
+       & "C:\AI-Security\edge\.venv-onprem\Scripts\python.exe" license_tool.py show license-Karim-XXXX-XXXX.lic
+
+Options you can change:
+   --customer "Name"      customer name shown on his License page
+   --machine  ID          Karim's Machine ID (from Part 2, step 4) - must be exact
+   --expires  YYYY-MM-DD  last day the license works (e.g. 2027-10-20 = one year)
+   --cameras  N           maximum number of cameras
+   --drones   N           maximum number of drones (0 = no drones)
+   --plan     "Label"     plan name shown on his License page (default: on-prem)
+   --features ...         what is included. Leave it out = everything. Choices:
+                            camera_ai  face_ai  lpr  drone_live  drone_ai  drone_tracking
+   --out      path        save the .lic somewhere else (e.g. straight to the USB: --out E:\karim.lic)
+
+Examples:
+   Face + plate ID only, 4 cameras, no drone, 1 year:
+       ... issue --customer "Karim" --machine XXXX-XXXX-XXXX-XXXX-XXXX --expires 2027-10-20 --cameras 4 --drones 0 --features camera_ai face_ai lpr
+
+   1-month trial, everything:
+       ... issue --customer "Karim (trial)" --machine XXXX-XXXX-XXXX-XXXX-XXXX --expires 2026-11-20 --cameras 2 --drones 1
+
+
+-----------------------------------------------------------------------------------------
+PART 4 - INSTALL THE LICENSE ON KARIM'S LAPTOP
+-----------------------------------------------------------------------------------------
+1. Send him the .lic file (email, WhatsApp, USB) - or do it yourself on site.
+2. In the app, on the License page: click "Choose file", pick the .lic file,
+   click "Install license". The dashboard opens.
+3. Then add his cameras: Launcher > "Camera / Drone Setup" for the first camera,
+   dashboard > Devices > Add camera for more (up to the license limit).
+
+
+-----------------------------------------------------------------------------------------
+UPDATING KARIM TO A NEW VERSION
+-----------------------------------------------------------------------------------------
+On your PC:
+1. Make and test your changes on your own system as usual.
+2. Raise the version in C:\AI-Security\edge\app\launcher.pyw
+   (line  APP_VERSION = '11.1.0'  ->  e.g. '11.2.0').
+3. Rebuild (PowerShell in C:\AI-Security):
+     powershell -ExecutionPolicy Bypass -File edge\installer\build_onprem.ps1 -SkipImages
+   Leave out -SkipImages only if the Docker images changed (e.g. a new Frigate version
+   in edge\runtime\docker-compose.yml) - then also send him the new .tar.
+4. New file: edge\installer\output\onprem-usb\AI-Command-Centre-Lebanon-Setup-<new>.exe
+
+On Karim's laptop:
+5. Close the app (launcher > Stop System, then close it).
+6. Run the new Setup.exe (from USB, or send it by link/WeTransfer - it is ~50 MB).
+   It installs over the old version.
+7. Open the app again. Done.
+
+Kept automatically: his license, faces, plates, events, recordings, cameras and settings
+(they live in %LOCALAPPDATA%\AI-Command-Centre-Lebanon, which the installer never touches).
+No new license is needed - it is tied to his laptop, not to the version.
+Tip: before a big update, back up his data folder to a USB stick.
+
+
+-----------------------------------------------------------------------------------------
+RENEWING / CHANGING A LICENSE
+-----------------------------------------------------------------------------------------
+- Run the same "issue" command with the new expiry date or new limits.
+- Karim installs the new .lic the same way; it replaces the old one.
+- Keep a list of customers + Machine IDs + expiry dates so you know when to renew.
+
+WHAT THE LICENSE PROTECTS
+- It only works on the laptop with that Machine ID (copying it to another PC fails).
+- It stops working after the expiry date (the License page opens again).
+- Any change to the file (dates, limits, features) makes it invalid.
+- Karim's laptop never needs internet or your cloud for the license.
+
+TROUBLESHOOTING
+- "License is for a different computer": the Machine ID was typed wrong, or Windows
+  was reinstalled on his laptop (new Machine ID) -> issue a new license for the new ID.
+- "License has expired": issue a renewal.
+- "signature is invalid": the file was edited or not made with your key -> re-issue.
+- Dashboard does not open / no video: make sure Docker Desktop is running
+  ("Engine running"), then Stop System / Start System in the launcher.
