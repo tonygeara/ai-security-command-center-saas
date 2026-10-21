@@ -107,6 +107,15 @@ def load_local_settings():
     except Exception:
         return {}
 
+def save_local_settings(updates):
+    settings = load_local_settings()
+    settings.update(updates)
+    tmp = LOCAL_SETTINGS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    os.replace(tmp, LOCAL_SETTINGS_FILE)
+    return settings
+
 LOCAL_SETTINGS = load_local_settings()
 CAMERA_NAME = str(LOCAL_SETTINGS.get("camera_name") or CAMERA_NAME)
 STREAM = str(LOCAL_SETTINGS.get("camera_stream") or f"rtsp://localhost:8554/{CAMERA_NAME}")
@@ -1697,6 +1706,10 @@ def on_connect(
         client.subscribe(MQTT_EVENTS_TOPIC)
         client.subscribe(DRONE_STATE_TOPIC)
         client.subscribe(CAMERA_STATE_TOPIC)
+
+        # Re-apply sources the user stopped: Frigate starts every configured camera.
+        for name in load_local_settings().get("paused_sources") or []:
+            client.publish(f"frigate/{name}/enabled/set", "OFF")
 
         print(
             "Dashboard MQTT connected"
@@ -3827,6 +3840,7 @@ LIVE_PLAYER_HTML = r"""
 .live-slot{position:relative;width:100%;height:100%;background:#000;overflow:hidden}
 .live-slot video-stream,.live-slot video,.live-slot>img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;background:#000}
 .live-slot canvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+.live-slot video-stream div{display:none!important}  /* go2rtc's raw status text; our tag shows status */
 .live-mode{position:absolute;right:12px;top:10px;z-index:3;font:bold 9px Arial,sans-serif;letter-spacing:1px;color:#2aea88;
   background:rgba(3,16,26,.8);border:1px solid #155879;padding:4px 7px;border-radius:3px}
 .live-mode.compat{color:#ffb23c}
@@ -3904,8 +3918,9 @@ function drawOverlays(slot, cam) {
         }
         render();
     };
-    setInterval(poll, 700);
+    (slot._timers = slot._timers || []).push(setInterval(poll, 700));
     window.addEventListener("resize", render);
+    slot._cleanup = () => window.removeEventListener("resize", render);
     poll();
 }
 
@@ -3925,8 +3940,14 @@ async function attach(slot) {
     slot.dataset.mode = "direct";
     setMode(slot, "CONNECTING…", true);
     const started = Date.now();
+    if (!slot._fullscreenBound) {  // double-click any live feed for full screen
+        slot.addEventListener("dblclick", () => slot.requestFullscreen?.());
+        slot._fullscreenBound = true;
+    }
     const check = setInterval(() => {
+        if (!slot.isConnected || slot.dataset.mode === undefined) { clearInterval(check); return; }
         const v = el.querySelector("video");
+        if (v && v.controls) v.controls = false;  // no browser player bar over the camera
         if (v && v.currentTime > 0 && !v.paused) {
             setMode(slot, "● REAL-TIME");
             if (cam.fallback_on_timeout !== false) clearInterval(check);
@@ -3940,9 +3961,22 @@ async function attach(slot) {
     if (cam.overlays) drawOverlays(slot, cam);
 }
 
-document.querySelectorAll("[data-live-camera]").forEach(attach);
+// Panels with data-live-deferred are started by their Live feed switch instead.
+document.querySelectorAll("[data-live-camera]:not([data-live-deferred])").forEach(attach);
 // The multi-camera grid adds tiles after load and attaches them with this.
 window.attachLiveCamera = attach;
+
+// Stop a live view completely: closes the relay connection or MJPEG stream and its timers.
+function detach(slot) {
+    (slot._timers || []).forEach(clearInterval);
+    slot._timers = [];
+    if (slot._cleanup) { slot._cleanup(); slot._cleanup = null; }
+    slot.querySelectorAll("video-stream, canvas, .live-mode").forEach(el => el.remove());
+    const img = slot.querySelector(":scope > img");
+    if (img) { img.src = "data:,"; img.remove(); }
+    delete slot.dataset.mode;
+}
+window.detachLiveCamera = detach;
 window.dispatchEvent(new Event("live-player-ready"));
 </script>
 """
@@ -4253,13 +4287,87 @@ def api_cameras():
         stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
     except Exception:
         stats = {}
+    settings = load_local_settings()
+    hidden = set(settings.get("hidden_feeds") or [])
+    paused = set(settings.get("paused_sources") or [])
     items = []
     for name in names:
         fps = float((stats.get(name) or {}).get("camera_fps") or 0)
         items.append({"name": name, "kind": "drone" if _is_drone_name(name) else "camera",
                       "online": fps > 0, "fps": round(fps, 1),
-                      "primary": name in (CAMERA_NAME, DRONE_CAMERA_NAME)})
+                      "primary": name in (CAMERA_NAME, DRONE_CAMERA_NAME),
+                      "feed_visible": name not in hidden, "paused": name in paused})
     return jsonify({"ok": True, "main": CAMERA_NAME, "drone": DRONE_CAMERA_NAME, "cameras": items})
+
+
+def _known_source_or_404(name):
+    if name not in _frigate_camera_names():
+        return jsonify({"ok": False, "error": "Unknown camera or drone."}), 404
+    return None
+
+
+@app.route("/api/sources/<name>/feed", methods=["POST"])
+def api_source_feed(name):
+    """Show or hide a live feed on the dashboard (display only; recording and AI continue)."""
+    err = _known_source_or_404(name)
+    if err:
+        return err
+    visible = bool((request.get_json(silent=True) or {}).get("visible"))
+    hidden = set(load_local_settings().get("hidden_feeds") or [])
+    (hidden.discard if visible else hidden.add)(name)
+    save_local_settings({"hidden_feeds": sorted(hidden)})
+    return jsonify({"ok": True, "name": name, "feed_visible": visible})
+
+
+@app.route("/api/sources/<name>/pause", methods=["POST"])
+def api_source_pause(name):
+    """Stop or start Frigate's processing for an added camera/drone without removing it."""
+    err = _known_source_or_404(name)
+    if err:
+        return err
+    if name in (CAMERA_NAME, DRONE_CAMERA_NAME):
+        return jsonify({"ok": False, "error": "Use the Camera AI / Drone AI switch for the main camera and drone."}), 400
+    if not mqtt_connected or mqtt_client is None:
+        return jsonify({"ok": False, "error": "MQTT is offline."}), 503
+    paused = bool((request.get_json(silent=True) or {}).get("paused"))
+    mqtt_client.publish(f"frigate/{name}/enabled/set", "OFF" if paused else "ON")
+    current = set(load_local_settings().get("paused_sources") or [])
+    (current.add if paused else current.discard)(name)
+    save_local_settings({"paused_sources": sorted(current)})
+    return jsonify({"ok": True, "name": name, "paused": paused})
+
+
+@app.route("/api/sources/<name>", methods=["DELETE"])
+def api_source_remove(name):
+    """Remove an added camera/drone from Frigate and free its slot on the plan."""
+    import shutil
+    err = _known_source_or_404(name)
+    if err:
+        return err
+    if name in (CAMERA_NAME, DRONE_CAMERA_NAME):
+        return jsonify({"ok": False, "error": "The main camera and first drone can't be removed here."}), 400
+    with open(LIVE_FRIGATE_CONFIG, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    (cfg.get("cameras") or {}).pop(name, None)
+    ((cfg.get("go2rtc") or {}).get("streams") or {}).pop(name, None)
+    shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-remove-" + name)
+    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    os.replace(tmp, LIVE_FRIGATE_CONFIG)
+    settings = load_local_settings()
+    save_local_settings({k: sorted(set(settings.get(k) or []) - {name}) for k in ("hidden_feeds", "paused_sources")})
+    # Free the plan slot: drones are registered as "Drone N", cameras by their name.
+    label = f"Drone {name[len(DRONE_CAMERA_NAME):]}" if _is_drone_name(name) else name
+    cloud_note = ""
+    sources = _cloud_source("GET").get("sources") or []
+    match = next((s for s in sources if str(s.get("name", "")).lower() in (label.lower(), name.lower())), None)
+    if match:
+        if not _cloud_source("DELETE", {"id": match.get("id")}).get("ok"):
+            cloud_note = " (could not free the plan slot in the cloud)"
+    restarted, msg = _restart_frigate()
+    return jsonify({"ok": True, "name": name, "frigate_restarted": restarted,
+                    "message": f"{name} removed{cloud_note}."})
 
 
 @app.route("/setup/camera")
@@ -7570,8 +7678,11 @@ MQTT EVENT BUS
 ▣ LIVE CAMERA FEED
 </div>
 
+<div style="display:flex;align-items:center;gap:10px">
 <div class="live">
 ● LIVE
+</div>
+<button type="button" class="feed-switch" data-feed-switch="main" aria-pressed="true" title="Show or hide this live feed">LIVE FEED <span class="knob"></span></button>
 </div>
 
 </div>
@@ -7579,7 +7690,7 @@ MQTT EVENT BUS
 
 <div class="camera-box">
 
-<div class="camera live-slot" data-live-camera style="aspect-ratio:16/9;min-height:0"></div>
+<div class="camera live-slot" data-live-camera data-live-deferred style="aspect-ratio:16/9;min-height:0"></div>
 
 <div class="corner tl"></div>
 <div class="corner tr"></div>
@@ -7607,10 +7718,13 @@ FRONT CAMERA • FACE AI • LPR AI
 <div class="panel" style="margin-top:9px;">
 <div class="panel-head">
 <div class="panel-title">✈ DRONE LIVE FEED</div>
+<div style="display:flex;align-items:center;gap:10px">
 <div class="live" id="droneFeedState">DRONE</div>
+<button type="button" class="feed-switch" data-feed-switch="drone" aria-pressed="true" title="Show or hide this live feed">LIVE FEED <span class="knob"></span></button>
+</div>
 </div>
 <div class="camera-box" style="min-height:280px;">
-<div id="droneCameraFeed" class="camera live-slot" data-live-camera="drone"
+<div id="droneCameraFeed" class="camera live-slot" data-live-camera="drone" data-live-deferred
 style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
 <div class="corner tl"></div><div class="corner tr"></div>
 <div class="corner bl"></div><div class="corner br"></div>
@@ -7629,10 +7743,26 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
 .multi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;padding:10px}
 .grid-tile{position:relative;background:#000;border:1px solid #123447;border-radius:5px;overflow:hidden}
 .grid-tile .live-slot{aspect-ratio:16/9;height:auto;cursor:zoom-in}
-.grid-tile .tile-foot{display:flex;justify-content:space-between;align-items:center;padding:6px 9px;font-size:9px;letter-spacing:1px;color:#5d8499;background:#03101a}
+.grid-tile.feed-off .live-slot{display:none}
+.grid-tile .tile-foot{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 9px;font-size:9px;letter-spacing:1px;color:#5d8499;background:#03101a;flex-wrap:wrap}
 .grid-tile .tile-name{color:#35caff;text-transform:uppercase}
 .grid-tile .tile-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#ff5d6c;margin-right:6px}
 .grid-tile .tile-dot.on{background:#26ee89;box-shadow:0 0 8px #26ee89}
+.grid-tile .tile-dot.paused{background:#ffb23c;box-shadow:none}
+.grid-tile .tile-actions{display:flex;gap:6px;align-items:center}
+.tile-btn{min-height:22px;padding:0 8px;cursor:pointer;color:#66dfff;background:rgba(14,88,128,.12);border:1px solid #155879;border-radius:3px;font-size:8px;letter-spacing:1px;font-family:inherit}
+.tile-btn:hover{color:#fff;border-color:#35cbff}
+.tile-btn.danger{color:#ff7b86;border-color:#7a2935;background:rgba(125,12,28,.12)}
+.tile-btn:disabled{opacity:.5;cursor:default}
+.feed-off-note{display:none;padding:18px 12px;color:#6d8b9d;font-size:10px;letter-spacing:1px;text-align:center}
+.panel.feed-off .camera-box{display:none}
+.panel.feed-off .feed-off-note{display:block}
+.feed-switch{display:inline-flex;align-items:center;gap:7px;min-height:22px;padding:0 8px;cursor:pointer;color:#2aea88;background:rgba(18,120,70,.10);border:1px solid #1f7a50;border-radius:12px;font-size:8px;letter-spacing:1px;font-family:inherit}
+.feed-switch .knob{position:relative;display:inline-block;width:26px;height:14px;border-radius:7px;background:rgba(37,199,255,.18);border:1px solid #36cfff}
+.feed-switch .knob::after{content:"";position:absolute;top:2px;left:13px;width:8px;height:8px;border-radius:50%;background:#45d0ff;box-shadow:0 0 6px #45d0ff;transition:.2s}
+.feed-switch[aria-pressed="false"]{color:#6d8b9d;background:rgba(14,88,128,.08);border-color:#155879}
+.feed-switch[aria-pressed="false"] .knob{background:#0a1c28;border-color:#155879}
+.feed-switch[aria-pressed="false"] .knob::after{left:2px;background:#4d6b7c;box-shadow:none}
 .grid-empty{padding:22px 14px;color:#6d8b9d;font-size:11px;letter-spacing:.5px;line-height:1.6}
 .grid-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 10px 12px}
 .grid-actions code{color:#2eef88;font-size:11px;word-break:break-all}
@@ -7655,19 +7785,121 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
     const count = document.getElementById("multiGridCount");
     const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
     const tiles = {};
+    let names = {main: null, drone: null};
 
-    function attachWhenReady(slot) {
-        if (window.attachLiveCamera) window.attachLiveCamera(slot);
-        else window.addEventListener("live-player-ready", () => window.attachLiveCamera(slot), {once: true});
+    const whenPlayerReady = fn => window.attachLiveCamera ? fn()
+        : window.addEventListener("live-player-ready", fn, {once: true});
+    const setSwitch = (btn, on) => btn.setAttribute("aria-pressed", on ? "true" : "false");
+    const post = (url, body) => fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})
+        .then(r => r.json().then(d => { if (!r.ok || !d.ok) throw new Error(d.error || "Request failed"); return d; }));
+
+    // Show or stop one live view. Off = no stream at all (saves CPU), not just hidden.
+    function showFeed(slot, on) {
+        whenPlayerReady(() => {
+            const running = slot.dataset.mode !== undefined;
+            if (on && !running) window.attachLiveCamera(slot);
+            if (!on && running) window.detachLiveCamera(slot);
+        });
+    }
+
+    // Live feed switches on the main camera and drone panels.
+    function syncPrimary(key, visible) {
+        const btn = document.querySelector('[data-feed-switch="' + key + '"]');
+        const slot = document.querySelector('[data-live-camera="' + (key === "main" ? "" : key) + '"]')
+            || (key === "main" ? document.querySelector("[data-live-camera]:not([data-live-camera='drone'])") : null);
+        if (!btn || !slot) return;
+        const panel = btn.closest(".panel");
+        if (!panel.querySelector(".feed-off-note")) {
+            const note = document.createElement("div");
+            note.className = "feed-off-note";
+            note.textContent = "LIVE FEED OFF — switch it on to view. Recording and AI keep running.";
+            panel.querySelector(".camera-box").after(note);
+        }
+        setSwitch(btn, visible);
+        panel.classList.toggle("feed-off", !visible);
+        showFeed(slot, visible);
+    }
+    document.querySelectorAll("[data-feed-switch]").forEach(btn => btn.addEventListener("click", async () => {
+        const key = btn.dataset.feedSwitch, name = names[key];
+        if (!name) return;
+        const on = btn.getAttribute("aria-pressed") !== "true";
+        btn.disabled = true;
+        try { await post("/api/sources/" + encodeURIComponent(name) + "/feed", {visible: on}); syncPrimary(key, on); }
+        catch (e) { alert(e.message); }
+        finally { btn.disabled = false; }
+    }));
+
+    function tileFor(c) {
+        const t = document.createElement("div");
+        t.className = "grid-tile";
+        t.innerHTML = '<div class="live-slot" data-live-camera="' + esc(c.name) + '" title="Double-click for full screen"></div>'
+            + '<div class="tile-foot"><span><i class="tile-dot"></i><span class="tile-name">'
+            + (c.kind === "drone" ? "✈ " : "▣ ") + esc(c.name) + '</span> <span class="tile-fps"></span></span>'
+            + '<span class="tile-actions">'
+            + '<button type="button" class="feed-switch" data-act="feed">FEED <span class="knob"></span></button>'
+            + '<button type="button" class="tile-btn" data-act="pause"></button>'
+            + '<button type="button" class="tile-btn danger" data-act="remove">REMOVE</button>'
+            + '</span></div>';
+        const slot = t.querySelector(".live-slot");
+        t.querySelector('[data-act="feed"]').addEventListener("click", async e => {
+            const btn = e.currentTarget, on = btn.getAttribute("aria-pressed") !== "true";
+            btn.disabled = true;
+            try { await post("/api/sources/" + encodeURIComponent(c.name) + "/feed", {visible: on}); applyTile(t, {...t._c, feed_visible: on}); }
+            catch (err) { alert(err.message); } finally { btn.disabled = false; }
+        });
+        t.querySelector('[data-act="pause"]').addEventListener("click", async e => {
+            const btn = e.currentTarget, paused = !t._c.paused;
+            btn.disabled = true;
+            try { await post("/api/sources/" + encodeURIComponent(c.name) + "/pause", {paused}); applyTile(t, {...t._c, paused}); }
+            catch (err) { alert(err.message); } finally { btn.disabled = false; }
+        });
+        t.querySelector('[data-act="remove"]').addEventListener("click", async e => {
+            if (!confirm("Remove " + c.name + "?\n\nIt will be deleted from Frigate and its slot freed on your plan. "
+                + "Recordings already saved are kept.")) return;
+            const btn = e.currentTarget;
+            btn.disabled = true; btn.textContent = "REMOVING…";
+            try {
+                const r = await fetch("/api/sources/" + encodeURIComponent(c.name), {method: "DELETE"});
+                const d = await r.json();
+                if (!r.ok || !d.ok) throw new Error(d.error || "Could not remove");
+                window.detachLiveCamera?.(slot);
+                t.remove(); delete tiles[c.name];
+                document.getElementById("addDroneMsg").textContent = d.message + " Frigate is restarting.";
+            } catch (err) { alert(err.message); btn.disabled = false; btn.textContent = "REMOVE"; }
+        });
+        return t;
+    }
+
+    function applyTile(t, c) {
+        t._c = c;
+        const visible = c.feed_visible !== false;
+        t.classList.toggle("feed-off", !visible);
+        setSwitch(t.querySelector('[data-act="feed"]'), visible);
+        showFeed(t.querySelector(".live-slot"), visible);
+        const dot = t.querySelector(".tile-dot");
+        dot.classList.toggle("on", !!c.online && !c.paused);
+        dot.classList.toggle("paused", !!c.paused);
+        t.querySelector(".tile-fps").textContent = c.paused ? "STOPPED" : (c.online ? c.fps + " FPS" : "OFFLINE");
+        t.querySelector('[data-act="pause"]').textContent = c.paused ? "START" : "STOP";
     }
 
     async function refresh() {
         let data;
         try { data = await fetch("/api/cameras", {cache: "no-store"}).then(r => r.json()); } catch (e) { return; }
+        const all = data.cameras || [];
+        names = {main: data.main, drone: data.drone};
+        for (const key of ["main", "drone"]) {
+            const c = all.find(x => x.name === names[key]);
+            const btn = document.querySelector('[data-feed-switch="' + key + '"]');
+            const wanted = c ? c.feed_visible !== false : true;
+            if (btn && (btn.dataset.synced !== "1" || (btn.getAttribute("aria-pressed") === "true") !== wanted)) {
+                syncPrimary(key, wanted);
+                btn.dataset.synced = "1";
+            }
+        }
         // The main camera and first drone have their own panels above; the grid shows the rest.
-        const extra = (data.cameras || []).filter(c => !c.primary);
-        const online = (data.cameras || []).filter(c => c.online).length;
-        count.textContent = online + " / " + (data.cameras || []).length + " ONLINE";
+        const extra = all.filter(c => !c.primary);
+        count.textContent = all.filter(c => c.online).length + " / " + all.length + " ONLINE";
         if (!extra.length) {
             grid.innerHTML = '<div class="grid-empty">No additional cameras or drones yet. Use <b>+ ADD CAMERA</b> or <b>+ ADD DRONE</b> below; '
                 + 'each one appears here live.</div>';
@@ -7676,24 +7908,11 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
         }
         grid.querySelector(".grid-empty")?.remove();
         for (const c of extra) {
-            let t = tiles[c.name];
-            if (!t) {
-                t = document.createElement("div");
-                t.className = "grid-tile";
-                t.innerHTML = '<div class="live-slot" data-live-camera="' + esc(c.name) + '" title="Double-click for full screen"></div>'
-                    + '<div class="tile-foot"><span><i class="tile-dot"></i><span class="tile-name">'
-                    + (c.kind === "drone" ? "✈ " : "▣ ") + esc(c.name) + '</span></span><span class="tile-fps"></span></div>';
-                const slot = t.querySelector(".live-slot");
-                slot.addEventListener("dblclick", () => slot.requestFullscreen?.());
-                grid.appendChild(t);
-                tiles[c.name] = t;
-                attachWhenReady(slot);
-            }
-            t.querySelector(".tile-dot").classList.toggle("on", !!c.online);
-            t.querySelector(".tile-fps").textContent = c.online ? c.fps + " FPS" : "OFFLINE";
+            if (!tiles[c.name]) { tiles[c.name] = tileFor(c); grid.appendChild(tiles[c.name]); }
+            applyTile(tiles[c.name], c);
         }
         for (const name of Object.keys(tiles)) {
-            if (!extra.some(c => c.name === name)) { tiles[name].remove(); delete tiles[name]; }
+            if (!extra.some(c => c.name === name)) { window.detachLiveCamera?.(tiles[name].querySelector(".live-slot")); tiles[name].remove(); delete tiles[name]; }
         }
     }
 
