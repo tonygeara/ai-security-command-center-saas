@@ -123,9 +123,18 @@ class LinkClient(
         try { send(s.getOutputStream(), JSONObject().put("t", "event").put("msg", text)) } catch (_: Exception) {}
     }
 
+    // DJI reports results on the main thread, where Android forbids network writes, so every
+    // message goes out through one background sender (which also keeps them in order).
+    private val sender = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "drone-link-send").apply { isDaemon = true }
+    }
+
     private fun send(out: OutputStream, msg: JSONObject) {
         val bytes = (msg.toString() + "\n").toByteArray(Charsets.UTF_8)
-        synchronized(writeLock) { out.write(bytes); out.flush() }
+        sender.execute {
+            try { synchronized(writeLock) { out.write(bytes); out.flush() } }
+            catch (_: Exception) { try { socket?.close() } catch (_: Exception) {} }
+        }
     }
 
     private fun hmac(key: String, data: String): String {

@@ -17,6 +17,11 @@ import dji.sdk.keyvalue.value.common.ComponentIndexType
 import dji.sdk.keyvalue.value.common.EmptyMsg
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D
 import dji.sdk.keyvalue.value.flightcontroller.FlightControlAuthorityChangeReason
+import dji.sdk.keyvalue.value.flightcontroller.FlightCoordinateSystem
+import dji.sdk.keyvalue.value.flightcontroller.RollPitchControlMode
+import dji.sdk.keyvalue.value.flightcontroller.VerticalControlMode
+import dji.sdk.keyvalue.value.flightcontroller.VirtualStickFlightControlParam
+import dji.sdk.keyvalue.value.flightcontroller.YawControlMode
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode
 import dji.v5.common.callback.CommonCallbacks
@@ -47,7 +52,6 @@ import kotlin.math.sqrt
 
 /** Everything that talks to the DJI SDK: status, telemetry, commands and the virtual sticks. */
 object DroneController {
-    private const val STICK_MAX = 660          // DJI stick range is -660..660
     private const val STICK_TIMEOUT_MS = 500L  // no stick update from the PC -> centre sticks (hover)
 
     @Volatile private var sdkInitialized = false
@@ -157,6 +161,7 @@ object DroneController {
         read(KeyTools.createKey(FlightControllerKey.KeyIsFlying))?.let { t.put("flying", it) }
         read(KeyTools.createKey(FlightControllerKey.KeyAreMotorsOn))?.let { t.put("motors_on", it) }
         read(KeyTools.createKey(FlightControllerKey.KeyFCFlightMode))?.let { t.put("flight_mode", it.name) }
+        read(KeyTools.createKey(FlightControllerKey.KeyIsLandingConfirmationNeeded))?.let { t.put("landing_confirm_needed", it) }
         read(KeyTools.createKey(AirLinkKey.KeyDownLinkQuality))?.let { t.put("signal", it) }
         read(KeyTools.createKey(GimbalKey.KeyGimbalAttitude))?.let { t.put("gimbal_pitch", it.pitch) }
         read(KeyTools.createKey(FlightControllerKey.KeyHomeLocation))?.let {
@@ -176,6 +181,7 @@ object DroneController {
             "takeoff" -> action(FlightControllerKey.KeyStartTakeoff, done, fail)
             "land" -> action(FlightControllerKey.KeyStartAutoLanding, done, fail)
             "cancel_land" -> action(FlightControllerKey.KeyStopAutoLanding, done, fail)
+            "confirm_land" -> action(FlightControllerKey.KeyConfirmLanding, done, fail)
             "go_home" -> { centreSticks(); action(FlightControllerKey.KeyStartGoHome, done, fail) }
             "cancel_go_home" -> action(FlightControllerKey.KeyStopGoHome, done, fail)
             "hover" -> { centreSticks(); done(true, "") }
@@ -253,21 +259,78 @@ object DroneController {
     }
 
     // ---------- virtual sticks ----------
+    // Advanced (velocity) mode: this phone sends a velocity command 10x per second from its own
+    // timer. The target comes from the PC's sticks; if no stick update arrives for 0.5 s the target
+    // is zero, so the drone hovers. Nothing is "held" inside the SDK between messages.
+
+    // DJI body frame: "roll" velocity = forward (x axis), "pitch" velocity = right (y axis).
+    // Verified in the simulator before use; flip here if a test shows otherwise.
+    private const val FORWARD_IS_ROLL = true
+
+    @Volatile private var targetX = 0.0  // right   -1..1
+    @Volatile private var targetY = 0.0  // forward -1..1
+    @Volatile private var targetZ = 0.0  // up      -1..1
+    @Volatile private var targetR = 0.0  // turn    -1..1
+    @Volatile private var speedLevel = 0.3
+    private val controlLoop = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "drone-control").apply { isDaemon = true }
+    }
+    private var loopStarted = false
 
     private fun enableControl(speed: Double, done: (Boolean, String) -> Unit) {
         val vs = VirtualStickManager.getInstance()
         vs.enableVirtualStick(object : CommonCallbacks.CompletionCallback {
             override fun onSuccess() {
-                vs.setVirtualStickAdvancedModeEnabled(false)  // plain stick mode: behaves exactly like the RC sticks
-                vs.speedLevel = max(0.1, min(maxSpeedLevel, speed))
+                vs.setVirtualStickAdvancedModeEnabled(true)
+                speedLevel = max(0.1, min(maxSpeedLevel, speed))
                 centreSticks()
                 controlByPc = true
                 lastStickAt = System.currentTimeMillis()
+                startControlLoop()
                 changed()
                 done(true, "")
             }
             override fun onFailure(error: IDJIError) = done(false, error.description() ?: error.errorCode())
         })
+    }
+
+    private fun startControlLoop() {
+        if (loopStarted) return
+        loopStarted = true
+        controlLoop.scheduleWithFixedDelay({
+            try { sendVelocity() } catch (e: Exception) { event("Control loop error: ${e.message}") }
+        }, 0, 100, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    private fun sendVelocity() {
+        if (!controlByPc || !productConnected) return
+        if (System.currentTimeMillis() - lastStickAt > STICK_TIMEOUT_MS) centreSticks()
+        var x = targetX; var y = targetY; var z = targetZ; val r = targetR
+        val t = telemetry()
+        if (t.optDouble("altitude", 0.0) >= maxAltitude && z > 0) z = 0.0
+        if (t.optDouble("distance_home", 0.0) >= maxDistance && t.has("lat") && t.has("home_lat") && (x != 0.0 || y != 0.0)) {
+            // Only allow horizontal movement that brings the drone back towards home.
+            val hdg = Math.toRadians(t.optDouble("heading", 0.0))
+            val north = y * cos(hdg) - x * sin(hdg)
+            val east = y * sin(hdg) + x * cos(hdg)
+            val awayN = t.getDouble("lat") - t.getDouble("home_lat")
+            val awayE = (t.getDouble("lon") - t.getDouble("home_lon")) * cos(Math.toRadians(t.getDouble("lat")))
+            if (north * awayN + east * awayE > 0) { x = 0.0; y = 0.0 }
+        }
+        val horizontal = speedLevel * 10.0          // m/s at full stick (0.3 -> 3 m/s, max 5 m/s)
+        val vertical = min(3.0, speedLevel * 6.0)   // m/s
+        val yawRate = 60.0 * speedLevel / 0.5       // deg/s
+        val param = VirtualStickFlightControlParam().apply {
+            rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
+            rollPitchControlMode = RollPitchControlMode.VELOCITY
+            verticalControlMode = VerticalControlMode.VELOCITY
+            yawControlMode = YawControlMode.ANGULAR_VELOCITY
+            if (FORWARD_IS_ROLL) { roll = y * horizontal; pitch = x * horizontal }
+            else { pitch = y * horizontal; roll = x * horizontal }
+            verticalThrottle = z * vertical
+            yaw = r * yawRate
+        }
+        VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param)
     }
 
     /** Hand control back to the pilot's sticks. Safe to call any time. */
@@ -281,37 +344,14 @@ object DroneController {
     }
 
     fun centreSticks() {
-        if (!productConnected) return
-        val vs = VirtualStickManager.getInstance()
-        vs.leftStick.horizontalPosition = 0; vs.leftStick.verticalPosition = 0
-        vs.rightStick.horizontalPosition = 0; vs.rightStick.verticalPosition = 0
+        targetX = 0.0; targetY = 0.0; targetZ = 0.0; targetR = 0.0
     }
 
-    /**
-     * Sticks from the PC, each -1..1: x = left/right, y = forward/back, z = up/down, r = turn.
-     * Enforces the altitude and distance limits before passing them on (Mode 2 layout).
-     */
+    /** Sticks from the PC, each -1..1: x = right, y = forward, z = up, r = turn right. */
     fun setSticks(x0: Double, y0: Double, z0: Double, r0: Double) {
         if (!controlByPc) return
+        targetX = clamp(x0); targetY = clamp(y0); targetZ = clamp(z0); targetR = clamp(r0)
         lastStickAt = System.currentTimeMillis()
-        var x = clamp(x0); var y = clamp(y0); var z = clamp(z0); val r = clamp(r0)
-        val t = telemetry()
-        if (t.optDouble("altitude", 0.0) >= maxAltitude && z > 0) z = 0.0
-        val dist = t.optDouble("distance_home", 0.0)
-        if (dist >= maxDistance && t.has("lat") && t.has("home_lat") && (x != 0.0 || y != 0.0)) {
-            // Only allow horizontal movement that brings the drone back towards home.
-            val hdg = Math.toRadians(t.optDouble("heading", 0.0))
-            val north = y * cos(hdg) - x * sin(hdg)
-            val east = y * sin(hdg) + x * cos(hdg)
-            val awayN = t.getDouble("lat") - t.getDouble("home_lat")
-            val awayE = (t.getDouble("lon") - t.getDouble("home_lon")) * cos(Math.toRadians(t.getDouble("lat")))
-            if (north * awayN + east * awayE > 0) { x = 0.0; y = 0.0 }
-        }
-        val vs = VirtualStickManager.getInstance()
-        vs.leftStick.verticalPosition = (z * STICK_MAX).toInt()
-        vs.leftStick.horizontalPosition = (r * STICK_MAX).toInt()
-        vs.rightStick.verticalPosition = (y * STICK_MAX).toInt()
-        vs.rightStick.horizontalPosition = (x * STICK_MAX).toInt()
     }
 
     private fun clamp(v: Double) = if (v.isNaN()) 0.0 else max(-1.0, min(1.0, v)).let { if (abs(it) < 0.02) 0.0 else it }

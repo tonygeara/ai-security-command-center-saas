@@ -4814,7 +4814,7 @@ DRONE_LINK_PORT = int(os.environ.get("AI_SECURITY_DRONE_LINK_PORT", "8765"))
 DRONE_LINK_TOKEN_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_link_token")
 DRONE_STICK_TIMEOUT = 0.4    # browser stopped sending sticks -> send zero sticks (hover)
 DRONE_LIMITS = {"max_altitude_m": 120, "max_distance_m": 500, "max_speed_level": 0.5}
-DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "go_home", "cancel_go_home", "hover",
+DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "confirm_land", "go_home", "cancel_go_home", "hover",
                   "control_on", "control_off", "gimbal", "photo", "record_start", "record_stop",
                   "sim_on", "sim_off", "stream_on", "stream_off"}
 drone_link = {"conn": None, "lock": threading.Lock(), "telemetry": {}, "tel_at": 0.0, "device": "",
@@ -5109,6 +5109,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <button class="hud-btn warn dc-big" onclick="cmd('go_home',{},'Fly back to the home point and land?')">Return home</button>
 <button class="hud-btn danger dc-big" style="grid-column:1/-1;min-height:52px" onclick="stopAll()">■ STOP — hover in place (Space)</button>
 <button class="hud-btn" onclick="cmd('cancel_land')">Cancel landing</button>
+<button class="hud-btn primary dc-big" id="confirmLand" style="grid-column:1/-1;display:none" onclick="cmd('confirm_land')">▼ Confirm landing — drone is waiting just above the ground</button>
 <button class="hud-btn" onclick="cmd('cancel_go_home')">Cancel return</button>
 <button class="hud-btn" id="ctlBtn" onclick="toggleControl()">Keyboard control: OFF</button>
 </div>
@@ -5185,7 +5186,7 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   const sp=t.speed;[['hAlt','tAlt',t.altitude,' m'],['hDist','tDist',t.distance_home,' m'],['hSpd','tSpd',sp,' m/s']].forEach(([a,b,v,u])=>{$(a).textContent=fmt(v);$(b).textContent=fmt(v)+(v==null?'':u)});
   $('hBat').textContent=t.battery??'–';$('tBat').textContent=t.battery==null?'–':t.battery+'%';$('hGps').textContent=t.gps_satellites??'–';$('tGps').textContent=t.gps_satellites??'–';
   $('hSig').textContent=t.signal==null?'–':t.signal+'%';$('tHdg').textContent=t.heading==null?'–':Math.round((t.heading+360)%360)+'°';$('tMode').textContent=t.flight_mode||'–';
-  $('tCtl').textContent=t.control||'–';
+  $('tCtl').textContent=t.control||'–';$('confirmLand').style.display=t.landing_confirm_needed?'':'none';
   if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg('The pilot took control on the remote controller.',false)}
   if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));
     trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon])}}
