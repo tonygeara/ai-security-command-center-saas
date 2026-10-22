@@ -5030,6 +5030,12 @@ def api_drone_command():
         args = {"lat": float(args.get("lat") or 0), "lon": float(args.get("lon") or 0)}
     elif cmd == "control_on":
         args = {"speed": max(0.1, min(DRONE_LIMITS["max_speed_level"], float(args.get("speed") or 0.3)))}
+    if cmd == "sim_on" and time.time() - drone_link.get("sim_off_at", 0) < 60:
+        # Re-enabling the simulator soon after disabling it made the Mini 3 Pro switch itself off.
+        wait = int(60 - (time.time() - drone_link["sim_off_at"]))
+        return jsonify({"ok": False, "error": f"Wait {wait} s before starting the simulator again (the drone can switch off otherwise)."}), 409
+    if cmd == "sim_off":
+        drone_link["sim_off_at"] = time.time()
     if cmd in ("hover", "control_off"):
         drone_link["stick_active"] = False
     result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0)
@@ -5104,7 +5110,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">◉ Flight</div><div class="live" id="modeState"></div></div>
 <div class="panel-body">
 <div class="dc-btns">
-<button class="hud-btn primary dc-big" onclick="cmd('takeoff',{},'Take off now? Make sure the area above the drone is clear.')">Take off</button>
+<button class="hud-btn primary dc-big" onclick="takeoff()">Take off</button>
 <button class="hud-btn warn dc-big" onclick="cmd('land')">Land</button>
 <button class="hud-btn warn dc-big" onclick="cmd('go_home',{},'Fly back to the home point and land?')">Return home</button>
 <button class="hud-btn danger dc-big" style="grid-column:1/-1;min-height:52px" onclick="stopAll()">■ STOP — hover in place (Space)</button>
@@ -5154,6 +5160,10 @@ function msg(t,ok){const e=$('cmdMsg');e.className='hud-msg '+(ok===true?'ok':ok
 async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))return;msg(c.replace('_',' ')+'…');
   try{const r=await fetch('/api/drone/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd:c,args:args||{}})});const d=await r.json();
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
+function takeoff(){const sim=(st.telemetry||{}).simulator;
+  cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF — the simulator is OFF and the motors WILL start.
+
+Propellers on, people clear, drone in sight, pilot holding the controller?')}
 async function stopAll(){keys.clear();await sendStick(true);cmd('hover')}
 async function toggleControl(){if(!control){if(!(await cmd('control_on',{speed:+$('speed').value})))return;control=true}
   else{await sendStick(true);await cmd('control_off');control=false}
