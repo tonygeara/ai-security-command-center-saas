@@ -9,7 +9,7 @@ Setup, once:
 Issue a license for a customer laptop (they read the Machine ID from the app's License page):
     python license_tool.py issue --customer "Karim" --machine XXXX-XXXX-XXXX-XXXX-XXXX \
         --expires 2027-10-20 --cameras 4 --drones 1 \
-        --features camera_ai face_ai lpr drone_live drone_ai drone_tracking
+        --features camera_ai face_ai lpr drone_live drone_ai drone_tracking [drone_control]
     -> writes license-<customer>-<machine>.lic; give that file to the customer.
 
 Check a license file:
@@ -107,7 +107,8 @@ def main():
     s.add_argument("--plan", default="on-prem")
     s.add_argument("--cameras", type=int, default=4)
     s.add_argument("--drones", type=int, default=1)
-    s.add_argument("--features", nargs="+", default=list(licensing.FEATURES))
+    s.add_argument("--features", nargs="+",
+                   default=[f for f in licensing.FEATURES if f not in licensing.OPT_IN_FEATURES])
     s.add_argument("--out")
     sh = sub.add_parser("show", help="inspect a license file")
     sh.add_argument("file")

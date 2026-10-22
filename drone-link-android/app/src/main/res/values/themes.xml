@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.DroneLink" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorAccent">@color/accent</item>
+    </style>
+    <color name="bg">#02070C</color>
+    <color name="panel">#04111B</color>
+    <color name="accent">#25C7FF</color>
+    <color name="text">#D9EFFF</color>
+    <color name="muted">#6D8B9D</color>
+    <color name="good">#26EE89</color>
+    <color name="bad">#FF5D6C</color>
+</resources>

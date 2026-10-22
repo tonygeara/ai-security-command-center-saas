@@ -4054,6 +4054,7 @@ HUD_NAV_ITEMS = [
     ("events", "/#history", "◷", "Events"),
     ("people", "/#face-library", "◎", "People"),
     ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
+    ("drone", "/drone-control", "✈", "Drone"),
     ("devices", "/setup/add", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
     ("license", "/license", "⚿", "License"),
@@ -4797,6 +4798,411 @@ fetch('/api/setup/brands').then(r=>r.json()).then(d=>{brands=d.brands||[];$('bra
 $('user').addEventListener('input',()=>$('user').dataset.touched=1);
 usage();mode(location.hash==='#drone'?'drone':'cam');
 </script>""", active="devices")
+
+
+# ============================================================
+# DRONE LINK: fly the drone from this PC through the "Drone Link" phone app
+# ============================================================
+# The phone (DJI MSDK app on the RC-N1/N2) connects to this PC over the LAN (TCP, one JSON
+# message per line), proves it knows the pairing token (HMAC of a random challenge), then
+# streams telemetry and carries out commands. The dashboard itself stays localhost-only.
+#   PC -> phone: challenge, welcome, ping (heartbeat), cmd {id, cmd, args}, stick {x,y,z,r}
+#   phone -> PC: hello {mac}, tel {...}, ack {id, ok, error}, event {msg}
+# Safety: the phone zeroes the sticks when no stick update arrives for 0.5 s and releases
+# control when the heartbeat stops for 1.5 s; the pilot's RC can always take control back.
+DRONE_LINK_PORT = int(os.environ.get("AI_SECURITY_DRONE_LINK_PORT", "8765"))
+DRONE_LINK_TOKEN_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_link_token")
+DRONE_STICK_TIMEOUT = 0.4    # browser stopped sending sticks -> send zero sticks (hover)
+DRONE_LIMITS = {"max_altitude_m": 120, "max_distance_m": 500, "max_speed_level": 0.5}
+DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "go_home", "cancel_go_home", "hover",
+                  "control_on", "control_off", "gimbal", "photo", "record_start", "record_stop",
+                  "sim_on", "sim_off", "stream_on", "stream_off"}
+drone_link = {"conn": None, "lock": threading.Lock(), "telemetry": {}, "tel_at": 0.0, "device": "",
+              "connected_at": 0.0, "events": [], "acks": {}, "next_id": 1, "stick_at": 0.0,
+              "stick_active": False, "error": ""}
+drone_ack_cond = threading.Condition()
+
+
+def drone_control_allowed():
+    if onprem_mode():
+        return "drone_control" in set((offline_license.get("payload") or {}).get("features") or [])
+    return cloud_feature_enabled("drone_live")
+
+
+def drone_link_token(reset=False):
+    import secrets
+    if not reset:
+        try:
+            with open(DRONE_LINK_TOKEN_FILE, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+            if len(token) >= 32:
+                return token
+        except OSError:
+            pass
+    token = secrets.token_hex(24)
+    tmp = DRONE_LINK_TOKEN_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(token)
+    os.replace(tmp, DRONE_LINK_TOKEN_FILE)
+    return token
+
+
+def _drone_send(msg):
+    """Send one message to the phone; False when no phone is connected."""
+    with drone_link["lock"]:
+        conn = drone_link["conn"]
+        if conn is None:
+            return False
+        try:
+            conn.sendall((json.dumps(msg, separators=(",", ":")) + "\n").encode())
+            return True
+        except OSError:
+            _drone_drop(conn, "send failed")
+            return False
+
+
+def _drone_drop(conn, why):
+    # Caller holds drone_link["lock"] or owns conn.
+    if drone_link["conn"] is conn:
+        drone_link["conn"] = None
+        drone_link["stick_active"] = False
+        drone_link["error"] = why
+        _drone_event(f"Phone disconnected ({why}).")
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
+def _drone_event(msg):
+    drone_link["events"] = (drone_link["events"] + [{"at": time.time(), "msg": str(msg)[:200]}])[-30:]
+
+
+def _drone_session(conn, addr):
+    import hashlib, hmac, secrets
+    conn.settimeout(10)
+    reader = conn.makefile("r", encoding="utf-8", newline="\n")
+    nonce = secrets.token_hex(16)
+    conn.sendall((json.dumps({"t": "challenge", "nonce": nonce}) + "\n").encode())
+    try:
+        hello = json.loads(reader.readline() or "{}")
+    except ValueError:
+        hello = {}
+    expected = hmac.new(drone_link_token().encode(), nonce.encode(), hashlib.sha256).hexdigest()
+    if hello.get("t") != "hello" or not hmac.compare_digest(str(hello.get("mac", "")), expected):
+        conn.sendall(b'{"t":"denied","error":"Pairing code does not match. Scan the QR code again."}\n')
+        conn.close()
+        print(f"Drone link: refused {addr[0]} (wrong pairing code)")
+        return
+    if not drone_control_allowed():
+        conn.sendall(b'{"t":"denied","error":"Drone control is not included in this license."}\n')
+        conn.close()
+        return
+    with drone_link["lock"]:
+        if drone_link["conn"] is not None:
+            _drone_drop(drone_link["conn"], "replaced by a new phone connection")
+        drone_link.update({"conn": conn, "device": str(hello.get("device", ""))[:80], "connected_at": time.time(),
+                           "telemetry": {}, "tel_at": 0.0, "error": ""})
+        _drone_event(f"Phone connected: {drone_link['device'] or addr[0]}")
+    conn.settimeout(5)  # telemetry arrives 5x per second; silence means the link is gone
+    _drone_send({"t": "welcome", "rtmp": f"rtmp://{_lan_ip()}:1935/{DRONE_CAMERA_NAME}", "limits": DRONE_LIMITS})
+    try:
+        for line in reader:
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            kind = msg.get("t")
+            if kind == "tel":
+                msg.pop("t", None)
+                drone_link["telemetry"], drone_link["tel_at"] = msg, time.time()
+            elif kind == "ack":
+                with drone_ack_cond:
+                    drone_link["acks"][int(msg.get("id") or 0)] = msg
+                    drone_ack_cond.notify_all()
+            elif kind == "event":
+                _drone_event(msg.get("msg", ""))
+    except OSError:
+        pass
+    finally:
+        with drone_link["lock"]:
+            _drone_drop(conn, "connection closed")
+
+
+def _drone_heartbeat_worker():
+    while True:
+        time.sleep(0.25)
+        if drone_link["conn"] is None:
+            continue
+        _drone_send({"t": "ping"})
+        # The browser holds the sticks by re-sending them; if it stops (tab closed, crash),
+        # centre the sticks so the drone hovers.
+        if drone_link["stick_active"] and time.time() - drone_link["stick_at"] > DRONE_STICK_TIMEOUT:
+            drone_link["stick_active"] = False
+            _drone_send({"t": "stick", "x": 0, "y": 0, "z": 0, "r": 0})
+
+
+def _drone_link_server():
+    try:
+        srv = socket.create_server(("0.0.0.0", DRONE_LINK_PORT), reuse_port=False)
+    except OSError as e:
+        drone_link["error"] = f"Drone link port {DRONE_LINK_PORT} unavailable: {e}"
+        print(drone_link["error"])
+        return
+    print(f"Drone link listening on port {DRONE_LINK_PORT}")
+    while True:
+        conn, addr = srv.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        threading.Thread(target=_drone_session, args=(conn, addr), daemon=True).start()
+
+
+def start_drone_link():
+    drone_link_token()
+    threading.Thread(target=_drone_link_server, daemon=True).start()
+    threading.Thread(target=_drone_heartbeat_worker, daemon=True).start()
+
+
+def drone_command(cmd, args=None, timeout=8.0):
+    """Send a command to the phone and wait for its acknowledgement."""
+    with drone_ack_cond:
+        cid = drone_link["next_id"]
+        drone_link["next_id"] += 1
+    if not _drone_send({"t": "cmd", "id": cid, "cmd": cmd, "args": args or {}}):
+        return {"ok": False, "error": "The Drone Link phone app is not connected."}
+    deadline = time.time() + timeout
+    with drone_ack_cond:
+        while cid not in drone_link["acks"]:
+            left = deadline - time.time()
+            if left <= 0:
+                return {"ok": False, "error": "The phone did not answer in time."}
+            drone_ack_cond.wait(left)
+        ack = drone_link["acks"].pop(cid)
+    return {"ok": bool(ack.get("ok")), "error": ack.get("error") or ""}
+
+
+def _drone_link_status():
+    tel = drone_link["telemetry"]
+    fresh = drone_link["conn"] is not None and time.time() - drone_link["tel_at"] < 2
+    return {"ok": True, "allowed": drone_control_allowed(), "phone_connected": drone_link["conn"] is not None,
+            "telemetry_fresh": fresh, "device": drone_link["device"], "telemetry": tel if fresh else {},
+            "events": drone_link["events"][-10:], "error": drone_link["error"], "limits": DRONE_LIMITS,
+            "link": {"host": _lan_ip(), "port": DRONE_LINK_PORT}}
+
+
+@app.route("/api/drone/link")
+def api_drone_link():
+    return jsonify(_drone_link_status())
+
+
+@app.route("/api/drone/link/pair")
+def api_drone_link_pair():
+    """QR code the phone app scans: where to connect and the pairing code."""
+    if not drone_control_allowed():
+        return jsonify({"ok": False, "error": "Drone control is not included in this license."}), 403
+    host = _lan_ip()
+    payload = json.dumps({"app": "ai-drone-link", "host": host, "port": DRONE_LINK_PORT,
+                          "token": drone_link_token()}, separators=(",", ":"))
+    return jsonify({"ok": True, "host": host, "port": DRONE_LINK_PORT, "qr": _qr_svg(payload)})
+
+
+@app.route("/api/drone/link/pair/reset", methods=["POST"])
+def api_drone_link_pair_reset():
+    """New pairing code: the old phone must scan again (use if a phone was lost)."""
+    drone_link_token(reset=True)
+    with drone_link["lock"]:
+        if drone_link["conn"] is not None:
+            _drone_drop(drone_link["conn"], "pairing code changed")
+    return jsonify({"ok": True})
+
+
+@app.route("/api/drone/command", methods=["POST"])
+def api_drone_command():
+    if not drone_control_allowed():
+        return jsonify({"ok": False, "error": "Drone control is not included in this license."}), 403
+    data = request.get_json(silent=True) or {}
+    cmd = str(data.get("cmd") or "")
+    if cmd not in DRONE_COMMANDS:
+        return jsonify({"ok": False, "error": "Unknown drone command."}), 400
+    args = data.get("args") if isinstance(data.get("args"), dict) else {}
+    if cmd == "gimbal":
+        args = {"pitch": max(-90.0, min(30.0, float(args.get("pitch") or 0)))}
+    elif cmd == "sim_on":
+        args = {"lat": float(args.get("lat") or 0), "lon": float(args.get("lon") or 0)}
+    elif cmd == "control_on":
+        args = {"speed": max(0.1, min(DRONE_LIMITS["max_speed_level"], float(args.get("speed") or 0.3)))}
+    if cmd in ("hover", "control_off"):
+        drone_link["stick_active"] = False
+    result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0)
+    _drone_event(f"{cmd}: {'OK' if result['ok'] else result['error']}")
+    return jsonify(result), (200 if result["ok"] else 409)
+
+
+@app.route("/api/drone/stick", methods=["POST"])
+def api_drone_stick():
+    """Virtual sticks from the browser (keyboard/gamepad), each -1..1, re-sent ~10x per second."""
+    if not drone_control_allowed():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(silent=True) or {}
+    clamp = lambda v: max(-1.0, min(1.0, float(v or 0)))
+    stick = {"t": "stick", "x": clamp(data.get("x")), "y": clamp(data.get("y")),
+             "z": clamp(data.get("z")), "r": clamp(data.get("r"))}
+    drone_link["stick_at"] = time.time()
+    drone_link["stick_active"] = any(stick[k] for k in "xyzr")
+    return jsonify({"ok": _drone_send(stick)})
+
+
+@app.route("/drone-control")
+def drone_control_page():
+    return DRONE_CONTROL_PAGE
+
+
+DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+.dc-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(330px,1fr);gap:16px;align-items:start}
+.dc-video{aspect-ratio:16/9;position:relative;background:#000}
+.dc-hud{position:absolute;left:10px;bottom:10px;z-index:4;display:flex;gap:6px;flex-wrap:wrap}
+.dc-hud span{background:rgba(3,16,26,.85);border:1px solid #155879;color:#9edfff;padding:5px 8px;border-radius:3px;font:bold 11px Arial,sans-serif;letter-spacing:.5px}
+.dc-hud span b{color:#fff}
+.dc-btns{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.dc-btns .hud-btn{min-height:44px}
+.dc-big{font-size:12px!important}
+.hud-btn.warn{color:#ffcf7a;border-color:#7a5a12;background:rgba(125,90,12,.14)}
+.dc-tel{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.dc-tel div{background:#05131d;border:1px solid #153c56;border-radius:4px;padding:8px 10px}
+.dc-tel small{display:block;color:#6d8b9d;font-size:9px;letter-spacing:1.5px;text-transform:uppercase}
+.dc-tel b{color:#e9f8ff;font-size:15px}
+#dcMap{height:260px;border:1px solid #155879;border-radius:5px;background:#020a10}
+.dc-keys{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 14px;font-size:12px;color:#9edfff}
+.dc-keys kbd{display:inline-block;min-width:22px;text-align:center;padding:2px 5px;border:1px solid #155879;border-radius:3px;background:#020a10;color:#5bd9ff;font:bold 11px Arial}
+.dc-ctl-on{box-shadow:0 0 0 2px #26ee89 inset}
+.dc-pair{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+.dc-pair .qr{background:#fff;border-radius:4px;padding:4px}
+@media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
+</style>
+<main class="hud-main">
+<div class="page-head"><div><div class="page-kicker">Drone</div><h1 class="page-title">Drone Control</h1>
+<div class="page-sub">Fly the drone from this PC through the Drone Link app on the controller's phone. Keep the drone in sight — the pilot's controller can take over at any time.</div></div>
+<div class="actions"><span class="state" id="linkState"><i class="dot bad"></i>PHONE NOT CONNECTED</span></div></div>
+
+<section class="panel" id="pairPanel"><div class="panel-head"><div class="panel-title">⌁ Connect the phone</div><div class="live">PAIRING</div></div>
+<div class="panel-body dc-pair"><div class="qr" id="pairQr"></div><div style="flex:1;min-width:240px">
+<div class="muted">1. Plug the Android phone into the RC-N1 controller and turn on the drone.<br>2. Open <b>Drone Link</b> on the phone and tap <b>Scan pairing code</b>.<br>3. Scan this QR code. The phone and this PC must be on the same Wi-Fi.</div>
+<div class="muted" style="margin-top:10px">PC address: <code id="pairAddr">…</code></div>
+<div class="actions" style="margin-top:12px"><button class="hud-btn danger" onclick="resetPair()">New pairing code</button></div>
+<div id="pairMsg" class="hud-msg"></div></div></div></section>
+
+<div class="dc-grid">
+<div>
+<section class="panel"><div class="panel-head"><div class="panel-title">✈ Live view</div><div class="live" id="flyState">ON GROUND</div></div>
+<div class="dc-video"><div class="live-slot" data-live-camera="drone"></div>
+<div class="dc-hud"><span>ALT <b id="hAlt">–</b> m</span><span>DIST <b id="hDist">–</b> m</span><span>SPD <b id="hSpd">–</b> m/s</span><span>BAT <b id="hBat">–</b>%</span><span>GPS <b id="hGps">–</b></span><span>SIGNAL <b id="hSig">–</b></span></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="live" id="mapState"></div></div>
+<div class="panel-body"><div id="dcMap"></div><div class="muted" id="coords" style="margin-top:8px"></div></div></section>
+</div>
+<div>
+<section class="panel"><div class="panel-head"><div class="panel-title">◉ Flight</div><div class="live" id="modeState"></div></div>
+<div class="panel-body">
+<div class="dc-btns">
+<button class="hud-btn primary dc-big" onclick="cmd('takeoff',{},'Take off now? Make sure the area above the drone is clear.')">Take off</button>
+<button class="hud-btn warn dc-big" onclick="cmd('land')">Land</button>
+<button class="hud-btn warn dc-big" onclick="cmd('go_home',{},'Fly back to the home point and land?')">Return home</button>
+<button class="hud-btn danger dc-big" style="grid-column:1/-1;min-height:52px" onclick="stopAll()">■ STOP — hover in place (Space)</button>
+<button class="hud-btn" onclick="cmd('cancel_land')">Cancel landing</button>
+<button class="hud-btn" onclick="cmd('cancel_go_home')">Cancel return</button>
+<button class="hud-btn" id="ctlBtn" onclick="toggleControl()">Keyboard control: OFF</button>
+</div>
+<label for="speed">Speed limit <span id="speedVal" class="muted"></span></label>
+<input id="speed" type="range" min="0.1" max="0.5" step="0.05" value="0.3" style="width:100%" oninput="speedVal.textContent=Math.round(this.value*100)+'%'">
+<div class="dc-keys" style="margin-top:12px">
+<div><kbd>W</kbd><kbd>S</kbd> forward / back</div><div><kbd>A</kbd><kbd>D</kbd> left / right</div>
+<div><kbd>↑</kbd><kbd>↓</kbd> up / down</div><div><kbd>←</kbd><kbd>→</kbd> turn</div>
+<div><kbd>Space</kbd> stop &amp; hover</div><div>🎮 Gamepad works too</div></div>
+<div id="cmdMsg" class="hud-msg"></div>
+</div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">▣ Camera</div></div>
+<div class="panel-body"><div class="dc-btns">
+<button class="hud-btn" onclick="cmd('gimbal',{pitch:0})">Look ahead</button>
+<button class="hud-btn" onclick="cmd('gimbal',{pitch:-45})">Tilt 45°</button>
+<button class="hud-btn" onclick="cmd('gimbal',{pitch:-90})">Look down</button>
+<button class="hud-btn" onclick="cmd('photo')">Photo</button>
+<button class="hud-btn" onclick="cmd('record_start')">Record</button>
+<button class="hud-btn" onclick="cmd('record_stop')">Stop rec</button>
+</div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">◷ Telemetry</div></div>
+<div class="panel-body"><div class="dc-tel">
+<div><small>Height</small><b id="tAlt">–</b></div><div><small>Distance home</small><b id="tDist">–</b></div>
+<div><small>Speed</small><b id="tSpd">–</b></div><div><small>Heading</small><b id="tHdg">–</b></div>
+<div><small>Battery</small><b id="tBat">–</b></div><div><small>GPS satellites</small><b id="tGps">–</b></div>
+<div><small>Flight mode</small><b id="tMode">–</b></div><div><small>Control</small><b id="tCtl">–</b></div>
+</div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⚙ Testing</div><div class="live" id="simState"></div></div>
+<div class="panel-body"><div class="muted">Simulator: the drone stays on the ground with motors locked while it pretends to fly. <b>Remove the propellers first.</b></div>
+<div class="actions" style="margin-top:10px"><button class="hud-btn" onclick="simOn()">Start simulator</button><button class="hud-btn" onclick="cmd('sim_off')">Stop simulator</button>
+<button class="hud-btn" onclick="cmd('stream_on')">Restart video</button></div>
+<div id="events" class="muted" style="margin-top:12px;max-height:150px;overflow:auto"></div></div></section>
+</div></div>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const fmt=(v,d=1)=>v==null||isNaN(v)?'–':Number(v).toFixed(d);
+let st={},control=false,map=null,dMark=null,hMark=null,trail=null,keys=new Set(),lastStickZero=true;
+function msg(t,ok){const e=$('cmdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
+async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))return;msg(c.replace('_',' ')+'…');
+  try{const r=await fetch('/api/drone/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd:c,args:args||{}})});const d=await r.json();
+    msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
+async function stopAll(){keys.clear();await sendStick(true);cmd('hover')}
+async function toggleControl(){if(!control){if(!(await cmd('control_on',{speed:+$('speed').value})))return;control=true}
+  else{await sendStick(true);await cmd('control_off');control=false}
+  $('ctlBtn').textContent='Keyboard control: '+(control?'ON':'OFF');$('ctlBtn').classList.toggle('dc-ctl-on',control)}
+function stickFromInputs(){let x=0,y=0,z=0,r=0;
+  if(keys.has('KeyA'))x-=1;if(keys.has('KeyD'))x+=1;if(keys.has('KeyW'))y+=1;if(keys.has('KeyS'))y-=1;
+  if(keys.has('ArrowUp'))z+=1;if(keys.has('ArrowDown'))z-=1;if(keys.has('ArrowLeft'))r-=1;if(keys.has('ArrowRight'))r+=1;
+  const gp=(navigator.getGamepads?[...navigator.getGamepads()]:[]).find(g=>g&&g.connected);
+  if(gp){const dz=v=>Math.abs(v)<0.12?0:v;r+=dz(gp.axes[0]);z+=-dz(gp.axes[1]);x+=dz(gp.axes[2]);y+=-dz(gp.axes[3]);
+    if(gp.buttons[1]&&gp.buttons[1].pressed){stopAll()}}
+  const c=v=>Math.max(-1,Math.min(1,v));return{x:c(x),y:c(y),z:c(z),r:c(r)}}
+async function sendStick(zero){const s=zero?{x:0,y:0,z:0,r:0}:stickFromInputs();const isZero=!s.x&&!s.y&&!s.z&&!s.r;
+  if(isZero&&lastStickZero&&!zero)return;lastStickZero=isZero;
+  try{await fetch('/api/drone/stick',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(s)})}catch(e){}}
+setInterval(()=>{if(control&&document.hasFocus())sendStick(false)},100);
+window.addEventListener('blur',()=>{keys.clear();if(control)sendStick(true)});
+document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.type!=='range')return;
+  if(e.code==='Space'){e.preventDefault();stopAll();return}
+  if(control&&['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();keys.add(e.code)}});
+document.addEventListener('keyup',e=>keys.delete(e.code));
+function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
+  trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map)}
+function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
+function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.telemetry_fresh;
+  $('linkState').innerHTML=!st.allowed?'<i class="dot bad"></i>NOT LICENSED':on?(t.drone_connected?'<i class="dot good"></i>DRONE LINKED':'<i class="dot warn"></i>PHONE CONNECTED · DRONE OFF'):'<i class="dot bad"></i>PHONE NOT CONNECTED';
+  $('pairPanel').style.display=on?'none':'';
+  $('flyState').textContent=t.flying?'IN FLIGHT':(t.motors_on?'MOTORS ON':'ON GROUND');
+  $('modeState').textContent=t.simulator?'SIMULATOR':'';$('simState').textContent=t.simulator?'SIMULATOR ON':'';
+  const sp=t.speed;[['hAlt','tAlt',t.altitude,' m'],['hDist','tDist',t.distance_home,' m'],['hSpd','tSpd',sp,' m/s']].forEach(([a,b,v,u])=>{$(a).textContent=fmt(v);$(b).textContent=fmt(v)+(v==null?'':u)});
+  $('hBat').textContent=t.battery??'–';$('tBat').textContent=t.battery==null?'–':t.battery+'%';$('hGps').textContent=t.gps_satellites??'–';$('tGps').textContent=t.gps_satellites??'–';
+  $('hSig').textContent=t.signal==null?'–':t.signal;$('tHdg').textContent=t.heading==null?'–':Math.round((t.heading+360)%360)+'°';$('tMode').textContent=t.flight_mode||'–';
+  $('tCtl').textContent=t.control||'–';
+  if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg('The pilot took control on the remote controller.',false)}
+  if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));
+    trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon])}}
+    $('coords').textContent=t.lat.toFixed(6)+', '+t.lon.toFixed(6)}
+  $('mapState').textContent=typeof L==='undefined'?'MAP NEEDS INTERNET':'';
+  $('events').innerHTML=(st.events||[]).slice().reverse().map(e=>`<div>${new Date(e.at*1000).toLocaleTimeString()} · ${esc(e.msg)}</div>`).join('')}
+async function poll(){try{st=await fetch('/api/drone/link',{cache:'no-store'}).then(r=>r.json());render()}catch(e){}}
+async function loadPair(){try{const d=await fetch('/api/drone/link/pair').then(r=>r.json());if(!d.ok){$('pairMsg').className='hud-msg bad';$('pairMsg').textContent=d.error;return}
+  $('pairQr').innerHTML=d.qr;$('pairAddr').textContent=d.host+':'+d.port}catch(e){}}
+async function resetPair(){if(!confirm('Make a new pairing code? The phone will have to scan again.'))return;await fetch('/api/drone/link/pair/reset',{method:'POST'});loadPair()}
+function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
+  const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
+  if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
+$('speedVal').textContent='30%';loadPair();poll();setInterval(poll,500);
+</script>""", active="drone")
+_body_end = DRONE_CONTROL_PAGE.rfind("</body>")
+DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_CONTROL_PAGE[_body_end:]
 
 
 # ============================================================
@@ -12166,6 +12572,7 @@ def main():
     """Start the dashboard web server. Called by `python dashboard.py` and by the packaged
     launcher (which imports this module, also when it is compiled to native code)."""
     _start_v105_recovery()
+    start_drone_link()
     print()
     print(
         "======================================"
