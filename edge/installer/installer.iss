@@ -16,6 +16,16 @@
   #define MyAppId "{E8BB2C1A-704F-4C0A-A971-49388F9DAE39}"
 #endif
 #define MyAppExeName MyAppSlug + ".exe"
+; The two editions share Docker containers and ports, so never install both on one PC.
+#define SaasAppId "{E8BB2C1A-704F-4C0A-A971-49388F9DAE39}"
+#define OnpremAppId "{6F3C2A9E-5B1D-4E8A-9C47-2D8B1F0A7E53}"
+#if MyAppId == SaasAppId
+  #define OtherAppId OnpremAppId
+  #define OtherAppName "AI Command Centre Lebanon"
+#else
+  #define OtherAppId SaasAppId
+  #define OtherAppName "AI Security Command Center"
+#endif
 
 [Setup]
 AppId={#StringChange(MyAppId, '{', '{{')}
@@ -54,6 +64,15 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 function InitializeSetup(): Boolean;
 begin
   Result := True;
+  if RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#OtherAppId}_is1') or
+     RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#OtherAppId}_is1') then
+  begin
+    MsgBox('{#OtherAppName} is already installed on this computer.' + #13#10 + #13#10 +
+           '{#MyAppName} cannot be installed next to it, because both use the same local AI services.' + #13#10 +
+           'Uninstall {#OtherAppName} first (Settings > Apps), or install on another computer.', mbCriticalError, MB_OK);
+    Result := False;
+    exit;
+  end;
   if not FileExists(ExpandConstant('{commonpf64}\Docker\Docker\Docker Desktop.exe')) then
     if MsgBox('Docker Desktop is required to run the local AI services (Frigate, MQTT, MediaMTX).' + #13#10 + #13#10 +
               'Install it from https://www.docker.com/products/docker-desktop/ before starting the app.' + #13#10 +

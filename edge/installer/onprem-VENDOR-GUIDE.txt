@@ -14,6 +14,14 @@ YOUR IMPORTANT FILES
   C:\AI-Security\edge\installer\output\onprem-usb\   the package that goes to the customer
 
 
+ONE CODEBASE, TWO SEPARATE APPS
+  Your system and the on-prem edition are built from the same code (so fixes reach both),
+  but they are separate programs with separate installs, data, licenses and installers.
+  They can NOT be installed on the same computer (they share the local AI services):
+  each installer refuses to install if the other edition is already on that PC.
+  Never install the Lebanon edition on your own PC.
+
+
 -----------------------------------------------------------------------------------------
 PART 1 - PREPARE THE USB STICK (on your PC)
 -----------------------------------------------------------------------------------------
