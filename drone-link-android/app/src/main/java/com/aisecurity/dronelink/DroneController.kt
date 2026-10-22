@@ -50,6 +50,7 @@ object DroneController {
     private const val STICK_MAX = 660          // DJI stick range is -660..660
     private const val STICK_TIMEOUT_MS = 500L  // no stick update from the PC -> centre sticks (hover)
 
+    @Volatile private var sdkInitialized = false
     @Volatile var registered = false; private set
     @Volatile var registerError = ""; private set
     @Volatile var productConnected = false; private set
@@ -76,22 +77,37 @@ object DroneController {
 
     fun init(context: Context) {
         SDKManager.getInstance().init(context, object : SDKManagerCallback {
-            override fun onRegisterSuccess() { registered = true; registerError = ""; changed() }
+            override fun onRegisterSuccess() {
+                registered = true; registerError = ""; changed()
+                // As DJI's sample: watch the flight controller link once registered.
+                KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyConnection), this@DroneController) { _, now ->
+                    if (now == true && !productConnected) { productConnected = true; watchVirtualStick(); changed() }
+                    if (now == false && productConnected) { productConnected = false; controlByPc = false; changed() }
+                }
+            }
             override fun onRegisterFailure(error: IDJIError) { registered = false; registerError = error.description() ?: error.errorCode(); changed() }
             override fun onProductDisconnect(productId: Int) { productConnected = false; controlByPc = false; changed() }
-            override fun onProductConnect(productId: Int) { productConnected = true; changed(); if (streamUrl.isNotEmpty()) startStream(streamUrl) }
+            override fun onProductConnect(productId: Int) {
+                productConnected = true
+                watchVirtualStick()  // touch flight managers only once a drone is connected (as DJI's sample does)
+                changed()
+                if (streamUrl.isNotEmpty()) startStream(streamUrl)
+            }
             override fun onProductChanged(productId: Int) { changed() }
             override fun onInitProcess(event: DJISDKInitEvent, totalProcess: Int) {
                 if (event == DJISDKInitEvent.INITIALIZE_COMPLETE) {
+                    sdkInitialized = true
+                    // Same order as DJI's sample: touch the core managers, then register.
+                    KeyManager.getInstance()
                     SDKManager.getInstance().registerApp()
-                    watchVirtualStick()
                 }
             }
             override fun onDatabaseDownloadProgress(current: Long, total: Long) {}
         })
-        // Registration needs internet once; retry when the network comes back.
+        // Registration needs internet once; retry when the network comes back — but never
+        // before the SDK has finished initialising (registering too early breaks the USB link).
         DJINetworkManager.getInstance().addNetworkStatusListener { available ->
-            if (available && !SDKManager.getInstance().isRegistered) SDKManager.getInstance().registerApp()
+            if (sdkInitialized && available && !SDKManager.getInstance().isRegistered) SDKManager.getInstance().registerApp()
         }
         main.post(stickWatchdog)
     }
@@ -123,8 +139,9 @@ object DroneController {
         val t = JSONObject()
         t.put("t", "tel")
         t.put("sdk_registered", registered)
-        t.put("drone_connected", read(KeyTools.createKey(FlightControllerKey.KeyConnection)) == true)
+        t.put("drone_connected", productConnected)
         t.put("control", if (controlByPc) "PC" else "PILOT")
+        if (!productConnected) return t
         t.put("simulator", SimulatorManager.getInstance().isSimulatorEnabled)
         t.put("streaming", MediaDataCenter.getInstance().liveStreamManager.isStreaming)
         read(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D))?.let {
@@ -264,6 +281,7 @@ object DroneController {
     }
 
     fun centreSticks() {
+        if (!productConnected) return
         val vs = VirtualStickManager.getInstance()
         vs.leftStick.horizontalPosition = 0; vs.leftStick.verticalPosition = 0
         vs.rightStick.horizontalPosition = 0; vs.rightStick.verticalPosition = 0

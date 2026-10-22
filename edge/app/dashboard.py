@@ -5184,7 +5184,7 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   $('modeState').textContent=t.simulator?'SIMULATOR':'';$('simState').textContent=t.simulator?'SIMULATOR ON':'';
   const sp=t.speed;[['hAlt','tAlt',t.altitude,' m'],['hDist','tDist',t.distance_home,' m'],['hSpd','tSpd',sp,' m/s']].forEach(([a,b,v,u])=>{$(a).textContent=fmt(v);$(b).textContent=fmt(v)+(v==null?'':u)});
   $('hBat').textContent=t.battery??'–';$('tBat').textContent=t.battery==null?'–':t.battery+'%';$('hGps').textContent=t.gps_satellites??'–';$('tGps').textContent=t.gps_satellites??'–';
-  $('hSig').textContent=t.signal==null?'–':t.signal;$('tHdg').textContent=t.heading==null?'–':Math.round((t.heading+360)%360)+'°';$('tMode').textContent=t.flight_mode||'–';
+  $('hSig').textContent=t.signal==null?'–':t.signal+'%';$('tHdg').textContent=t.heading==null?'–':Math.round((t.heading+360)%360)+'°';$('tMode').textContent=t.flight_mode||'–';
   $('tCtl').textContent=t.control||'–';
   if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg('The pilot took control on the remote controller.',false)}
   if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));

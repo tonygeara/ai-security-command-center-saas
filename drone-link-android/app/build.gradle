@@ -58,7 +58,6 @@ android {
 dependencies {
     implementation 'com.dji:dji-sdk-v5-aircraft:5.18.0'
     compileOnly 'com.dji:dji-sdk-v5-aircraft-provided:5.18.0'
-    runtimeOnly 'com.dji:dji-sdk-v5-networkImp:5.18.0'  // needed to register the App Key
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.journeyapps:zxing-android-embedded:4.3.0'  // pairing QR scanner
 }

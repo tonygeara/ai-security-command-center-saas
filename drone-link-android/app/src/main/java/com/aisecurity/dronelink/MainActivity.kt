@@ -1,13 +1,21 @@
 package com.aisecurity.dronelink
 
 import android.Manifest
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.hardware.usb.UsbManager
+import android.os.Handler
+import android.os.Looper
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
@@ -20,6 +28,15 @@ class MainActivity : AppCompatActivity() {
     private var pcText = "PC: not paired — tap “Scan pairing code”"
     private var pcOk = false
     private val logLines = ArrayDeque<String>()
+    private var usbText = ""
+    private val ui = Handler(Looper.getMainLooper())
+    private val usbPermissionAction = "com.aisecurity.dronelink.USB_PERMISSION"
+    private val usbReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = checkUsb()
+    }
+    private val usbPoll = object : Runnable {
+        override fun run() { checkUsb(); ui.postDelayed(this, 2000) }
+    }
 
     private val scanner = registerForActivityResult(ScanContract()) { result ->
         val text = result.contents ?: return@registerForActivityResult
@@ -51,13 +68,38 @@ class MainActivity : AppCompatActivity() {
             link?.sendEvent("Pilot pressed STOP on the phone")
             log("STOP: control returned to the remote controller")
         }
+        ContextCompat.registerReceiver(this, usbReceiver, IntentFilter(usbPermissionAction), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ui.post(usbPoll)
         DroneController.listener = { render() }
         DroneController.eventSink = { msg -> log(msg); link?.sendEvent(msg) }
         connect()
         render()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        checkUsb()  // controller plugged in while the app was open
+    }
+
+    /** The DJI controller appears as a USB accessory; make sure this app is allowed to use it. */
+    private fun checkUsb() {
+        val usb = getSystemService(Context.USB_SERVICE) as UsbManager
+        val acc = usb.accessoryList?.firstOrNull()
+        val text = when {
+            acc == null -> "Controller: not detected on USB (check the cable)"
+            usb.hasPermission(acc) -> "Controller: ${acc.manufacturer} ${acc.model} — USB OK"
+            else -> "Controller: ${acc.manufacturer} ${acc.model} — waiting for access (tap Allow if asked)"
+        }
+        if (text != usbText) {
+            usbText = text
+            log(text)
+            link?.sendEvent(text)
+        }
+    }
+
     override fun onDestroy() {
+        ui.removeCallbacks(usbPoll)
+        try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         DroneController.listener = null
         DroneController.eventSink = null
         link?.stop()
@@ -82,9 +124,9 @@ class MainActivity : AppCompatActivity() {
         }
         val dc = DroneController
         line(R.id.sdkStatus, if (dc.registered) "DJI SDK: registered" else "DJI SDK: " + (dc.registerError.ifEmpty { "registering… (needs internet the first time)" }), dc.registered)
-        line(R.id.droneStatus, if (dc.productConnected) "Drone: connected" else "Drone: plug in the controller and turn the drone on", dc.productConnected)
+        line(R.id.droneStatus, if (dc.productConnected) "Drone: connected" else "Drone: not connected. " + usbText.ifEmpty { "Plug in the controller and turn the drone on" }, dc.productConnected)
         line(R.id.pcStatus, pcText, pcOk)
-        val streaming = try { dji.v5.manager.datacenter.MediaDataCenter.getInstance().liveStreamManager.isStreaming } catch (_: Exception) { false }
+        val streaming = dc.productConnected && try { dji.v5.manager.datacenter.MediaDataCenter.getInstance().liveStreamManager.isStreaming } catch (_: Exception) { false }
         line(R.id.videoStatus, if (streaming) "Video: streaming to the PC" else "Video: not streaming", streaming)
         line(R.id.controlStatus, if (dc.controlByPc) "Control: PC is flying (pilot can take over any time)" else "Control: pilot (remote controller)", dc.controlByPc)
     }
