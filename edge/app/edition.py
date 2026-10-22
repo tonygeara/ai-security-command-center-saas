@@ -4,4 +4,5 @@ EDITION = "saas"            # "saas" (cloud pairing + subscription) or "onprem" 
 PRODUCT_NAME = "AI Security Command Center"
 BRAND_TOP = "AI SECURITY"
 BRAND_SUB = "COMMAND CENTER"
+BRAND_FLAG = ""                       # optional flag beside BRAND_SUB, e.g. "lb"
 DATA_DIR_NAME = "AI-Security-System"   # folder under %LOCALAPPDATA% for cameras, faces, events, license

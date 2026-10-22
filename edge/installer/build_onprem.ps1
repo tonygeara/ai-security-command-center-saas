@@ -48,6 +48,7 @@ EDITION = "onprem"
 PRODUCT_NAME = "$Name"
 BRAND_TOP = "AI COMMAND CENTRE"
 BRAND_SUB = "LEBANON"
+BRAND_FLAG = "lb"
 DATA_DIR_NAME = "$Slug"
 "@ | Set-Content (Join-Path $Stage 'edition.py') -Encoding ascii
 

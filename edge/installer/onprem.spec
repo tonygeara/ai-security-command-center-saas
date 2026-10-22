@@ -15,7 +15,7 @@ hidden = ['dashboard', 'licensing', 'edition',
           'cv2', 'numpy', 'requests', 'urllib3', 'certifi', 'idna', 'charset_normalizer',
           'paho.mqtt.client', 'paho.mqtt.publish', 'yaml', 'pyttsx3', 'comtypes', 'win32com.client',
           'cryptography.hazmat.primitives.asymmetric.ed25519', 'cryptography.hazmat.primitives.serialization',
-          'winreg', 'winsound', 'ipaddress', 'concurrent.futures', 'csv', 'hmac', 'ssl', 'uuid', 'logging']
+          'segno', 'winreg', 'winsound', 'ipaddress', 'concurrent.futures', 'csv', 'hmac', 'ssl', 'uuid', 'logging']
 hidden += collect_submodules('pyttsx3.drivers') + collect_submodules('flask') + collect_submodules('werkzeug')
 
 a = Analysis(

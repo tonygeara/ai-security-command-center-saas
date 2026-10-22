@@ -2289,6 +2289,16 @@ def force_drone_ai_off(reason="Cloud entitlement disabled"):
 import licensing
 import edition
 
+# Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
+BRAND_FLAGS = {
+    "lb": '<svg class="brand-flag" viewBox="0 0 30 20" width="18" height="12" aria-label="Lebanon" '
+          'style="vertical-align:-2px;margin-left:5px;border-radius:1px;box-shadow:0 0 0 1px rgba(255,255,255,.15)">'
+          '<rect width="30" height="20" fill="#ED1C24"/><rect y="5" width="30" height="10" fill="#fff"/>'
+          '<polygon fill="#00A651" points="15,5.6 18.4,9.3 16.9,9.3 19.8,12.1 17.9,12.1 21.4,14.3 8.6,14.3 '
+          '12.1,12.1 10.2,12.1 13.1,9.3 11.6,9.3"/><rect x="14.4" y="14.3" width="1.2" height="0.7" fill="#00A651"/></svg>'
+}
+BRAND_SUB_HTML = edition.BRAND_SUB + BRAND_FLAGS.get(getattr(edition, "BRAND_FLAG", ""), "")
+
 LICENSE_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "license.lic")
 offline_license = {"ok": False, "reason": "No license installed.", "payload": None}
 
@@ -3676,7 +3686,9 @@ def api_cloud_can_add_source(source_type):
     if allowed:
         message = f"{source_type.title()} can be added ({used}/{limit if limit is not None else 'unlimited'} used)."
     elif limit is not None and used >= int(limit):
-        message = f"{plan} plan allows a maximum of {limit} {usage_key}. Upgrade your plan to add more."
+        noun = usage_key if int(limit) != 1 else usage_key[:-1]
+        more = "Contact your supplier for a license with more." if onprem_mode() else "Upgrade your plan to add more."
+        message = f"{plan} plan allows a maximum of {limit} {noun}. {more}"
     else:
         message = f"{source_type.title()} access is not included in the {plan} plan."
     return jsonify({"ok": True, "allowed": allowed, "plan_code": c.get("plan_code"), "used": used, "limit": limit, "message": message})
@@ -4042,7 +4054,7 @@ HUD_NAV_ITEMS = [
     ("events", "/#history", "◷", "Events"),
     ("people", "/#face-library", "◎", "People"),
     ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
-    ("devices", "/setup/discover", "＋", "Devices"),
+    ("devices", "/setup/add", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
     ("license", "/license", "⚿", "License"),
 ]
@@ -4057,7 +4069,7 @@ def hud_topbar(active="", nav=True):
     return (
         '<header class="hud-top">'
         '<a class="hud-brand" href="/"><div class="brand-shield">A</div>'
-        f'<div><div class="brand-name">{edition.BRAND_TOP}</div><div class="brand-sub">{edition.BRAND_SUB}</div></div></a>'
+        f'<div><div class="brand-name">{edition.BRAND_TOP}</div><div class="brand-sub">{BRAND_SUB_HTML}</div></div></a>'
         f'<nav class="hud-nav">{links}</nav>'
         '<div class="hud-clock"><b id="hudClock">--:--:--</b><span><i class="dot good"></i>SYSTEM PROTECTED</span></div>'
         '</header>'
@@ -4101,29 +4113,10 @@ def hud_css():
     return Response(HUD_CSS, mimetype="text/css", headers={"Cache-Control": "max-age=300"})
 
 
-DISCOVER_PAGE = hud_page("Devices", r"""
-<main class="hud-main narrow">
-<div class="page-head"><div><div class="page-kicker">Devices</div><h1 class="page-title">Automatic Device Discovery</h1>
-<div class="page-sub">Scan the local network for camera and streaming candidates. Video is verified separately before onboarding.</div></div>
-<div class="actions"><button class="hud-btn" onclick="location.href='/setup/camera'">Add camera manually</button></div></div>
-<section class="panel"><div class="panel-head"><div class="panel-title">▣ Network scan</div><div class="live">LAN</div></div>
-<div class="panel-body"><button class="hud-btn primary" onclick="s()">Scan network</button><div id="x" style="margin-top:14px"></div></div></section>
-<section class="panel"><div class="panel-head"><div class="panel-title">✈ Drone</div><div class="live">RTMP</div></div>
-<div class="panel-body"><div id="z" class="muted">Checking…</div><div class="actions" style="margin-top:14px"><button class="hud-btn" onclick="t()">Test drone stream</button><button class="hud-btn primary" onclick="addDrone(this)">Add another drone</button></div><div id="dmsg" class="hud-msg"></div></div></section>
-</main>
-<script>
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
-async function s(){x.innerHTML='<p class="muted">Scanning nearby devices…</p>';const c=new AbortController();const timer=setTimeout(()=>c.abort(),30000);try{let r=await fetch('/api/discovery/scan',{method:'POST',signal:c.signal});let d=await r.json();x.innerHTML=`<p class="muted">Scan complete · PC: ${esc(d.host_ip)} · Network: ${esc(d.network)} · ${d.devices?.length||0} candidate(s)</p>`;(d.devices||[]).forEach(v=>x.innerHTML+=`<div class="hud-row"><div><b>${esc(v.ip)}</b><div class="muted">${esc(v.kind)} · Ports: ${esc((v.ports||[]).join(', '))} ${v.mac?'· '+esc(v.mac):''}</div></div><button class="hud-btn" onclick="location.href='/setup/camera'">Add</button></div>`);if(!(d.devices||[]).length)x.innerHTML+='<p class="muted">No stream candidates found yet. Make sure the camera is online and RTSP is enabled.</p>'}catch(e){x.innerHTML='<p class="muted">Scan timed out safely. Try once more after confirming the camera is online.</p>'}finally{clearTimeout(timer)}}
-async function q(){let d=await(await fetch('/api/discovery/drone')).json();z.innerHTML=`<div class="hud-row"><div><b>DJI / controller publish address</b></div><code>${esc(d.publish_url)}</code></div><div class="hud-row"><div><b>Local AI stream</b></div><code>${esc(d.local_rtsp_url)}</code></div><div class="hud-row"><div><b>Streaming service</b></div><span class="state">${d.mediamtx_ready?'<i class="dot good"></i>READY':'<i class="dot bad"></i>NOT RUNNING'}</span></div>`}
-async function t(){let d=await(await fetch('/api/discovery/drone/test')).json();alert(d.message)}
-async function addDrone(btn){btn.disabled=true;dmsg.className='hud-msg';dmsg.textContent='Adding drone…';try{const r=await fetch('/api/setup/drone',{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Could not add drone');dmsg.className='hud-msg ok';dmsg.innerHTML=esc(d.message)+'<br>RTMP address: <code>'+esc(d.publish_url)+'</code>'}catch(e){dmsg.className='hud-msg bad';dmsg.textContent=e.message}finally{btn.disabled=false}}
-q()
-</script>""", active="devices")
-
-
 @app.route("/setup/discover")
-def setup_discover():
-    return DISCOVER_PAGE
+@app.route("/setup/camera")
+def setup_legacy_pages():
+    return redirect("/setup/add")
 # ============================================================
 # V10.5 PROFESSIONAL CAMERA ONBOARDING
 # ============================================================
@@ -4254,6 +4247,10 @@ def api_setup_camera():
     if not _test_rtsp(url):
         return jsonify({"ok":False,"error":"Camera test failed. Nothing was changed."}),400
     slug=_safe_camera_slug(display)
+    if _is_drone_name(slug):
+        slug="cam_"+slug  # names starting with "drone" are reserved for drones
+    if slug in _frigate_camera_names():
+        return jsonify({"ok":False,"error":f'A camera named "{slug}" already exists. Choose another name.'}),409
     cloud=_cloud_source("POST",{"source_type":"camera","name":display})
     if not cloud.get("ok"):
         return jsonify({"ok":False,"error":cloud.get("error") or "Cloud registration failed."}),409
@@ -4319,10 +4316,10 @@ def api_setup_drone():
     if not allowed.get("allowed"):
         return jsonify({"ok": False, "error": allowed.get("message") or "Your plan does not allow another drone."}), 403
     existing = set(_frigate_camera_names())
-    n = 2
-    while f"{DRONE_CAMERA_NAME}{n}" in existing:
+    n = 1 if DRONE_CAMERA_NAME not in existing else 2
+    while n > 1 and f"{DRONE_CAMERA_NAME}{n}" in existing:
         n += 1
-    name = f"{DRONE_CAMERA_NAME}{n}"
+    name = DRONE_CAMERA_NAME if n == 1 else f"{DRONE_CAMERA_NAME}{n}"
     cloud = _cloud_source("POST", {"source_type": "drone", "name": f"Drone {n}"})
     if not cloud.get("ok"):
         return jsonify({"ok": False, "error": cloud.get("error") or "Cloud registration failed."}), 409
@@ -4430,30 +4427,375 @@ def api_source_remove(name):
                     "message": f"{name} removed{cloud_note}."})
 
 
-@app.route("/setup/camera")
-def camera_setup_page():
-    return CAMERA_SETUP_PAGE
+# ============================================================
+# ADD-DEVICE WIZARD: brand presets, connection diagnosis, snapshot preview, drone QR
+# ============================================================
+# Main-stream RTSP paths per brand ({ch} = channel, 1 for a single camera; NVRs use 1..N).
+CAMERA_BRANDS = {
+    "hikvision": {"label": "Hikvision / HiLook / Annke", "user": "admin", "port": 554,
+                  "paths": ["/Streaming/Channels/{ch}01"]},
+    "dahua": {"label": "Dahua / Imou / Amcrest / Lorex", "user": "admin", "port": 554,
+              "paths": ["/cam/realmonitor?channel={ch}&subtype=0"]},
+    "reolink": {"label": "Reolink", "user": "admin", "port": 554,
+                "paths": ["/h264Preview_{ch:02d}_main", "/Preview_{ch:02d}_main"]},
+    "tapo": {"label": "TP-Link Tapo / VIGI", "user": "", "port": 554, "paths": ["/stream1"],
+             "note": "Use the camera account from the Tapo app: Camera settings > Advanced > Camera account."},
+    "uniview": {"label": "Uniview (UNV)", "user": "admin", "port": 554,
+                "paths": ["/unicast/c{ch}/s0/live", "/media/video1"]},
+    "ezviz": {"label": "EZVIZ", "user": "admin", "port": 554,
+              "paths": ["/h264/ch{ch}/main/av_stream", "/Streaming/Channels/{ch}01"],
+              "note": "The password is the 6-letter verification code on the camera label."},
+    "axis": {"label": "Axis", "user": "root", "port": 554, "paths": ["/axis-media/media.amp"]},
+    "hanwha": {"label": "Hanwha / Wisenet / Samsung", "user": "admin", "port": 554,
+               "paths": ["/profile2/media.smp", "/profile1/media.smp"]},
+    "other": {"label": "Other / not sure (try all)", "user": "admin", "port": 554, "paths": []},
+}
+# Words on a camera's web login page that identify the brand (used by the network scan).
+_BRAND_HINTS = (("hikvision", ("hikvision", "doc/page/login.asp", "app-http")), ("dahua", ("dahua", "dhwebclient", "web service")),
+                ("reolink", ("reolink",)), ("uniview", ("uniview", "unv")), ("axis", ("axis communications",)),
+                ("hanwha", ("wisenet", "hanwha", "samsung techwin")), ("tapo", ("tapo", "tp-link")), ("ezviz", ("ezviz",)))
 
 
-CAMERA_SETUP_PAGE = hud_page("Add Camera", r"""
+def _brand_paths(brand, channel):
+    brands = [brand] if brand in CAMERA_BRANDS and brand != "other" else [b for b in CAMERA_BRANDS if b != "other"]
+    paths = []
+    for b in brands:
+        for p in CAMERA_BRANDS[b]["paths"]:
+            p = p.format(ch=channel)
+            if p not in paths:
+                paths.append(p)
+    return paths
+
+
+def _guess_brand(ip):
+    try:
+        r = requests.get(f"http://{ip}/", timeout=1.5, allow_redirects=True)
+        text = (r.headers.get("Server", "") + " " + r.text[:4000]).lower()
+    except Exception:
+        return ""
+    return next((b for b, words in _BRAND_HINTS if any(w in text for w in words)), "")
+
+
+def _rtsp_describe(host, port, path, user, password, timeout=4):
+    """Ask the camera for one stream (RTSP DESCRIBE). Returns the RTSP status code:
+    200 = stream found, 401 = login refused, 404 = no such path. Raises OSError if unreachable."""
+    import base64, hashlib
+    url = f"rtsp://{host}:{port}{path}"
+
+    def describe(auth=None):
+        with socket.create_connection((host, int(port)), timeout=timeout) as s:
+            s.settimeout(timeout)
+            req = f"DESCRIBE {url} RTSP/1.0\r\nCSeq: {2 if auth else 1}\r\nAccept: application/sdp\r\nUser-Agent: AI-Security\r\n"
+            if auth:
+                req += f"Authorization: {auth}\r\n"
+            s.sendall((req + "\r\n").encode())
+            data = b""
+            while b"\r\n\r\n" not in data and len(data) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        head = data.split(b"\r\n\r\n", 1)[0].decode("latin-1")
+        m = re.match(r"RTSP/1\.\d\s+(\d{3})", head)
+        return (int(m.group(1)) if m else 0), head
+
+    code, head = describe()
+    if code != 401 or not (user or password):
+        return code
+    challenges = [l.split(":", 1)[1].strip() for l in head.split("\r\n") if l.lower().startswith("www-authenticate:")]
+    digest = next((c for c in challenges if c.lower().startswith("digest")), None)
+    if digest:
+        p = dict(re.findall(r'(\w+)="?([^",]*)"?', digest[6:]))
+        realm, nonce = p.get("realm", ""), p.get("nonce", "")
+        ha1 = hashlib.md5(f"{user}:{realm}:{password}".encode()).hexdigest()
+        ha2 = hashlib.md5(f"DESCRIBE:{url}".encode()).hexdigest()
+        auth = f'Digest username="{user}", realm="{realm}", nonce="{nonce}", uri="{url}"'
+        if "auth" in p.get("qop", ""):
+            cnonce, nc = os.urandom(8).hex(), "00000001"
+            auth += f', qop=auth, nc={nc}, cnonce="{cnonce}", response="' + \
+                hashlib.md5(f"{ha1}:{nonce}:{nc}:{cnonce}:auth:{ha2}".encode()).hexdigest() + '"'
+        else:
+            auth += ', response="' + hashlib.md5(f"{ha1}:{nonce}:{ha2}".encode()).hexdigest() + '"'
+    else:
+        auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+    return describe(auth)[0]
+
+
+def _snapshot(url):
+    """One frame from the stream: (jpeg data URI, width, height, fps) or None."""
+    import base64
+    cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG,
+                           [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000, cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000])
+    try:
+        ok, frame = cap.read()
+        if not ok or frame is None or not getattr(frame, "size", 0):
+            return None
+        h, w = frame.shape[:2]
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0
+    finally:
+        cap.release()
+    preview = cv2.resize(frame, (640, max(1, int(h * 640 / w)))) if w > 640 else frame
+    ok, jpg = cv2.imencode(".jpg", preview, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    return ("data:image/jpeg;base64," + base64.b64encode(jpg.tobytes()).decode()) if ok else "", w, h, round(fps if 0 < fps < 121 else 0)
+
+
+def _probe_camera(data):
+    """Find a working stream from brand + IP + login (or a full RTSP address) and explain failures."""
+    from urllib.parse import quote, unquote, urlsplit
+    full = str(data.get("rtsp_url") or "").strip()
+    if full:
+        if not full.lower().startswith(("rtsp://", "rtsps://")):
+            return {"ok": False, "error": "The address must start with rtsp://"}
+        u = urlsplit(full)
+        ip, port = u.hostname or "", u.port or 554
+        user, password = unquote(u.username or ""), unquote(u.password or "")
+        paths = [(u.path or "/") + (("?" + u.query) if u.query else "")]
+        brand, channel = "custom", 1
+    else:
+        ip = str(data.get("ip") or "").strip()
+        brand = str(data.get("brand") or "other")
+        port = int(data.get("port") or CAMERA_BRANDS.get(brand, {}).get("port") or 554)
+        user, password = str(data.get("user") or ""), str(data.get("password") or "")
+        channel = max(1, min(64, int(data.get("channel") or 1)))
+        paths = _brand_paths(brand, channel)
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return {"ok": False, "error": "Enter the camera's IP address, for example 192.168.1.64."}
+    if not _port(ip, port, 1.5):
+        if any(_port(ip, p, 1.0) for p in (80, 443, 8000)):
+            return {"ok": False, "kind": "rtsp_closed",
+                    "error": f"The device at {ip} is online, but its RTSP port {port} is closed. "
+                             "Turn on RTSP in the camera's settings, or check the port number."}
+        return {"ok": False, "kind": "unreachable",
+                "error": f"No device answers at {ip}. Check the IP address, the cable / Wi-Fi, "
+                         "and that the camera is on the same network as this PC."}
+    login_refused = False
+    for path in paths:
+        try:
+            code = _rtsp_describe(ip, port, path, user, password)
+        except OSError:
+            continue
+        if code == 401:
+            login_refused = True
+            break  # cameras check the login before the path, so other paths won't help
+        if code != 200:
+            continue
+        url = f"rtsp://{quote(user, safe='')}:{quote(password, safe='')}@{ip}:{port}{path}" if (user or password) \
+            else f"rtsp://{ip}:{port}{path}"
+        shot = _snapshot(url)
+        if not shot:
+            return {"ok": False, "kind": "no_video",
+                    "error": "The camera accepted the login but sent no video. Set its video codec to H.264 "
+                             "(or H.265) in the camera's settings and try again."}
+        image, w, h, fps = shot
+        if brand == "other":
+            brand = next((b for b in CAMERA_BRANDS if b != "other" and path in _brand_paths(b, channel)), "other")
+        return {"ok": True, "rtsp_url": url, "brand": brand, "path": path, "snapshot": image,
+                "width": w, "height": h, "fps": fps,
+                "message": f"Camera connected: {w}×{h}" + (f" at {fps} fps" if fps else "") + "."}
+    if login_refused:
+        return {"ok": False, "kind": "auth", "error": "The camera refused the username or password. "
+                "Check them (they are the camera's own login, not your Wi-Fi password)."}
+    return {"ok": False, "kind": "path",
+            "error": "The camera answered but none of the stream addresses for this brand worked. "
+                     "Pick the exact brand, or use “Enter full RTSP address”."}
+
+
+@app.route("/api/setup/brands")
+def api_setup_brands():
+    return jsonify({"ok": True, "brands": [{"id": k, "label": v["label"], "user": v["user"], "port": v["port"],
+                                            "note": v.get("note", "")} for k, v in CAMERA_BRANDS.items()]})
+
+
+@app.route("/api/setup/camera/probe", methods=["POST"])
+def api_setup_camera_probe():
+    try:
+        result = _probe_camera(request.get_json(silent=True) or {})
+    except Exception as e:
+        result = {"ok": False, "error": f"Camera test failed: {e}"}
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/setup/scan", methods=["POST"])
+def api_setup_scan():
+    """Network scan for the wizard: camera candidates first, with a brand guess."""
+    resp = discovery_scan()
+    data = (resp[0] if isinstance(resp, tuple) else resp).get_json()
+    cams = [d for d in data.get("devices") or [] if 554 in (d.get("ports") or []) or d.get("kind") == "known_camera"]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as ex:
+        for d, brand in zip(cams, ex.map(lambda d: _guess_brand(d["ip"]), cams)):
+            d["brand"] = brand
+    data["cameras"] = cams
+    return jsonify(data)
+
+
+def _qr_svg(text):
+    try:
+        import segno
+        return segno.make(text, error="m").svg_inline(scale=4, dark="#02131d", light="#ffffff", border=2)
+    except Exception:
+        return ""
+
+
+@app.route("/api/setup/drones")
+def api_setup_drones():
+    """Every drone slot with its DJI Fly RTMP address (and QR code) and live status."""
+    host = _lan_ip()
+    try:
+        stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
+    except Exception:
+        stats = {}
+    drones = []
+    for name in _frigate_camera_names():
+        if not _is_drone_name(name):
+            continue
+        url = f"rtmp://{host}:1935/{name}"
+        drones.append({"name": name, "publish_url": url, "qr": _qr_svg(url), "primary": name == DRONE_CAMERA_NAME,
+                       "online": float((stats.get(name) or {}).get("camera_fps") or 0) > 0})
+    return jsonify({"ok": True, "host_ip": host, "receiver_ready": _port("127.0.0.1", 1935, .3), "drones": drones})
+
+
+@app.route("/setup/add")
+def setup_add_page():
+    return DEVICE_WIZARD_PAGE
+
+
+DEVICE_WIZARD_PAGE = hud_page("Devices", r"""
+<style>
+.wz-tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.wz-tab{flex:1;min-width:200px;text-align:left;padding:14px 16px;cursor:pointer;background:#04111b;border:1px solid #0a5480;border-radius:6px;color:#a8c7d7;font-family:inherit}
+.wz-tab b{display:block;color:#5bd9ff;font-size:14px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:4px}
+.wz-tab span{font-size:12px;color:#6d8b9d}
+.wz-tab.on{border-color:#36cfff;box-shadow:0 0 16px rgba(54,207,255,.18);background:rgba(18,151,215,.08)}
+.wz-steps{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.wz-steps i{font-style:normal;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:#4d6b7c;padding:6px 10px;border:1px solid #123447;border-radius:12px}
+.wz-steps i.on{color:#02131d;background:#25c7ff;border-color:#45d0ff}
+.wz-steps i.done{color:#2aea88;border-color:#1f7a50}
+.wz-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.wz-grid .full{grid-column:1/-1}
+.wz-found{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;margin-top:12px}
+.wz-found button{text-align:left;padding:10px 12px;cursor:pointer;background:#05131d;border:1px solid #153c56;border-radius:5px;color:#d9efff;font-family:inherit}
+.wz-found button:hover{border-color:#36cfff}
+.wz-found small{display:block;color:#6d8b9d;font-size:11px;margin-top:3px}
+.wz-shot{width:100%;max-width:520px;border:1px solid #155879;border-radius:5px;display:block;margin-top:12px;background:#000}
+.wz-link{background:none;border:0;color:#5bd9ff;cursor:pointer;font-family:inherit;font-size:12px;padding:0;margin-top:12px;text-decoration:underline}
+.wz-drone{display:grid;grid-template-columns:auto 1fr;gap:16px;align-items:center;padding:14px;background:#05131d;border:1px solid #153c56;border-radius:5px;margin-bottom:10px}
+.wz-drone .qr{width:132px;height:132px;background:#fff;border-radius:4px;display:flex;align-items:center;justify-content:center}
+.wz-drone .qr svg{width:124px;height:124px}
+.wz-hidden{display:none}
+@media(max-width:640px){.wz-grid{grid-template-columns:1fr}.wz-drone{grid-template-columns:1fr}}
+</style>
 <main class="hud-main narrow">
-<div class="page-head"><div><div class="page-kicker">Devices</div><h1 class="page-title">Add a security camera</h1>
-<div class="page-sub">Tests the camera before changing anything, checks your subscription limit, registers it with your account, adds it to Frigate and restarts Frigate.</div></div>
-<div class="actions"><button class="hud-btn" onclick="location.href='/setup/discover'">Scan network</button></div></div>
-<section class="panel"><div class="panel-head"><div class="panel-title">▣ Camera connection</div><div class="live">RTSP</div></div>
+<div class="page-head"><div><div class="page-kicker">Devices</div><h1 class="page-title">Add a camera or drone</h1>
+<div class="page-sub">Pick the brand, enter the IP and login. The system finds the stream, shows a live snapshot, and adds it. Nothing is changed until you confirm.</div></div>
+<div id="usage" class="muted"></div></div>
+
+<div class="wz-tabs">
+<button class="wz-tab on" id="tabCam" onclick="mode('cam')"><b>▣ Camera</b><span>IP / CCTV camera or NVR channel</span></button>
+<button class="wz-tab" id="tabDrone" onclick="mode('drone')"><b>✈ Drone</b><span>DJI live stream over RTMP</span></button>
+</div>
+
+<section class="panel" id="camPanel"><div class="panel-head"><div class="panel-title">▣ New camera</div><div class="live">RTSP</div></div>
 <div class="panel-body">
-<label for="n">Camera name</label><input id="n" placeholder="Front Door">
-<label for="u">RTSP address</label><input id="u" type="password" placeholder="rtsp://username:password@192.168.1.50:554/stream1">
-<div class="muted" style="margin-top:8px">Credentials stay on this Windows PC and are not sent to the cloud.</div>
-<div class="actions" style="margin-top:18px"><button class="hud-btn" onclick="testCam()">Test connection</button><button class="hud-btn primary" onclick="addCam()">Test &amp; add camera</button></div>
-<div id="msg" class="hud-msg"></div>
+<div class="wz-steps"><i id="st1" class="on">1 · Find</i><i id="st2">2 · Connect</i><i id="st3">3 · Check</i><i id="st4">4 · Add</i></div>
+
+<div id="step1">
+<div class="actions"><button class="hud-btn primary" id="scanBtn" onclick="scan()">Scan network for cameras</button>
+<button class="hud-btn" onclick="go(2)">I know the IP address</button></div>
+<div id="scanMsg" class="muted" style="margin-top:12px"></div>
+<div id="found" class="wz-found"></div>
+</div>
+
+<div id="step2" class="wz-hidden">
+<div id="simple" class="wz-grid">
+<div class="full"><label for="brand">Brand</label><select id="brand" onchange="brandChanged()"></select><div id="note" class="muted" style="margin-top:6px"></div></div>
+<div><label for="ip">IP address</label><input id="ip" placeholder="192.168.1.64" autocomplete="off"></div>
+<div><label for="channel">Channel <span class="muted" style="text-transform:none;letter-spacing:0">(1 for a single camera; NVR = camera number)</span></label><input id="channel" type="number" min="1" max="64" value="1"></div>
+<div><label for="user">Username</label><input id="user" autocomplete="off"></div>
+<div><label for="pass">Password</label><input id="pass" type="password" autocomplete="new-password"></div>
+<div><label for="port">RTSP port</label><input id="port" type="number" value="554"></div>
+</div>
+<div id="manual" class="wz-hidden"><label for="rtsp">Full RTSP address</label><input id="rtsp" type="password" placeholder="rtsp://username:password@192.168.1.50:554/stream1" autocomplete="off"></div>
+<button class="wz-link" id="manualLink" onclick="toggleManual()">Enter full RTSP address instead</button>
+<div class="muted" style="margin-top:10px">The login stays on this PC; it is never sent to the cloud.</div>
+<div class="actions" style="margin-top:16px"><button class="hud-btn" onclick="go(1)">Back</button><button class="hud-btn primary" id="testBtn" onclick="probe()">Connect &amp; test</button></div>
+<div id="m2" class="hud-msg"></div>
+</div>
+
+<div id="step3" class="wz-hidden">
+<img id="shot" class="wz-shot" alt="Camera snapshot">
+<div id="m3" class="hud-msg ok"></div>
+<label for="cname">Camera name</label><input id="cname" placeholder="Front Gate" maxlength="40">
+<div class="actions" style="margin-top:16px"><button class="hud-btn" onclick="go(2)">Back</button><button class="hud-btn primary" id="addBtn" onclick="addCam()">Add camera</button></div>
+<div id="m3b" class="hud-msg"></div>
+</div>
+
+<div id="step4" class="wz-hidden">
+<div id="m4" class="hud-msg"></div>
+<div class="actions" style="margin-top:16px"><button class="hud-btn primary" onclick="location.href='/'">Open dashboard</button><button class="hud-btn" onclick="reset()">Add another camera</button></div>
+</div>
+</div></section>
+
+<section class="panel wz-hidden" id="dronePanel"><div class="panel-head"><div class="panel-title">✈ Drones</div><div class="live" id="recv"></div></div>
+<div class="panel-body">
+<div class="muted">In DJI Fly: tap <b>•••</b> &gt; <b>Transmission</b> &gt; <b>Live Streaming Platforms</b> &gt; <b>RTMP</b>, then type the address below (or scan the QR code with the phone and copy it). The phone/controller must be on the same Wi-Fi as this PC.</div>
+<div id="drones" style="margin-top:14px"></div>
+<div class="actions" style="margin-top:6px"><button class="hud-btn primary" id="droneBtn" onclick="addDrone()">Add another drone</button></div>
+<div id="md" class="hud-msg"></div>
 </div></section>
 </main>
 <script>
-const m=(t,ok)=>{let x=document.getElementById('msg');x.className='hud-msg '+(ok?'ok':'bad');x.textContent=t}
-async function call(path){let r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:n.value,rtsp_url:u.value})});let d=await r.json();m(d.message||d.error||'Done',r.ok&&d.ok);return d}
-function testCam(){m('Testing camera…',true);call('/api/setup/camera/test')}
-function addCam(){m('Checking plan and configuring camera…',true);call('/api/setup/camera')}
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const msg=(id,t,cls)=>{const e=$(id);e.className='hud-msg '+(cls||'');e.textContent=t};
+let brands=[],manual=false,found=null,dronePoll=null;
+function mode(m){$('tabCam').classList.toggle('on',m==='cam');$('tabDrone').classList.toggle('on',m==='drone');
+  $('camPanel').classList.toggle('wz-hidden',m!=='cam');$('dronePanel').classList.toggle('wz-hidden',m!=='drone');
+  clearInterval(dronePoll);if(m==='drone'){loadDrones();dronePoll=setInterval(loadDrones,5000)}history.replaceState(null,'',m==='drone'?'#drone':'#camera')}
+function go(n){for(let i=1;i<=4;i++){$('step'+i).classList.toggle('wz-hidden',i!==n);$('st'+i).className=i===n?'on':(i<n?'done':'')}}
+function brandChanged(){const b=brands.find(x=>x.id===$('brand').value)||{};$('note').textContent=b.note||'';if(!$('user').dataset.touched)$('user').value=b.user||'';$('port').value=b.port||554}
+function toggleManual(){manual=!manual;$('simple').classList.toggle('wz-hidden',manual);$('manual').classList.toggle('wz-hidden',!manual);$('manualLink').textContent=manual?'Use brand + IP instead':'Enter full RTSP address instead'}
+async function usage(){try{const [c,d]=await Promise.all(['camera','drone'].map(k=>fetch('/api/cloud/can-add-source/'+k).then(r=>r.json())));
+  const f=x=>x.limit==null?x.used+' used':x.used+' of '+x.limit;$('usage').innerHTML='Cameras: <b>'+esc(f(c))+'</b> · Drones: <b>'+esc(f(d))+'</b>';
+  if(!c.allowed){$('scanBtn').disabled=true;$('testBtn').disabled=true;msg('m2',c.message,'bad');$('scanMsg').textContent=c.message}
+  $('droneBtn').disabled=!d.allowed;if(!d.allowed)msg('md',d.message,'bad')}catch(e){}}
+async function scan(){$('scanBtn').disabled=true;$('found').innerHTML='';$('scanMsg').textContent='Scanning the local network… (up to 30 seconds)';
+  try{const d=await fetch('/api/setup/scan',{method:'POST'}).then(r=>r.json());const cams=d.cameras||[];
+    $('scanMsg').textContent=cams.length?`Found ${cams.length} camera(s) on ${d.network}. Click one to use it.`:`No cameras found on ${d.network||'the network'}. Check the camera is powered and on the same network, or enter the IP yourself.`;
+    $('found').innerHTML=cams.map((c,i)=>`<button onclick="pick(${i})"><b>${esc(c.ip)}</b><small>${esc(c.camera_name?'Already added: '+c.camera_name:(brands.find(b=>b.id===c.brand)||{}).label||'Unknown brand')}</small></button>`).join('');found=cams}
+  catch(e){$('scanMsg').textContent='Scan failed. Enter the IP address yourself.'}finally{$('scanBtn').disabled=false}}
+function pick(i){const c=found[i];$('ip').value=c.ip;$('brand').value=c.brand||'other';brandChanged();go(2);$('pass').focus()}
+let probed=null;
+async function probe(){const body=manual?{rtsp_url:$('rtsp').value.trim()}:{brand:$('brand').value,ip:$('ip').value.trim(),port:$('port').value,channel:$('channel').value,user:$('user').value,password:$('pass').value};
+  $('testBtn').disabled=true;msg('m2','Connecting to the camera… (up to 20 seconds)');
+  try{const d=await fetch('/api/setup/camera/probe',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+    if(!d.ok){msg('m2',d.error||'Could not connect.','bad');return}
+    probed=d;$('shot').src=d.snapshot;$('m3').textContent=d.message;$('m3b').className='hud-msg';$('m3b').textContent='';
+    if(!$('cname').value)$('cname').value='Camera '+(($('ip').value||'').split('.').pop()||'');go(3);$('cname').focus();$('cname').select()}
+  catch(e){msg('m2','Could not reach the system: '+e.message,'bad')}finally{$('testBtn').disabled=false}}
+async function addCam(){const name=$('cname').value.trim();if(!name){msg('m3b','Give the camera a name.','bad');return}
+  $('addBtn').disabled=true;msg('m3b','Adding the camera and restarting video processing…');
+  try{const r=await fetch('/api/setup/camera',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,rtsp_url:probed.rtsp_url})});const d=await r.json();
+    if(!r.ok||!d.ok){msg('m3b',d.error||'Could not add the camera.','bad');return}
+    go(4);msg('m4','“'+name+'” added. Waiting for its live video… (about 20–40 seconds)');waitLive(d.camera_name,name)}
+  catch(e){msg('m3b','Could not reach the system: '+e.message,'bad')}finally{$('addBtn').disabled=false}}
+async function waitLive(slug,name){for(let i=0;i<45;i++){await new Promise(r=>setTimeout(r,2000));
+  try{const d=await fetch('/api/cameras').then(r=>r.json());const c=(d.cameras||[]).find(x=>x.name===slug);
+    if(c&&c.online){msg('m4','✓ “'+name+'” is live ('+c.fps+' fps) with face and plate recognition. It now appears on the dashboard.','ok');usage();return}}catch(e){}}
+  msg('m4','“'+name+'” was added, but its video has not started yet. Give it a minute, then check the dashboard.','bad')}
+function reset(){probed=null;['ip','pass','rtsp','cname'].forEach(k=>$(k).value='');$('channel').value=1;go(1);usage()}
+async function loadDrones(){try{const d=await fetch('/api/setup/drones').then(r=>r.json());
+  $('recv').innerHTML=d.receiver_ready?'<i class="dot good"></i>RECEIVER READY':'<i class="dot bad"></i>RECEIVER OFF';
+  $('drones').innerHTML=(d.drones||[]).map(x=>`<div class="wz-drone"><div class="qr">${x.qr||''}</div><div><b style="color:#5bd9ff;letter-spacing:1px;text-transform:uppercase">${esc(x.name)}</b>
+  <span class="state" style="margin-left:10px">${x.online?'<i class="dot good"></i>LIVE':'<i class="dot warn"></i>WAITING FOR STREAM'}</span>
+  <label>RTMP address for DJI Fly</label><code>${esc(x.publish_url)}</code> <button class="hud-btn" style="min-height:28px;margin-left:6px" onclick="navigator.clipboard.writeText('${esc(x.publish_url)}')">Copy</button></div></div>`).join('')||'<p class="muted">No drone slot yet. Click “Add another drone”.</p>'}catch(e){}}
+async function addDrone(){$('droneBtn').disabled=true;msg('md','Adding a drone slot…');
+  try{const r=await fetch('/api/setup/drone',{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Could not add the drone');
+    msg('md',d.message,'ok');loadDrones()}catch(e){msg('md',e.message,'bad')}finally{usage()}}
+fetch('/api/setup/brands').then(r=>r.json()).then(d=>{brands=d.brands||[];$('brand').innerHTML=brands.map(b=>`<option value="${b.id}">${esc(b.label)}</option>`).join('');$('brand').value='other';brandChanged()});
+$('user').addEventListener('input',()=>$('user').dataset.touched=1);
+usage();mode(location.hash==='#drone'?'drone':'cam');
 </script>""", active="devices")
 
 
@@ -11143,7 +11485,8 @@ PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard"))
 # Edition branding (e.g. "AI Command Centre Lebanon" for the on-prem build).
 PAGE = (PAGE.replace("<title>\nAI Security Command Center\n</title>", f"<title>\n{edition.PRODUCT_NAME}\n</title>")
             .replace('<div class="brand-name">\nAI SECURITY\n</div>', f'<div class="brand-name">\n{edition.BRAND_TOP}\n</div>')
-            .replace('<div class="brand-sub">\nCOMMAND CENTER\n</div>', f'<div class="brand-sub">\n{edition.BRAND_SUB}\n</div>'))
+            .replace('<div class="brand-sub">\nCOMMAND CENTER\n</div>', f'<div class="brand-sub">\n{BRAND_SUB_HTML}\n</div>')
+            .replace('<div class="rec-title">\nAI SECURITY CONTROLS\n</div>', f'<div class="rec-title">\n{edition.BRAND_TOP} CONTROLS\n</div>'))
 _body_end = PAGE.rfind("</body>")
 PAGE = PAGE[:_body_end] + LIVE_PLAYER_HTML + PAGE[_body_end:]
 
