@@ -5180,7 +5180,8 @@ setInterval(()=>{if(control&&document.hasFocus())sendStick(false)},100);
 window.addEventListener('blur',()=>{keys.clear();if(control)sendStick(true)});
 document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.type!=='range')return;
   if(e.code==='Space'){e.preventDefault();stopAll();return}
-  if(control&&['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();keys.add(e.code)}});
+  if(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();
+    if(control)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
 document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
