@@ -4653,6 +4653,202 @@ def _probe_camera(data):
                      "Pick the exact brand, or use “Enter full RTSP address”."}
 
 
+# ---------- whole recorder (NVR/DVR) in one step ----------
+# Lower-resolution "sub" streams per brand, for recorders with many channels (less CPU; faces/plates
+# are read best from the main stream).
+SUB_STREAM_PATHS = {"hikvision": "/Streaming/Channels/{ch}02", "dahua": "/cam/realmonitor?channel={ch}&subtype=1",
+                    "reolink": "/h264Preview_{ch:02d}_sub", "uniview": "/unicast/c{ch}/s1/live",
+                    "ezviz": "/h264/ch{ch}/sub/av_stream", "tapo": "/stream2"}
+RECORDER_MAX_CHANNELS = 64
+
+
+def _recorder_api(ip, user, password, http_port=80):
+    """Ask the recorder itself (Hikvision ISAPI / Dahua CGI) for brand, model and channel names.
+    Only a successful answer counts; a refused login is left to the RTSP check, which reports it reliably."""
+    from requests.auth import HTTPDigestAuth, HTTPBasicAuth
+    base = f"http://{ip}:{http_port}"
+    for auth in (HTTPDigestAuth(user, password), HTTPBasicAuth(user, password)):
+        try:
+            r = requests.get(base + "/ISAPI/System/deviceInfo", auth=auth, timeout=4)
+            if r.status_code == 200 and "<DeviceInfo" in r.text:
+                model = (re.search(r"<model>([^<]*)</model>", r.text) or re.search(r"<deviceName>([^<]*)</deviceName>", r.text))
+                chans = []
+                for path in ("/ISAPI/ContentMgmt/InputProxy/channels", "/ISAPI/System/Video/inputs/channels"):
+                    c = requests.get(base + path, auth=auth, timeout=6)
+                    if c.status_code == 200:
+                        for block in re.findall(r"<(?:InputProxyChannel|VideoInputChannel)>(.*?)</(?:InputProxyChannel|VideoInputChannel)>", c.text, re.S):
+                            cid = re.search(r"<id>(\d+)</id>", block)
+                            name = re.search(r"<name>([^<]*)</name>", block)
+                            if cid and int(cid.group(1)) not in [x["ch"] for x in chans]:
+                                chans.append({"ch": int(cid.group(1)), "name": (name.group(1).strip() if name else "")})
+                return {"brand": "hikvision", "model": model.group(1) if model else "Hikvision recorder", "channels": sorted(chans, key=lambda x: x["ch"]), }
+        except requests.RequestException:
+            break
+    for auth in (HTTPDigestAuth(user, password), HTTPBasicAuth(user, password)):
+        try:
+            r = requests.get(base + "/cgi-bin/magicBox.cgi?action=getDeviceType", auth=auth, timeout=4)
+            if r.status_code == 200 and "type=" in r.text:
+                model = r.text.split("=", 1)[1].strip()
+                chans = []
+                t = requests.get(base + "/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle", auth=auth, timeout=6)
+                if t.status_code == 200:
+                    for idx, name in re.findall(r"table\.ChannelTitle\[(\d+)\]\.Name=([^\r\n]*)", t.text):
+                        chans.append({"ch": int(idx) + 1, "name": name.strip()})
+                return {"brand": "dahua", "model": model or "Dahua recorder", "channels": chans, }
+        except requests.RequestException:
+            break
+    return None
+
+
+def _channel_url(brand, ip, port, user, password, ch, sub=False):
+    from urllib.parse import quote
+    path = (SUB_STREAM_PATHS.get(brand) if sub else None) or CAMERA_BRANDS[brand]["paths"][0]
+    cred = f"{quote(user, safe='')}:{quote(password, safe='')}@" if (user or password) else ""
+    return f"rtsp://{cred}{ip}:{port}{path.format(ch=ch)}", path.format(ch=ch)
+
+
+def _thumb(url):
+    shot = _snapshot(url)
+    if not shot:
+        return None
+    image, w, h, fps = shot
+    return {"snapshot": image, "width": w, "height": h, "fps": fps}
+
+
+def scan_recorder(data):
+    ip = str(data.get("ip") or "").strip()
+    user, password = str(data.get("user") or ""), str(data.get("password") or "")
+    rtsp_port = int(data.get("port") or 554)
+    sub = bool(data.get("sub_stream"))
+    brand = str(data.get("brand") or "other")
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return {"ok": False, "error": "Enter the recorder's IP address, for example 192.168.1.100."}
+    if not _port(ip, rtsp_port, 1.5):
+        if any(_port(ip, p, 1.0) for p in (80, 443, 8000, 37777)):
+            return {"ok": False, "error": f"The recorder at {ip} is online but its RTSP port {rtsp_port} is closed. Turn on RTSP in the recorder's network settings."}
+        return {"ok": False, "error": f"No device answers at {ip}. Check the IP address and that the recorder is on the same network."}
+
+    api = _recorder_api(ip, user, password) if brand in ("other", "hikvision", "dahua") else None
+    if api:
+        brand = api["brand"]
+    model = (api or {}).get("model") or ""
+    channels = (api or {}).get("channels") or []
+
+    if brand == "other":
+        # Unknown brand: find which brand's stream address the recorder answers on channel 1.
+        for b in [b for b in CAMERA_BRANDS if b != "other"]:
+            try:
+                code = _rtsp_describe(ip, rtsp_port, CAMERA_BRANDS[b]["paths"][0].format(ch=1), user, password)
+            except OSError:
+                continue
+            if code == 401:
+                return {"ok": False, "error": "The recorder refused the username or password."}
+            if code == 200:
+                brand = b
+                break
+        if brand == "other":
+            return {"ok": False, "error": "Could not recognise this recorder. Choose its brand, or add cameras one by one with their RTSP address."}
+    if brand not in CAMERA_BRANDS or not CAMERA_BRANDS[brand]["paths"]:
+        return {"ok": False, "error": "This brand cannot be scanned as a recorder; add its cameras one by one."}
+
+    if not channels:  # no API: try channel numbers until several in a row are missing
+        misses = 0
+        # Brands whose stream address has no channel number are single cameras, not recorders.
+        last = RECORDER_MAX_CHANNELS if "{ch" in CAMERA_BRANDS[brand]["paths"][0] else 1
+        for ch in range(1, last + 1):
+            try:
+                code = _rtsp_describe(ip, rtsp_port, _channel_url(brand, ip, rtsp_port, user, password, ch, sub)[1], user, password, timeout=3)
+            except OSError:
+                code = 0
+            if code == 401:
+                return {"ok": False, "error": "The recorder refused the username or password."}
+            if code == 200:
+                channels.append({"ch": ch, "name": ""})
+                misses = 0
+            else:
+                misses += 1
+                if misses >= 4 and ch >= 4:
+                    break
+
+    def probe(c):
+        url, path = _channel_url(brand, ip, rtsp_port, user, password, c["ch"], sub)
+        info = _thumb(url)
+        return {"ch": c["ch"], "name": c["name"] or f"Camera {c['ch']}", "rtsp_url": url, "online": bool(info), **(info or {})}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+        found = list(ex.map(probe, channels[:RECORDER_MAX_CHANNELS]))
+    allowed = requests.get("http://127.0.0.1:%d/api/cloud/can-add-source/camera" % PORT, timeout=4).json()
+    limit, used = allowed.get("limit"), int(allowed.get("used") or 0)
+    return {"ok": True, "brand": brand, "brand_label": CAMERA_BRANDS[brand]["label"], "model": model, "channels": found,
+            "existing": _frigate_camera_names(), "can_add": None if limit is None else max(0, int(limit) - used)}
+
+
+def add_cameras_batch(cameras):
+    """Add several cameras with a single Frigate restart. Returns (added, errors)."""
+    global CAMERA_NAME, STREAM, CAMERA_STATE_TOPIC, CAMERA_SET_TOPIC
+    added, errors = [], []
+    existing = set(_frigate_camera_names())
+    for cam in cameras:
+        display = str(cam.get("name") or "Camera").strip()[:80]
+        url = str(cam.get("rtsp_url") or "").strip()
+        if not url.lower().startswith(("rtsp://", "rtsps://")):
+            errors.append(f"{display}: invalid address"); continue
+        allowed = requests.get("http://127.0.0.1:%d/api/cloud/can-add-source/camera" % PORT, timeout=4).json()
+        if not allowed.get("allowed"):
+            errors.append(f"{display}: {allowed.get('message') or 'licence limit reached'}"); break
+        slug = _safe_camera_slug(display)
+        if _is_drone_name(slug):
+            slug = "cam_" + slug
+        base, n = slug, 2
+        while slug in existing:
+            slug = f"{base}_{n}"[:40]; n += 1
+        cloud = _cloud_source("POST", {"source_type": "camera", "name": display})
+        if not cloud.get("ok"):
+            errors.append(f"{display}: {cloud.get('error') or 'registration failed'}"); continue
+        try:
+            is_first = CAMERA_NAME not in existing
+            _write_managed_frigate(slug, url)
+            existing.add(slug)
+            if is_first:
+                settings = load_local_settings()
+                settings.update({"camera_name": slug, "camera_stream": f"rtsp://localhost:8554/{slug}", "camera_display_name": display})
+                tmp = LOCAL_SETTINGS_FILE + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(settings, f, indent=2)
+                os.replace(tmp, LOCAL_SETTINGS_FILE)
+                CAMERA_NAME = slug; STREAM = f"rtsp://localhost:8554/{slug}"
+                CAMERA_STATE_TOPIC = f"frigate/{slug}/enabled/state"; CAMERA_SET_TOPIC = f"frigate/{slug}/enabled/set"
+            added.append({"name": display, "camera_name": slug})
+        except Exception as e:
+            sid = ((cloud.get("source") or {}).get("id"))
+            if sid:
+                _cloud_source("DELETE", {"id": sid})
+            errors.append(f"{display}: {e}")
+    restarted = _restart_frigate()[0] if added else False
+    return added, errors, restarted
+
+
+@app.route("/api/setup/recorder/scan", methods=["POST"])
+def api_setup_recorder_scan():
+    try:
+        result = scan_recorder(request.get_json(silent=True) or {})
+    except Exception as e:
+        result = {"ok": False, "error": f"Scan failed: {e}"}
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/setup/recorder/add", methods=["POST"])
+def api_setup_recorder_add():
+    cams = (request.get_json(silent=True) or {}).get("cameras") or []
+    if not isinstance(cams, list) or not cams:
+        return jsonify({"ok": False, "error": "Choose at least one camera."}), 400
+    added, errors, restarted = add_cameras_batch(cams[:RECORDER_MAX_CHANNELS])
+    msg = f"{len(added)} camera(s) added" + (". Video processing restarted." if restarted else ".")
+    return jsonify({"ok": bool(added), "added": added, "errors": errors, "message": msg + ((" Not added: " + "; ".join(errors)) if errors else "")}), (200 if added else 409)
+
+
 @app.route("/api/setup/brands")
 def api_setup_brands():
     return jsonify({"ok": True, "brands": [{"id": k, "label": v["label"], "user": v["user"], "port": v["port"],
@@ -4735,6 +4931,14 @@ DEVICE_WIZARD_PAGE = hud_page("Devices", r"""
 .wz-drone .qr{width:132px;height:132px;background:#fff;border-radius:4px;display:flex;align-items:center;justify-content:center}
 .wz-drone .qr svg{width:124px;height:124px}
 .wz-hidden{display:none}
+.rec-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+.rec-cam{background:#05131d;border:1px solid #153c56;border-radius:6px;overflow:hidden}
+.rec-cam.on{border-color:#2aea88}
+.rec-cam img,.rec-cam .nopic{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}
+.rec-cam .nopic{display:flex;align-items:center;justify-content:center;color:#6d8b9d;font-size:12px}
+.rec-cam .rc-body{padding:8px 10px}
+.rec-cam input[type=text]{padding:7px 9px;font-size:13px;margin-top:6px}
+.rec-cam label{margin:0;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:12px;color:#d9efff}
 @media(max-width:640px){.wz-grid{grid-template-columns:1fr}.wz-drone{grid-template-columns:1fr}}
 </style>
 <main class="hud-main narrow">
@@ -4744,6 +4948,7 @@ DEVICE_WIZARD_PAGE = hud_page("Devices", r"""
 
 <div class="wz-tabs">
 <button class="wz-tab on" id="tabCam" onclick="mode('cam')"><b>▣ Camera</b><span>IP / CCTV camera or NVR channel</span></button>
+<button class="wz-tab" id="tabRec" onclick="mode('rec')"><b>📼 Recorder</b><span>Whole NVR / DVR in one step</span></button>
 <button class="wz-tab" id="tabDrone" onclick="mode('drone')"><b>✈ Drone</b><span>DJI live stream over RTMP</span></button>
 </div>
 
@@ -4788,6 +4993,28 @@ DEVICE_WIZARD_PAGE = hud_page("Devices", r"""
 </div>
 </div></section>
 
+<section class="panel wz-hidden" id="recPanel"><div class="panel-head"><div class="panel-title">📼 Add a whole recorder</div><div class="live">NVR / DVR</div></div>
+<div class="panel-body">
+<div class="muted">Enter the recorder's address and login. The system recognises the brand, finds every camera channel with its name and a live picture, and you choose which to add.</div>
+<div class="wz-grid" style="margin-top:6px">
+<div class="full"><label for="recBrand">Brand</label><select id="recBrand"></select></div>
+<div><label for="recIp">Recorder IP address</label><input id="recIp" placeholder="192.168.1.100" autocomplete="off"></div>
+<div><label for="recPort">RTSP port</label><input id="recPort" type="number" value="554"></div>
+<div><label for="recUser">Username</label><input id="recUser" value="admin" autocomplete="off"></div>
+<div><label for="recPass">Password</label><input id="recPass" type="password" autocomplete="new-password"></div>
+<div class="full"><label style="display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;font-size:13px"><input type="checkbox" id="recSub"> Use lighter sub-streams (recommended for 8+ cameras; faces and plates are read best without it)</label></div>
+</div>
+<div class="actions" style="margin-top:14px"><button class="hud-btn primary" id="recScanBtn" onclick="recScan()">Find cameras</button></div>
+<div id="recMsg" class="hud-msg"></div>
+<div id="recResult" class="wz-hidden" style="margin-top:14px">
+<div class="muted" id="recInfo"></div>
+<div class="actions" style="margin:10px 0"><button class="hud-btn" onclick="recSelect(true)">Select all with video</button><button class="hud-btn" onclick="recSelect(false)">Select none</button></div>
+<div id="recList" class="rec-grid"></div>
+<div class="actions" style="margin-top:14px"><button class="hud-btn primary" id="recAddBtn" onclick="recAdd()">Add selected</button></div>
+<div id="recMsg2" class="hud-msg"></div>
+</div>
+</div></section>
+
 <section class="panel wz-hidden" id="dronePanel"><div class="panel-head"><div class="panel-title">✈ Drones</div><div class="live" id="recv"></div></div>
 <div class="panel-body">
 <div class="muted">In DJI Fly: tap <b>•••</b> &gt; <b>Transmission</b> &gt; <b>Live Streaming Platforms</b> &gt; <b>RTMP</b>, then type the address below (or scan the QR code with the phone and copy it). The phone/controller must be on the same Wi-Fi as this PC.</div>
@@ -4801,9 +5028,9 @@ const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const msg=(id,t,cls)=>{const e=$(id);e.className='hud-msg '+(cls||'');e.textContent=t};
 let brands=[],manual=false,found=null,dronePoll=null;
-function mode(m){$('tabCam').classList.toggle('on',m==='cam');$('tabDrone').classList.toggle('on',m==='drone');
-  $('camPanel').classList.toggle('wz-hidden',m!=='cam');$('dronePanel').classList.toggle('wz-hidden',m!=='drone');
-  clearInterval(dronePoll);if(m==='drone'){loadDrones();dronePoll=setInterval(loadDrones,5000)}history.replaceState(null,'',m==='drone'?'#drone':'#camera')}
+function mode(m){$('tabCam').classList.toggle('on',m==='cam');$('tabDrone').classList.toggle('on',m==='drone');$('tabRec').classList.toggle('on',m==='rec');
+  $('camPanel').classList.toggle('wz-hidden',m!=='cam');$('dronePanel').classList.toggle('wz-hidden',m!=='drone');$('recPanel').classList.toggle('wz-hidden',m!=='rec');
+  clearInterval(dronePoll);if(m==='drone'){loadDrones();dronePoll=setInterval(loadDrones,5000)}history.replaceState(null,'',m==='drone'?'#drone':m==='rec'?'#recorder':'#camera')}
 function go(n){for(let i=1;i<=4;i++){$('step'+i).classList.toggle('wz-hidden',i!==n);$('st'+i).className=i===n?'on':(i<n?'done':'')}}
 function brandChanged(){const b=brands.find(x=>x.id===$('brand').value)||{};$('note').textContent=b.note||'';if(!$('user').dataset.touched)$('user').value=b.user||'';$('port').value=b.port||554}
 function toggleManual(){manual=!manual;$('simple').classList.toggle('wz-hidden',manual);$('manual').classList.toggle('wz-hidden',!manual);$('manualLink').textContent=manual?'Use brand + IP instead':'Enter full RTSP address instead'}
@@ -4844,9 +5071,32 @@ async function loadDrones(){try{const d=await fetch('/api/setup/drones').then(r=
 async function addDrone(){$('droneBtn').disabled=true;msg('md','Adding a drone slot…');
   try{const r=await fetch('/api/setup/drone',{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Could not add the drone');
     msg('md',d.message,'ok');loadDrones()}catch(e){msg('md',e.message,'bad')}finally{usage()}}
-fetch('/api/setup/brands').then(r=>r.json()).then(d=>{brands=d.brands||[];$('brand').innerHTML=brands.map(b=>`<option value="${b.id}">${esc(b.label)}</option>`).join('');$('brand').value='other';brandChanged()});
+let recFound=[],recCanAdd=null;
+async function recScan(){const body={brand:$('recBrand').value,ip:$('recIp').value.trim(),port:$('recPort').value,user:$('recUser').value,password:$('recPass').value,sub_stream:$('recSub').checked};
+  $('recScanBtn').disabled=true;$('recResult').classList.add('wz-hidden');msg('recMsg','Looking for the recorder and its cameras… (up to a minute)');
+  try{const d=await fetch('/api/setup/recorder/scan',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+    if(!d.ok){msg('recMsg',d.error||'Scan failed.','bad');return}
+    recFound=d.channels||[];recCanAdd=d.can_add;const live=recFound.filter(c=>c.online).length;
+    msg('recMsg',`Found ${d.brand_label}${d.model?' ('+d.model+')':''}: ${recFound.length} channel(s), ${live} with video.`,'ok');
+    $('recInfo').textContent=recCanAdd==null?'Your licence has no camera limit.':`Your licence allows ${recCanAdd} more camera${recCanAdd===1?'':'s'}.`;
+    $('recList').innerHTML=recFound.map((c,i)=>`<div class="rec-cam${c.online?' on':''}">${c.snapshot?`<img src="${c.snapshot}" alt="">`:'<div class="nopic">No video on this channel</div>'}
+      <div class="rc-body"><label><input type="checkbox" id="rc${i}" ${c.online?'checked':''} onchange="recCount()"> Channel ${c.ch}${c.width?` · ${c.width}×${c.height}`:''}</label>
+      <input type="text" id="rn${i}" value="${esc(c.name)}" maxlength="40"></div></div>`).join('')||'<p class="muted">No channels found.</p>';
+    $('recResult').classList.remove('wz-hidden');recCount()}
+  catch(e){msg('recMsg','Could not reach the system: '+e.message,'bad')}finally{$('recScanBtn').disabled=false}}
+function recSelect(on){recFound.forEach((c,i)=>{$('rc'+i).checked=on&&c.online});recCount()}
+function recCount(){const n=recFound.filter((c,i)=>$('rc'+i).checked).length;$('recAddBtn').textContent=`Add selected (${n})`;
+  if(recCanAdd!=null&&n>recCanAdd)msg('recMsg2',`You selected ${n}, but the licence allows ${recCanAdd} more. Only the first ${recCanAdd} will be added.`,'bad');else $('recMsg2').textContent=''}
+async function recAdd(){const cams=recFound.map((c,i)=>({sel:$('rc'+i).checked,name:$('rn'+i).value.trim()||('Camera '+c.ch),rtsp_url:c.rtsp_url})).filter(c=>c.sel);
+  if(!cams.length){msg('recMsg2','Select at least one camera.','bad');return}
+  $('recAddBtn').disabled=true;msg('recMsg2',`Adding ${cams.length} camera(s) and restarting video processing once…`);
+  try{const r=await fetch('/api/setup/recorder/add',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cameras:cams})});const d=await r.json();
+    msg('recMsg2',(d.message||d.error)+(d.ok?' They appear on the dashboard within about a minute.':''),d.ok?'ok':'bad');usage()}
+  catch(e){msg('recMsg2','Could not reach the system: '+e.message,'bad')}finally{$('recAddBtn').disabled=false}}
+fetch('/api/setup/brands').then(r=>r.json()).then(d=>{brands=d.brands||[];
+  $('recBrand').innerHTML=brands.filter(b=>['other','hikvision','dahua','reolink','uniview','ezviz'].includes(b.id)).map(b=>`<option value="${b.id}">${b.id==='other'?'Not sure: detect automatically':esc(b.label)}</option>`).join('');$('brand').innerHTML=brands.map(b=>`<option value="${b.id}">${esc(b.label)}</option>`).join('');$('brand').value='other';brandChanged()});
 $('user').addEventListener('input',()=>$('user').dataset.touched=1);
-usage();mode(location.hash==='#drone'?'drone':'cam');
+usage();mode(location.hash==='#drone'?'drone':location.hash==='#recorder'?'rec':'cam');
 </script>""", active="devices")
 
 
