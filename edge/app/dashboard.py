@@ -301,6 +301,7 @@ audio_queue = queue.Queue()
 telegram_queue = queue.Queue()
 telegram_last_sent = {}
 telegram_lock = threading.Lock()
+assistant_state = {"muted_until": 0}  # Telegram assistant: /mute pauses detection alerts
 
 
 # ============================================================
@@ -329,9 +330,11 @@ def telegram_ready(config=None):
     )
 
 
-def queue_telegram_alert(kind, text, key, snapshot_bytes=None):
+def queue_telegram_alert(kind, text, key, snapshot_bytes=None, buttons=None):
     config = load_telegram_config()
     if not telegram_ready(config):
+        return False
+    if time.time() < float(assistant_state.get("muted_until") or 0) and kind in ("unknown_face", "unknown_vehicle", "known_face", "known_vehicle"):
         return False
 
     setting_name = {
@@ -361,6 +364,7 @@ def queue_telegram_alert(kind, text, key, snapshot_bytes=None):
     telegram_queue.put({
         "text": str(text),
         "snapshot": snapshot_bytes,
+        "buttons": buttons,
     })
     return True
 
@@ -378,18 +382,21 @@ def telegram_worker():
             base = f"https://api.telegram.org/bot{token}"
             text = str(item.get("text") or "Security event")
             snapshot = item.get("snapshot")
+            extra = {}
+            if item.get("buttons"):
+                extra["reply_markup"] = json.dumps({"inline_keyboard": item["buttons"]})
 
             if snapshot:
                 response = requests.post(
                     base + "/sendPhoto",
-                    data={"chat_id": chat_id, "caption": text},
+                    data={"chat_id": chat_id, "caption": text[:1000], **extra},
                     files={"photo": ("security_event.jpg", snapshot, "image/jpeg")},
                     timeout=15,
                 )
             else:
                 response = requests.post(
                     base + "/sendMessage",
-                    data={"chat_id": chat_id, "text": text},
+                    data={"chat_id": chat_id, "text": text[:4000], **extra},
                     timeout=15,
                 )
 
@@ -845,6 +852,7 @@ def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_b
                 f"⚠️ UNKNOWN PERSON detected at {CAMERA_NAME}\n{date_text} {time_text}",
                 f"unknown_face:{object_id or identifier or name}",
                 snapshot_bytes=snapshot_bytes,
+                buttons=alert_buttons(CAMERA_NAME),
             )
         elif event_type.upper() in {"UNKNOWN PLATE", "UNKNOWN VEHICLE"}:
             plate_text = identifier or "Plate unavailable"
@@ -853,6 +861,7 @@ def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_b
                 f"⚠️ UNKNOWN VEHICLE detected at {CAMERA_NAME}\nPlate: {plate_text}\n{date_text} {time_text}",
                 f"unknown_vehicle:{object_id or plate_text}",
                 snapshot_bytes=snapshot_bytes,
+                buttons=alert_buttons(CAMERA_NAME),
             )
 
         return True
@@ -1943,6 +1952,7 @@ def on_message(
             mark_person_recognized(face_object_id)
             set_face_overlay(True, display_name, payload_box(data), object_id=face_object_id)
             detection_beep("face_" + display_name.lower(), True)
+            record_sighting("face", display_name, "", CAMERA_NAME, face_object_id)
             queue_telegram_alert(
                 "known_face",
                 f"✅ {display_name} detected at {CAMERA_NAME}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -2053,6 +2063,7 @@ def on_message(
                 object_id=vehicle_object_id,
             )
             detection_beep("plate_" + plate, known)
+            record_sighting("plate", vehicle if known else "", plate, CAMERA_NAME, vehicle_object_id, known=known)
 
             if known:
                 queue_telegram_alert(
@@ -5199,6 +5210,24 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 </div>
 <div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="autoStart()">Start auto-fly</button><button class="hud-btn danger" onclick="cmd('goto_cancel')">Cancel</button></div>
 </div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">🚨 Drone response &amp; Telegram</div><div class="live" id="respState"></div></div>
+<div class="panel-body">
+<div class="muted">When a camera sees an unknown person or vehicle, the Telegram alert gets a <b>Send drone</b> button. Set each camera's place on the map so the drone knows where to fly.</div>
+<div id="respCams" style="margin-top:10px"></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 10px">
+<div><label for="rAlt">Height (m)</label><input id="rAlt" type="number" min="10" max="120"></div>
+<div><label for="rSpeed">Speed (m/s)</label><input id="rSpeed" type="number" min="1" max="8"></div>
+<div><label for="rHover">Hover (s)</label><input id="rHover" type="number" min="10" max="600"></div>
+<div><label for="rBatt">Min battery %</label><input id="rBatt" type="number" min="20" max="90"></div>
+<div><label for="rBrief">Morning briefing</label><input id="rBrief" type="time"></div>
+<div style="display:flex;flex-direction:column;justify-content:flex-end;gap:6px;padding-bottom:4px">
+<label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rReturn"> Auto return home</label>
+<label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rBriefOn"> Send briefing</label></div>
+</div>
+<div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="saveResp()">Save</button><button class="hud-btn danger" onclick="recallResp()">Recall drone</button>
+<button class="hud-btn" onclick="briefNow()">Send briefing now</button></div>
+<div id="respMsg" class="hud-msg"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">▣ Camera</div></div>
 <div class="panel-body"><div class="dc-btns">
 <button class="hud-btn" onclick="cmd('gimbal',{pitch:0})">Look ahead</button>
@@ -5258,7 +5287,7 @@ document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
-  map.on('click',e=>setTarget(e.latlng.lat,e.latlng.lng))}
+  map.on('click',e=>locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):setTarget(e.latlng.lat,e.latlng.lng))}
 let target=null,tMark=null,tLine=null;
 function setTarget(lat,lon){target={lat,lon};$('autoTarget').textContent=lat.toFixed(6)+', '+lon.toFixed(6);
   tMark=tMark||L.marker([lat,lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,22],html:'<div style="color:#ff5d6c;font-size:22px;line-height:22px;text-shadow:0 0 6px #000">⬇</div>'})}).addTo(map);
@@ -5291,6 +5320,30 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
     if(goal){tLine=tLine||L.polyline([],{color:'#ff5d6c',weight:2,dashArray:'6 6'}).addTo(map);tLine.setLatLngs([[t.lat,t.lon],goal])}
     else if(tLine){tLine.setLatLngs([])}}
   $('events').innerHTML=(st.events||[]).slice().reverse().map(e=>`<div>${new Date(e.at*1000).toLocaleTimeString()} · ${esc(e.msg)}</div>`).join('')}
+let resp=null,locFor='',camMarks={};
+function rmsg(t,ok){const e=$('respMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
+async function loadResp(){try{const d=await fetch('/api/response/settings').then(r=>r.json());resp=d;const c=d.settings;
+  $('rAlt').value=c.altitude_m;$('rSpeed').value=c.speed_ms;$('rHover').value=c.hover_seconds;$('rBatt').value=c.min_battery;$('rBrief').value=c.briefing_time;
+  $('rReturn').checked=!!c.auto_return;$('rBriefOn').checked=!!c.briefing_enabled;renderResp()}catch(e){}}
+function renderResp(){if(!resp)return;const locs=resp.settings.camera_locations||{},r=resp.response||{};
+  $('respState').textContent=r.active?('RESPONDING: '+r.camera+' · '+r.phase):(resp.telegram?'TELEGRAM READY':'TELEGRAM NOT SET UP');
+  $('respCams').innerHTML=(resp.cameras||[]).filter(n=>!/^drone/i.test(n)).map(n=>{const l=locs[n];return `<div class="hud-row"><div><b>${esc(n)}</b><div class="muted">${l?('📍 '+l.lat.toFixed(5)+', '+l.lon.toFixed(5)):'No location yet'}</div></div>
+    <div class="actions"><button class="hud-btn" onclick="pickLoc('${esc(n)}')">${locFor===n?'Click the map…':(l?'Move':'Set on map')}</button>${l?`<button class="hud-btn primary" onclick="sendTo('${esc(n)}')">Send drone</button>`:''}</div></div>`}).join('')||'<p class="muted">No cameras yet.</p>';
+  if(map&&typeof L!=='undefined'){for(const [n,l] of Object.entries(locs)){camMarks[n]=camMarks[n]||L.marker([l.lat,l.lon],{icon:L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,12],html:'<div style="font-size:20px;line-height:24px;text-shadow:0 0 6px #000">📹</div>'})}).bindTooltip(n).addTo(map);camMarks[n].setLatLng([l.lat,l.lon])}}}
+function pickLoc(n){locFor=n;rmsg('Click the camera\'s position on the map.');renderResp()}
+async function saveCamLoc(lat,lon){const n=locFor;locFor='';const locs={...(resp.settings.camera_locations||{}),[n]:{lat,lon}};
+  const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({camera_locations:locs})}).then(r=>r.json());
+  if(d.ok){resp.settings=d.settings;rmsg('Location of '+n+' saved.',true)}else rmsg(d.error,false);renderResp()}
+async function saveResp(){const body={altitude_m:+$('rAlt').value,speed_ms:+$('rSpeed').value,hover_seconds:+$('rHover').value,min_battery:+$('rBatt').value,
+  briefing_time:$('rBrief').value,auto_return:$('rReturn').checked,briefing_enabled:$('rBriefOn').checked};
+  const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  if(d.ok){resp.settings=d.settings;rmsg('Saved.',true);loadResp()}else rmsg(d.error,false)}
+async function sendTo(n){const sim=(st.telemetry||{}).simulator;
+  if(!confirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Send the drone to '+n+'? Keep it in sight.'))return;
+  const d=await fetch('/api/response/dispatch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({camera:n})}).then(r=>r.json());rmsg(d.message||d.error,d.ok);loadResp()}
+async function recallResp(){const d=await fetch('/api/response/recall',{method:'POST'}).then(r=>r.json());rmsg(d.ok?'Drone returning home.':d.error,d.ok);loadResp()}
+async function briefNow(){const d=await fetch('/api/assistant/briefing',{method:'POST'}).then(r=>r.json());rmsg(d.ok?'Briefing sent to Telegram.':d.error,d.ok)}
+setInterval(()=>{if(!locFor)loadResp()},5000);
 async function poll(){try{st=await fetch('/api/drone/link',{cache:'no-store'}).then(r=>r.json());render()}catch(e){}}
 async function loadPair(){try{const d=await fetch('/api/drone/link/pair').then(r=>r.json());if(!d.ok){$('pairMsg').className='hud-msg bad';$('pairMsg').textContent=d.error;return}
   $('pairQr').innerHTML=d.qr;$('pairAddr').textContent=d.host+':'+d.port}catch(e){}}
@@ -5298,10 +5351,576 @@ async function resetPair(){if(!confirm('Make a new pairing code? The phone will 
 function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
   const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
   if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
-$('speedVal').textContent='30%';loadPair();poll();setInterval(poll,500);
+$('speedVal').textContent='30%';loadPair();poll();loadResp();setInterval(poll,500);
 </script>""", active="drone")
 _body_end = DRONE_CONTROL_PAGE.rfind("</body>")
 DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_CONTROL_PAGE[_body_end:]
+
+
+# ============================================================
+# SIGHTINGS, DRONE RESPONSE AND TELEGRAM ASSISTANT
+# ============================================================
+# Sightings: known faces and plates (unknown faces are already in event_history.csv), kept 30 days,
+# so the assistant can answer "who came today?" and build the morning briefing offline.
+SIGHTINGS_FILE = os.path.join(BASE_FOLDER, "sightings.jsonl")
+RESPONSE_SETTINGS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "response_settings.json")
+RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "hover_seconds": 60, "auto_return": True,
+                     "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00"}
+sightings_lock = threading.Lock()
+_sighting_last = {}
+
+
+def record_sighting(kind, name, identifier, camera, object_id="", known=True):
+    """One line per person/vehicle visit (repeat reports of the same object within 2 min are skipped)."""
+    key = (kind, object_id or identifier or name)
+    now = time.time()
+    if now - _sighting_last.get(key, 0) < 120:
+        return
+    _sighting_last[key] = now
+    row = {"t": round(now), "kind": kind, "name": str(name or ""), "id": str(identifier or ""), "camera": str(camera or ""), "known": bool(known)}
+    try:
+        with sightings_lock, open(SIGHTINGS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print("Sighting log error:", e)
+
+
+def load_sightings(since, until=None):
+    """Known faces/plates from the sightings log plus unknown faces from the event history."""
+    until = until or time.time() + 60
+    rows = []
+    try:
+        with sightings_lock, open(SIGHTINGS_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if since <= r.get("t", 0) <= until:
+                    rows.append(r)
+    except FileNotFoundError:
+        pass
+    try:
+        with event_log_lock, open(EVENT_LOG, "r", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                try:
+                    t = time.mktime(time.strptime(f"{r.get('Date')} {r.get('Time')}", "%Y-%m-%d %H:%M:%S"))
+                except Exception:
+                    continue
+                if since <= t <= until:
+                    kind = "face" if "FACE" in str(r.get("Type", "")).upper() else "plate"
+                    rows.append({"t": t, "kind": kind, "name": "", "id": r.get("Identifier", "") if kind == "plate" else "",
+                                 "camera": r.get("Camera") or CAMERA_NAME, "known": False, "snapshot": r.get("Snapshot", "")})
+    except FileNotFoundError:
+        pass
+    return sorted(rows, key=lambda r: r["t"])
+
+
+def prune_sightings(days=30):
+    cutoff = time.time() - days * 86400
+    try:
+        with sightings_lock:
+            with open(SIGHTINGS_FILE, "r", encoding="utf-8") as f:
+                keep = [line for line in f if (json.loads(line).get("t", 0) if line.strip() else 0) >= cutoff]
+            with open(SIGHTINGS_FILE, "w", encoding="utf-8") as f:
+                f.writelines(keep)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print("Sightings prune error:", e)
+
+
+def load_response_settings():
+    cfg = dict(RESPONSE_DEFAULTS)
+    try:
+        with open(RESPONSE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            cfg.update({k: v for k, v in json.load(f).items() if k in RESPONSE_DEFAULTS})
+    except (FileNotFoundError, ValueError):
+        pass
+    # The main camera can also use the location saved on the Settings page.
+    legacy = _load_customer_settings() if "_load_customer_settings" in globals() else {}
+    if CAMERA_NAME not in cfg["camera_locations"] and isinstance(legacy.get("camera_latitude"), (int, float)) and isinstance(legacy.get("camera_longitude"), (int, float)):
+        cfg["camera_locations"] = {**cfg["camera_locations"], CAMERA_NAME: {"lat": legacy["camera_latitude"], "lon": legacy["camera_longitude"]}}
+    return cfg
+
+
+def save_response_settings(data):
+    cfg = load_response_settings()
+    for k, v in data.items():
+        if k not in RESPONSE_DEFAULTS:
+            continue
+        if k == "camera_locations" and isinstance(v, dict):
+            v = {str(cam): {"lat": float(p["lat"]), "lon": float(p["lon"])} for cam, p in v.items()
+                 if isinstance(p, dict) and -90 <= float(p.get("lat", 999)) <= 90 and -180 <= float(p.get("lon", 999)) <= 180}
+        elif k in ("altitude_m", "speed_ms", "hover_seconds", "min_battery"):
+            lo, hi = {"altitude_m": (10, DRONE_LIMITS["max_altitude_m"]), "speed_ms": (1, 8), "hover_seconds": (10, 600), "min_battery": (20, 90)}[k]
+            v = max(lo, min(hi, float(v)))
+        elif k in ("auto_return", "briefing_enabled"):
+            v = bool(v)
+        elif k == "briefing_time":
+            v = str(v) if re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(v)) else RESPONSE_DEFAULTS["briefing_time"]
+        cfg[k] = v
+    tmp = RESPONSE_SETTINGS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+    os.replace(tmp, RESPONSE_SETTINGS_FILE)
+    return cfg
+
+
+# ---------- drone response ----------
+drone_response = {"active": False, "camera": "", "phase": "", "started": 0.0, "arrived": 0.0, "stay_until": 0.0, "by": "", "message": ""}
+
+
+def _drone_ready_problem(camera):
+    """Why the drone can't be sent to this camera right now (empty string = ready)."""
+    if not drone_control_allowed():
+        return "Drone control is not included in this licence."
+    if drone_link["conn"] is None:
+        return "The Drone Link phone is not connected."
+    tel = drone_link["telemetry"]
+    if time.time() - drone_link["tel_at"] > 3 or not tel.get("drone_connected"):
+        return "The drone is not connected to the controller."
+    cfg = load_response_settings()
+    loc = cfg["camera_locations"].get(camera)
+    if not loc:
+        return f"No map location saved for camera '{camera}'. Set it on the Drone page."
+    if (tel.get("battery") or 0) < cfg["min_battery"]:
+        return f"Battery is {tel.get('battery')}% (minimum {int(cfg['min_battery'])}%)."
+    home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
+    if None in home:
+        return "The drone has no GPS position yet."
+    if _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
+        return f"That camera is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."
+    if drone_response["active"]:
+        return f"The drone is already responding to {drone_response['camera']}."
+    return ""
+
+
+def dispatch_drone(camera, by="dashboard"):
+    problem = _drone_ready_problem(camera)
+    if problem:
+        return {"ok": False, "error": problem}
+    cfg = load_response_settings()
+    loc = cfg["camera_locations"][camera]
+    result = drone_command("goto", {"lat": loc["lat"], "lon": loc["lon"], "alt": cfg["altitude_m"],
+                                    "speed": cfg["speed_ms"], "arrive": "hover"}, timeout=15.0)
+    if not result["ok"]:
+        return result
+    drone_response.update(active=True, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
+                          message=f"Drone on its way to {camera}")
+    _drone_event(f"Drone response to {camera} started ({by})")
+    return {"ok": True, "message": f"Drone on its way to {camera} at {int(cfg['altitude_m'])} m."}
+
+
+def recall_drone(reason="recalled"):
+    if not drone_response["active"]:
+        return {"ok": False, "error": "No drone response in progress."}
+    result = drone_command("go_home", timeout=10.0)
+    drone_response.update(phase="returning", message=f"Returning home ({reason})")
+    _drone_event(f"Drone response: returning home ({reason})")
+    return result
+
+
+def _drone_snapshot():
+    try:
+        r = requests.get(f"{FRIGATE_API_URL}/api/{DRONE_CAMERA_NAME}/latest.jpg", params={"bbox": 1, "h": 720}, timeout=4)
+        if r.ok and r.content[:2] == b"\xff\xd8":
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def _drone_response_worker():
+    while True:
+        time.sleep(1)
+        if not drone_response["active"]:
+            continue
+        try:
+            if time.time() - drone_link["tel_at"] > 5:
+                continue  # no fresh telemetry (Wi-Fi hiccup): wait instead of deciding anything
+            tel = drone_link["telemetry"]
+            mission = tel.get("mission")
+            cam = drone_response["camera"]
+            cfg = load_response_settings()
+            if drone_response["phase"] == "flying":
+                if not mission and drone_response["started"] and time.time() - drone_response["started"] > 5:
+                    loc = cfg["camera_locations"].get(cam) or {}
+                    near = tel.get("lat") and loc and _distance_m(tel["lat"], tel["lon"], loc["lat"], loc["lon"]) < 8
+                    if near:
+                        drone_response.update(phase="hovering", arrived=time.time(), stay_until=time.time() + cfg["hover_seconds"],
+                                              message=f"Hovering over {cam}")
+                        send_telegram(f"🚁 Drone is over {cam} at {int(tel.get('altitude') or 0)} m. Battery {tel.get('battery')}%.\n"
+                                      f"{'Returning home in ' + str(int(cfg['hover_seconds'])) + ' s.' if cfg['auto_return'] else 'Staying until you send it home.'}",
+                                      _drone_snapshot(), [[{"text": "🏠 Return now", "callback_data": "home"}, {"text": "⏱ Stay 2 min", "callback_data": "stay"}],
+                                                          [{"text": "📷 New snapshot", "callback_data": "dsnap"}]])
+                    else:
+                        drone_response.update(active=False, phase="stopped", message="Stopped before arriving")
+                        send_telegram(f"⚠️ Drone response to {cam} stopped before arriving (STOP pressed, pilot took control or link lost). The pilot has control.")
+            elif drone_response["phase"] == "hovering":
+                if tel.get("control") != "PC":
+                    drone_response.update(active=False, phase="pilot", message="The pilot took control")
+                    send_telegram("ℹ️ The pilot took control of the drone. Drone response ended.")
+                elif cfg["auto_return"] and time.time() > drone_response["stay_until"]:
+                    recall_drone("hover time over")
+                    send_telegram("🏠 Drone returning home.")
+            elif drone_response["phase"] == "returning":
+                if tel.get("flight_mode") not in ("GO_HOME", "AUTO_LANDING") and not tel.get("flying"):
+                    drone_response.update(active=False, phase="landed", message="Landed at home")
+                    send_telegram(f"✅ Drone landed at home. Battery {tel.get('battery')}%.")
+                elif time.time() - drone_response["started"] > 900:
+                    drone_response.update(active=False, phase="", message="")
+        except Exception as e:
+            print("Drone response error:", e)
+
+
+# ---------- Telegram assistant ----------
+def _tg(method, **data):
+    cfg = load_telegram_config()
+    if not telegram_ready(cfg):
+        return None
+    files = data.pop("files", None)
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{str(cfg['bot_token']).strip()}/{method}", data=data, files=files, timeout=35)
+        return r.json() if r.ok else None
+    except Exception as e:
+        print("Telegram error:", e)
+        return None
+
+
+def send_telegram(text, photo=None, buttons=None):
+    """Assistant replies and drone notices (not subject to detection-alert mute/cooldown)."""
+    chat = str(load_telegram_config().get("chat_id") or "").strip()
+    extra = {"reply_markup": json.dumps({"inline_keyboard": buttons})} if buttons else {}
+    if photo:
+        return _tg("sendPhoto", chat_id=chat, caption=text[:1000], files={"photo": ("snapshot.jpg", photo, "image/jpeg")}, **extra)
+    return _tg("sendMessage", chat_id=chat, text=text[:4000], **extra)
+
+
+def alert_buttons(camera):
+    row = []
+    if drone_control_allowed() and load_response_settings()["camera_locations"].get(camera):
+        row.append({"text": "🚁 Send drone", "callback_data": f"drone:{camera}"[:64]})
+    row.append({"text": "📷 Live snapshot", "callback_data": f"snap:{camera}"[:64]})
+    return [row, [{"text": "🔕 Mute 1 h", "callback_data": "mute:60"}]]
+
+
+def _camera_snapshot(camera):
+    try:
+        r = requests.get(f"{FRIGATE_API_URL}/api/{camera}/latest.jpg", params={"bbox": 1, "h": 720}, timeout=4)
+        if r.ok and r.content[:2] == b"\xff\xd8":
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def _fmt_time(t):
+    return time.strftime("%H:%M", time.localtime(t))
+
+
+def _period(text):
+    """(start, end, label) for words like today / yesterday / last night / this week."""
+    now = time.time()
+    lt = time.localtime(now)
+    midnight = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    t = text.lower()
+    if "last night" in t or "tonight" in t or re.search(r"\bnight\b", t):
+        start = midnight - 2 * 3600 if lt.tm_hour < 12 else midnight + 22 * 3600
+        if lt.tm_hour < 12:
+            return start, midnight + 6 * 3600, "last night (22:00–06:00)"
+        return start, start + 8 * 3600, "tonight"
+    if "yesterday" in t:
+        return midnight - 86400, midnight, "yesterday"
+    if "week" in t:
+        return now - 7 * 86400, now + 60, "the last 7 days"
+    return midnight, now + 60, "today"
+
+
+def summary_text(start, end, label):
+    rows = load_sightings(start, end)
+    faces = [r for r in rows if r["kind"] == "face"]
+    plates = [r for r in rows if r["kind"] == "plate"]
+    known = {}
+    for r in faces:
+        if r["known"]:
+            known.setdefault(r["name"], []).append(r["t"])
+    unknown = [r for r in faces if not r["known"]]
+    lines = [f"📋 Summary for {label}"]
+    if known:
+        lines.append(f"\n✅ Known people ({len(known)}):")
+        for name, ts in sorted(known.items(), key=lambda kv: -len(kv[1])):
+            lines.append(f"• {name}: {len(ts)}× (first {_fmt_time(min(ts))}, last {_fmt_time(max(ts))})")
+    lines.append(f"\n⚠️ Unknown people: {len(unknown)}" + (f" (last at {_fmt_time(unknown[-1]['t'])})" if unknown else ""))
+    if plates:
+        by_plate = {}
+        for r in plates:
+            by_plate.setdefault(r["id"] or "unreadable", []).append(r)
+        lines.append(f"\n🚗 Vehicles ({len(by_plate)} plates):")
+        for plate, rs in sorted(by_plate.items(), key=lambda kv: -len(kv[1]))[:12]:
+            night = sum(1 for r in rs if time.localtime(r["t"]).tm_hour >= 22 or time.localtime(r["t"]).tm_hour < 6)
+            tag = (rs[0]["name"] or "authorized") if rs[0]["known"] else "unknown"
+            lines.append(f"• {plate} ({tag}): {len(rs)}×" + (f", {night} at night 🌙" if night else ""))
+    if not rows:
+        lines.append("\nNo activity recorded.")
+    return "\n".join(lines)
+
+
+def briefing_text():
+    now = time.time()
+    text = summary_text(now - 86400, now, "the last 24 hours").replace("📋 Summary for", "☀️ Good morning! Briefing for", 1)
+    try:
+        stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
+        offline = [n for n in _frigate_camera_names() if not _is_drone_name(n) and float((stats.get(n) or {}).get("camera_fps") or 0) <= 0]
+        text += "\n\n📹 Cameras: " + ("all online ✅" if not offline else "offline: " + ", ".join(offline) + " ⚠️")
+    except Exception:
+        text += "\n\n📹 Cameras: status unavailable"
+    return text
+
+
+def status_text():
+    lines = [f"🛡️ {edition.PRODUCT_NAME} · {APP_VERSION}"]
+    try:
+        stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
+        for n in _frigate_camera_names():
+            fps = float((stats.get(n) or {}).get("camera_fps") or 0)
+            lines.append(f"{'✈' if _is_drone_name(n) else '📹'} {n}: {'online ' + str(round(fps)) + ' fps' if fps > 0 else 'offline'}")
+    except Exception:
+        lines.append("📹 Video service not reachable (is Docker running?)")
+    lines.append(_drone_status_line())
+    today = load_sightings(_period("today")[0])
+    lines.append(f"👥 Today: {len({r['name'] for r in today if r['kind'] == 'face' and r['known']})} known people, "
+                 f"{sum(1 for r in today if r['kind'] == 'face' and not r['known'])} unknown, {len({r['id'] for r in today if r['kind'] == 'plate'})} plates")
+    if time.time() < assistant_state["muted_until"]:
+        lines.append(f"🔕 Alerts muted until {_fmt_time(assistant_state['muted_until'])}")
+    return "\n".join(lines)
+
+
+def _drone_status_line():
+    if not drone_control_allowed():
+        return "🚁 Drone control: not licensed"
+    if drone_link["conn"] is None:
+        return "🚁 Drone: phone not connected"
+    t = drone_link["telemetry"]
+    if not t.get("drone_connected"):
+        return "🚁 Drone: not connected to the controller"
+    state = "flying" if t.get("flying") else "on the ground"
+    resp = f" · responding to {drone_response['camera']} ({drone_response['phase']})" if drone_response["active"] else ""
+    return f"🚁 Drone: {state}, battery {t.get('battery')}%, GPS {t.get('gps_satellites')}{resp}"
+
+
+def answer_question(text):
+    """Offline question answering over the sightings: plates, names, periods, unknown visitors."""
+    t = text.strip()
+    low = t.lower()
+    start, end, label = _period(low)
+    plate = re.search(r"\b(?=[A-Z0-9-]*\d)(?=[A-Z0-9-]*[A-Z])[A-Z0-9-]{4,10}\b", t.upper())
+    if plate and not re.match(r"^\d+$", plate.group(0)):
+        p = plate.group(0).replace("-", "")
+        rows = [r for r in load_sightings(time.time() - 30 * 86400) if r["kind"] == "plate" and r["id"].replace("-", "").upper() == p]
+        if not rows:
+            return f"🚗 Plate {p} has not been seen in the last 30 days."
+        last = rows[-1]
+        return (f"🚗 Plate {p}{' (' + last['name'] + ')' if last['name'] else ''}: seen {len(rows)}× in 30 days.\n"
+                f"Last: {time.strftime('%Y-%m-%d %H:%M', time.localtime(last['t']))} at {last['camera']}.")
+    names = {r["name"] for r in load_sightings(time.time() - 30 * 86400) if r["kind"] == "face" and r["known"] and r["name"]}
+    for name in sorted(names, key=len, reverse=True):
+        if name.lower() in low or name.split()[0].lower() in low.split():
+            rows = [r for r in load_sightings(time.time() - 30 * 86400) if r["kind"] == "face" and r["name"] == name]
+            in_period = [r for r in rows if start <= r["t"] <= end]
+            last = rows[-1]
+            return (f"👤 {name}: {len(in_period)}× {label}" + (f" (first {_fmt_time(in_period[0]['t'])}, last {_fmt_time(in_period[-1]['t'])})" if in_period else "") +
+                    f".\nLast seen {time.strftime('%Y-%m-%d %H:%M', time.localtime(last['t']))} at {last['camera']}.")
+    if "unknown" in low or "stranger" in low:
+        rows = [r for r in load_sightings(start, end) if r["kind"] == "face" and not r["known"]]
+        if not rows:
+            return f"✅ No unknown people {label}."
+        times = ", ".join(_fmt_time(r["t"]) for r in rows[-10:])
+        return f"⚠️ {len(rows)} unknown {'person' if len(rows) == 1 else 'people'} {label}. Times: {times}"
+    if any(w in low for w in ("who", "visitor", "came", "summary", "today", "yesterday", "night", "week", "activity", "happened")):
+        return summary_text(start, end, label)
+    return None
+
+
+HELP_TEXT = ("🤖 I can help with:\n"
+             "/status – cameras, drone and today's numbers\n/snapshot [camera] – live picture\n"
+             "/today · /yesterday · /night – who came\n/briefing – the full daily report\n"
+             "/drone – drone status · /send <camera> – send the drone · /home – bring it back\n"
+             "/mute [minutes] · /unmute – pause detection alerts\n\n"
+             "Or just ask: “who came today?”, “unknown last night?”, “Tony”, or a plate like ABC123.")
+
+
+def _handle_command(text):
+    parts = text.strip().split()
+    cmd = parts[0].lower().split("@")[0]
+    arg = " ".join(parts[1:]).strip()
+    cams = _frigate_camera_names()
+    if cmd in ("/start", "/help"):
+        send_telegram(HELP_TEXT)
+    elif cmd == "/status":
+        send_telegram(status_text())
+    elif cmd == "/snapshot":
+        cam = arg or CAMERA_NAME
+        if cam not in cams:
+            send_telegram("Cameras: " + ", ".join(cams))
+            return
+        photo = _camera_snapshot(cam)
+        send_telegram(f"📷 {cam} · {time.strftime('%H:%M:%S')}" if photo else f"Could not get a picture from {cam}.", photo, alert_buttons(cam) if photo else None)
+    elif cmd in ("/today", "/yesterday", "/night", "/week"):
+        send_telegram(summary_text(*_period(cmd[1:])))
+    elif cmd == "/briefing":
+        send_telegram(briefing_text())
+    elif cmd == "/drone":
+        send_telegram(_drone_status_line())
+    elif cmd == "/send":
+        located = list(load_response_settings()["camera_locations"])
+        cam = arg or (located[0] if len(located) == 1 else "")
+        if cam not in located:
+            send_telegram("Send the drone to which camera? " + (", ".join(located) if located else "No camera locations set yet (Drone page)."))
+            return
+        problem = _drone_ready_problem(cam)
+        send_telegram(f"⚠️ {problem}" if problem else f"Send the drone to {cam}? It will take off if needed. Keep it in sight.",
+                      buttons=None if problem else [[{"text": f"✅ Yes, send to {cam}", "callback_data": f"go:{cam}"[:64]}, {"text": "Cancel", "callback_data": "cancel"}]])
+    elif cmd == "/home":
+        send_telegram(recall_drone("asked on Telegram").get("error") or "🏠 Drone returning home.")
+    elif cmd == "/mute":
+        minutes = int(arg) if arg.isdigit() else 60
+        assistant_state["muted_until"] = time.time() + minutes * 60
+        send_telegram(f"🔕 Detection alerts muted for {minutes} min (until {_fmt_time(assistant_state['muted_until'])}). /unmute to resume.")
+    elif cmd == "/unmute":
+        assistant_state["muted_until"] = 0
+        send_telegram("🔔 Alerts are back on.")
+    else:
+        send_telegram("I don't know that command.\n\n" + HELP_TEXT)
+
+
+def _handle_callback(data):
+    if data.startswith("drone:"):
+        cam = data.split(":", 1)[1]
+        problem = _drone_ready_problem(cam)
+        if problem:
+            return send_telegram(f"⚠️ Can't send the drone: {problem}")
+        send_telegram(f"Send the drone to {cam}? It will take off if needed. Keep it in sight.",
+                      buttons=[[{"text": f"✅ Yes, send to {cam}", "callback_data": f"go:{cam}"[:64]}, {"text": "Cancel", "callback_data": "cancel"}]])
+    elif data.startswith("go:"):
+        r = dispatch_drone(data.split(":", 1)[1], by="Telegram")
+        send_telegram(("🚁 " + r["message"]) if r["ok"] else f"⚠️ {r['error']}")
+    elif data.startswith("snap:"):
+        cam = data.split(":", 1)[1]
+        photo = _camera_snapshot(cam)
+        send_telegram(f"📷 {cam} · {time.strftime('%H:%M:%S')}" if photo else f"Could not get a picture from {cam}.", photo)
+    elif data == "dsnap":
+        photo = _drone_snapshot()
+        send_telegram("📷 Drone view" if photo else "No drone picture right now.", photo)
+    elif data == "home":
+        send_telegram(recall_drone("asked on Telegram").get("error") or "🏠 Drone returning home.")
+    elif data == "stay":
+        if drone_response["phase"] == "hovering":
+            drone_response["stay_until"] = max(drone_response["stay_until"], time.time()) + 120
+            send_telegram(f"⏱ Staying until {_fmt_time(drone_response['stay_until'])}.")
+    elif data.startswith("mute:"):
+        assistant_state["muted_until"] = time.time() + int(data.split(":")[1]) * 60
+        send_telegram(f"🔕 Detection alerts muted until {_fmt_time(assistant_state['muted_until'])}. /unmute to resume.")
+    elif data == "cancel":
+        send_telegram("OK, cancelled.")
+
+
+def telegram_assistant_worker():
+    """Long-polls the bot for messages and button presses. Only the configured chat is obeyed."""
+    offset, warned = 0, False
+    while True:
+        cfg = load_telegram_config()
+        if not telegram_ready(cfg):
+            time.sleep(30)
+            continue
+        res = _tg("getUpdates", offset=offset, timeout=25, allowed_updates=json.dumps(["message", "callback_query"]))
+        if not res or not res.get("ok"):
+            if not warned:
+                print("Telegram assistant: cannot read messages (another program may use this bot, or a webhook is set)")
+                warned = True
+            time.sleep(10)
+            continue
+        warned = False
+        own_chat = str(cfg.get("chat_id")).strip()
+        for upd in res.get("result", []):
+            offset = max(offset, upd["update_id"] + 1)
+            try:
+                if "callback_query" in upd:
+                    cq = upd["callback_query"]
+                    _tg("answerCallbackQuery", callback_query_id=cq["id"])
+                    if str((cq.get("message") or {}).get("chat", {}).get("id")) == own_chat:
+                        _handle_callback(str(cq.get("data") or ""))
+                    continue
+                msg = upd.get("message") or {}
+                if str(msg.get("chat", {}).get("id")) != own_chat:
+                    continue  # strangers who find the bot get nothing
+                text = str(msg.get("text") or "").strip()
+                if not text:
+                    continue
+                if text.startswith("/"):
+                    _handle_command(text)
+                else:
+                    send_telegram(answer_question(text) or "I didn't understand that.\n\n" + HELP_TEXT)
+            except Exception as e:
+                print("Telegram assistant error:", e)
+                send_telegram("Sorry, something went wrong answering that.")
+
+
+def _briefing_worker():
+    sent_on = ""
+    while True:
+        time.sleep(30)
+        try:
+            cfg = load_response_settings()
+            today = time.strftime("%Y-%m-%d")
+            if cfg["briefing_enabled"] and time.strftime("%H:%M") >= cfg["briefing_time"] and sent_on != today and telegram_ready():
+                sent_on = today
+                send_telegram(briefing_text())
+                prune_sightings()
+            elif not sent_on:
+                sent_on = today if time.strftime("%H:%M") >= cfg["briefing_time"] else ""  # don't send a late briefing at startup
+        except Exception as e:
+            print("Briefing error:", e)
+
+
+def start_assistant():
+    threading.Thread(target=telegram_assistant_worker, daemon=True).start()
+    threading.Thread(target=_briefing_worker, daemon=True).start()
+    threading.Thread(target=_drone_response_worker, daemon=True).start()
+
+
+@app.route("/api/response/settings", methods=["GET", "POST"])
+def api_response_settings():
+    if request.method == "POST":
+        try:
+            return jsonify({"ok": True, "settings": save_response_settings(request.get_json(silent=True) or {})})
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "error": f"Invalid value: {e}"}), 400
+    return jsonify({"ok": True, "settings": load_response_settings(), "cameras": _frigate_camera_names(),
+                    "response": drone_response, "telegram": telegram_ready()})
+
+
+@app.route("/api/response/dispatch", methods=["POST"])
+def api_response_dispatch():
+    cam = str((request.get_json(silent=True) or {}).get("camera") or "")
+    r = dispatch_drone(cam, by="dashboard")
+    if r["ok"]:
+        send_telegram(f"🚁 Drone sent to {cam} from the dashboard.")
+    return jsonify(r), (200 if r["ok"] else 409)
+
+
+@app.route("/api/response/recall", methods=["POST"])
+def api_response_recall():
+    r = recall_drone("dashboard")
+    return jsonify(r), (200 if r.get("ok") else 409)
+
+
+@app.route("/api/assistant/briefing", methods=["POST"])
+def api_assistant_briefing():
+    if not telegram_ready():
+        return jsonify({"ok": False, "error": "Telegram is not set up."}), 409
+    send_telegram(briefing_text())
+    return jsonify({"ok": True})
 
 
 # ============================================================
@@ -12675,6 +13294,7 @@ def main():
     _start_v105_recovery()
     start_drone_link()
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
+    start_assistant()
     print()
     print(
         "======================================"
