@@ -181,10 +181,10 @@ object DroneController {
         val fail: (IDJIError) -> Unit = { e -> done(false, e.description() ?: e.errorCode()) }
         when (cmd) {
             "takeoff" -> action(FlightControllerKey.KeyStartTakeoff, done, fail)
-            "land" -> { abortMission("land pressed"); action(FlightControllerKey.KeyStartAutoLanding, done, fail) }
+            "land" -> { abortMission("land pressed"); afterHandOver { action(FlightControllerKey.KeyStartAutoLanding, done, fail) } }
             "cancel_land" -> action(FlightControllerKey.KeyStopAutoLanding, done, fail)
             "confirm_land" -> action(FlightControllerKey.KeyConfirmLanding, done, fail)
-            "go_home" -> { abortMission("return home pressed"); centreSticks(); action(FlightControllerKey.KeyStartGoHome, done, fail) }
+            "go_home" -> { abortMission("return home pressed"); centreSticks(); afterHandOver { action(FlightControllerKey.KeyStartGoHome, done, fail) } }
             "cancel_go_home" -> action(FlightControllerKey.KeyStopGoHome, done, fail)
             "hover" -> { abortMission("STOP pressed"); centreSticks(); done(true, "") }
             "goto" -> startMission(args, done)
@@ -438,6 +438,15 @@ object DroneController {
                 changed()
             }
         }
+    }
+
+    /** Run [next] once the flight controller has control again (DJI's own landing/RTH need it). */
+    private fun afterHandOver(next: () -> Unit) {
+        if (!controlByPc) { next(); return }
+        VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() { controlByPc = false; changed(); next() }
+            override fun onFailure(error: IDJIError) { next() }
+        })
     }
 
     /** Give control back to the flight controller, then start a DJI automatic action. */
