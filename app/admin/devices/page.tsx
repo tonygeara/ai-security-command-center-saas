@@ -1,5 +1,6 @@
 import Link from "next/link";
 import {createClient} from "../../../lib/supabase/server";
+import RemoveButton from "../RemoveButton";
 import {buildClients, isOnline, LATEST_APP_VERSION, loadAdminData, versionBehind} from "../../../lib/admin";
 
 export default async function Devices(){
@@ -16,14 +17,18 @@ export default async function Devices(){
       <article className="card"><h2>Cameras</h2><strong>{data.sources.filter(s => s.source_type === "camera").length}</strong><p className="muted">registered</p></article>
       <article className="card"><h2>Drones</h2><strong>{data.sources.filter(s => s.source_type === "drone").length}</strong><p className="muted">registered</p></article>
     </section>
-    <div className="card tableWrap"><table className="adminTable"><thead><tr><th>Client</th><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th></tr></thead><tbody>
+    <div className="card tableWrap"><table className="adminTable"><thead><tr><th>Client</th><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>
       {rows.map(({d, c, on, srcs}) => <tr key={d.id}>
         <td>{c ? <Link href={"/admin/clients/" + c.key}><b>{c.name}</b></Link> : <span className="muted">unknown</span>}</td>
         <td><b>{d.device_name || "Unnamed PC"}</b><div className="muted">{d.platform} {d.last_ip ? "· " + d.last_ip : ""}</div></td>
         <td className={on ? "ok" : "locked"}>{on ? "● Online" : "○ Offline"}<div className="muted">{d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "never connected"}</div></td>
         <td className={versionBehind(d.app_version) ? "locked" : ""}>{d.app_version || "—"}</td>
-        <td>{srcs.filter(s => s.source_type === "camera").length} cam · {srcs.filter(s => s.source_type === "drone").length} drone</td></tr>)}
-      {!rows.length && <tr><td colSpan={5} className="muted">No PCs paired yet.</td></tr>}
+        <td>{srcs.filter(s => s.source_type === "camera").length} cam · {srcs.filter(s => s.source_type === "drone").length} drone</td>
+        <td><RemoveButton rpc="admin_remove_device" args={{target_device: d.id}} label="Remove PC"
+          confirmText={`Remove PC "${d.device_name || "Unnamed PC"}" of ${c?.name ?? "unknown client"}${on ? " (it is ONLINE now and will stop working)" : ""}?
+
+It can be paired again later with a new code.`}/></td></tr>)}
+      {!rows.length && <tr><td colSpan={6} className="muted">No PCs paired yet.</td></tr>}
     </tbody></table></div>
   </>;
 }

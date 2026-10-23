@@ -94,6 +94,13 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
     if(error) alert(error.message); else router.refresh();
   }
 
+  async function remove(l: Lic){
+    const note = l.edition === "onprem" ? `An on-prem licence already installed keeps working until ${l.expires_on}.` : "Their online account stays; only these client details are removed.";
+    if(!confirm(`Remove ${l.client_name} and its licence record from the portal?\n\n${note}`)) return;
+    const {error} = await createClient().rpc("admin_remove_client_license", {target_license: l.id});
+    if(error) alert(error.message); else router.refresh();
+  }
+
   const F = (k: string, label: string, props: Lic = {}) => <label>{label}<input value={form?.[k] ?? ""} onChange={e => set(k, e.target.value)} {...props}/></label>;
   const lockedFile = form?.edition === "onprem" && form?.id && !form?.renewing;
 
@@ -156,7 +163,8 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         <td className="licActions">{l.edition === "onprem" && l.license_document && <button className="ghost" onClick={() => download(l)}>Download .lic</button>}
           {l.edition === "onprem" && <button className="ghost" onClick={() => renew(l)}>Renew</button>}
           <button className="ghost" onClick={() => edit(l)}>Edit</button>
-          {l.status !== "revoked" && <button className="ghost" onClick={() => revoke(l)}>Revoke</button>}</td>
+          {l.status !== "revoked" && <button className="ghost" onClick={() => revoke(l)}>Revoke</button>}
+          <button className="ghost danger" onClick={() => remove(l)}>Remove</button></td>
       </tr>; })}
       {!shown.length && <tr><td colSpan={7} className="muted">No clients here yet. Use “+ New client / licence”.</td></tr>}
     </tbody></table></div>
