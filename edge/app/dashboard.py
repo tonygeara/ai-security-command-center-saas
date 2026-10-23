@@ -5161,9 +5161,7 @@ async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))ret
   try{const r=await fetch('/api/drone/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd:c,args:args||{}})});const d=await r.json();
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
 function takeoff(){const sim=(st.telemetry||{}).simulator;
-  cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF — the simulator is OFF and the motors WILL start.
-
-Propellers on, people clear, drone in sight, pilot holding the controller?')}
+  cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF: the simulator is OFF and the motors WILL start. Propellers on, people clear, drone in sight, pilot holding the controller?')}
 async function stopAll(){keys.clear();await sendStick(true);cmd('hover')}
 async function toggleControl(){if(!control){if(!(await cmd('control_on',{speed:+$('speed').value})))return;control=true}
   else{await sendStick(true);await cmd('control_off');control=false}
