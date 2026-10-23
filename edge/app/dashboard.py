@@ -9,6 +9,7 @@ import re
 import concurrent.futures
 import ipaddress
 import os
+import math
 import csv
 import time
 import cv2
@@ -4814,13 +4815,20 @@ DRONE_LINK_PORT = int(os.environ.get("AI_SECURITY_DRONE_LINK_PORT", "8765"))
 DRONE_LINK_TOKEN_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_link_token")
 DRONE_STICK_TIMEOUT = 0.4    # browser stopped sending sticks -> send zero sticks (hover)
 DRONE_LIMITS = {"max_altitude_m": 120, "max_distance_m": 500, "max_speed_level": 0.5}
-DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "confirm_land", "go_home", "cancel_go_home", "hover",
+DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "confirm_land", "goto", "goto_cancel", "go_home", "cancel_go_home", "hover",
                   "control_on", "control_off", "gimbal", "photo", "record_start", "record_stop",
                   "sim_on", "sim_off", "stream_on", "stream_off"}
 drone_link = {"conn": None, "lock": threading.Lock(), "telemetry": {}, "tel_at": 0.0, "device": "",
               "connected_at": 0.0, "events": [], "acks": {}, "next_id": 1, "stick_at": 0.0,
               "stick_active": False, "error": ""}
 drone_ack_cond = threading.Condition()
+
+
+def _distance_m(lat1, lon1, lat2, lon2):
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 def drone_control_allowed():
@@ -5030,6 +5038,21 @@ def api_drone_command():
         args = {"lat": float(args.get("lat") or 0), "lon": float(args.get("lon") or 0)}
     elif cmd == "control_on":
         args = {"speed": max(0.1, min(DRONE_LIMITS["max_speed_level"], float(args.get("speed") or 0.3)))}
+    elif cmd == "goto":
+        try:
+            lat, lon = float(args["lat"]), float(args["lon"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Click the map to choose where to fly."}), 400
+        tel = drone_link["telemetry"]
+        home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
+        if None in home:
+            return jsonify({"ok": False, "error": "The drone has no GPS position yet."}), 409
+        if _distance_m(home[0], home[1], lat, lon) > DRONE_LIMITS["max_distance_m"]:
+            return jsonify({"ok": False, "error": f"That point is more than {DRONE_LIMITS['max_distance_m']} m from home."}), 400
+        arrive = args.get("arrive") if args.get("arrive") in ("hover", "land", "home") else "hover"
+        args = {"lat": lat, "lon": lon, "arrive": arrive,
+                "alt": max(5.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(args.get("alt") or 30))),
+                "speed": max(1.0, min(8.0, float(args.get("speed") or 5)))}
     if cmd == "sim_on" and time.time() - drone_link.get("sim_off_at", 0) < 60:
         # Re-enabling the simulator soon after disabling it made the Mini 3 Pro switch itself off.
         wait = int(60 - (time.time() - drone_link["sim_off_at"]))
@@ -5127,6 +5150,17 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div><kbd>Space</kbd> stop &amp; hover</div><div>🎮 Gamepad works too</div></div>
 <div id="cmdMsg" class="hud-msg"></div>
 </div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Auto-fly to point</div><div class="live" id="autoState"></div></div>
+<div class="panel-body">
+<div class="muted">Click the map to choose the destination. The drone takes off if needed, climbs to the height, flies there and then does what you choose below. STOP, any flying key or the controller cancels it.</div>
+<div class="muted" style="margin-top:8px">Target: <code id="autoTarget">none — click the map</code></div>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 10px">
+<div><label for="autoAlt">Height (m)</label><input id="autoAlt" type="number" min="5" max="120" value="30"></div>
+<div><label for="autoSpeed">Speed (m/s)</label><input id="autoSpeed" type="number" min="1" max="8" value="5"></div>
+<div><label for="autoArrive">On arrival</label><select id="autoArrive"><option value="hover">Hover there</option><option value="land">Land there</option><option value="home">Return home</option></select></div>
+</div>
+<div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="autoStart()">Start auto-fly</button><button class="hud-btn danger" onclick="cmd('goto_cancel')">Cancel</button></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">▣ Camera</div></div>
 <div class="panel-body"><div class="dc-btns">
 <button class="hud-btn" onclick="cmd('gimbal',{pitch:0})">Look ahead</button>
@@ -5185,7 +5219,20 @@ document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.
 document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
-  trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map)}
+  trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
+  map.on('click',e=>setTarget(e.latlng.lat,e.latlng.lng))}
+let target=null,tMark=null,tLine=null;
+function setTarget(lat,lon){target={lat,lon};$('autoTarget').textContent=lat.toFixed(6)+', '+lon.toFixed(6);
+  tMark=tMark||L.marker([lat,lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,22],html:'<div style="color:#ff5d6c;font-size:22px;line-height:22px;text-shadow:0 0 6px #000">⬇</div>'})}).addTo(map);
+  tMark.setLatLng([lat,lon]);render()}
+function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
+  const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
+function autoStart(){const t=st.telemetry||{};if(!target){msg('Click the map to choose where to fly.',false);return}
+  if(!t.lat){msg('The drone has no GPS position yet.',false);return}
+  const d=Math.round(distM(t.lat,t.lon,target.lat,target.lon)),alt=+$('autoAlt').value,spd=+$('autoSpeed').value,arr=$('autoArrive').value;
+  const what=arr==='land'?'land there':arr==='home'?'fly back home':'hover there';
+  const head=t.simulator?'SIMULATOR auto-fly. ':'⚠ REAL AUTO-FLY: the motors WILL start if the drone is on the ground. ';
+  cmd('goto',{lat:target.lat,lon:target.lon,alt:alt,speed:spd,arrive:arr},head+'Fly '+d+' m at '+alt+' m height and '+spd+' m/s, then '+what+'. Keep the drone in sight. Continue?')}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
 function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.telemetry_fresh;
   $('linkState').innerHTML=!st.allowed?'<i class="dot bad"></i>NOT LICENSED':on?(t.drone_connected?'<i class="dot good"></i>DRONE LINKED':'<i class="dot warn"></i>PHONE CONNECTED · DRONE OFF'):'<i class="dot bad"></i>PHONE NOT CONNECTED';
@@ -5201,6 +5248,10 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
     trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon])}}
     $('coords').textContent=t.lat.toFixed(6)+', '+t.lon.toFixed(6)}
   $('mapState').textContent=typeof L==='undefined'?'MAP NEEDS INTERNET':'';
+  const m=t.mission;$('autoState').textContent=m?('AUTO: '+m.state+(m.distance>=0?' · '+Math.round(m.distance)+' m left':'')):'';
+  if(map&&t.lat){const goal=m?[m.lat,m.lon]:(target?[target.lat,target.lon]:null);
+    if(goal){tLine=tLine||L.polyline([],{color:'#ff5d6c',weight:2,dashArray:'6 6'}).addTo(map);tLine.setLatLngs([[t.lat,t.lon],goal])}
+    else if(tLine){tLine.setLatLngs([])}}
   $('events').innerHTML=(st.events||[]).slice().reverse().map(e=>`<div>${new Date(e.at*1000).toLocaleTimeString()} · ${esc(e.msg)}</div>`).join('')}
 async function poll(){try{st=await fetch('/api/drone/link',{cache:'no-store'}).then(r=>r.json());render()}catch(e){}}
 async function loadPair(){try{const d=await fetch('/api/drone/link/pair').then(r=>r.json());if(!d.ok){$('pairMsg').className='hud-msg bad';$('pairMsg').textContent=d.error;return}

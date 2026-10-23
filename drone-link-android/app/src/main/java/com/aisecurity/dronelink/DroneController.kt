@@ -145,6 +145,8 @@ object DroneController {
         t.put("sdk_registered", registered)
         t.put("drone_connected", productConnected)
         t.put("control", if (controlByPc) "PC" else "PILOT")
+        mission?.let { m -> t.put("mission", JSONObject().put("state", m.state).put("lat", m.lat).put("lon", m.lon)
+            .put("alt", m.alt).put("speed", m.speed).put("arrive", m.arrive).put("distance", m.distance)) }
         if (!productConnected) return t
         t.put("simulator", SimulatorManager.getInstance().isSimulatorEnabled)
         t.put("streaming", MediaDataCenter.getInstance().liveStreamManager.isStreaming)
@@ -179,12 +181,14 @@ object DroneController {
         val fail: (IDJIError) -> Unit = { e -> done(false, e.description() ?: e.errorCode()) }
         when (cmd) {
             "takeoff" -> action(FlightControllerKey.KeyStartTakeoff, done, fail)
-            "land" -> action(FlightControllerKey.KeyStartAutoLanding, done, fail)
+            "land" -> { abortMission("land pressed"); action(FlightControllerKey.KeyStartAutoLanding, done, fail) }
             "cancel_land" -> action(FlightControllerKey.KeyStopAutoLanding, done, fail)
             "confirm_land" -> action(FlightControllerKey.KeyConfirmLanding, done, fail)
-            "go_home" -> { centreSticks(); action(FlightControllerKey.KeyStartGoHome, done, fail) }
+            "go_home" -> { abortMission("return home pressed"); centreSticks(); action(FlightControllerKey.KeyStartGoHome, done, fail) }
             "cancel_go_home" -> action(FlightControllerKey.KeyStopGoHome, done, fail)
-            "hover" -> { centreSticks(); done(true, "") }
+            "hover" -> { abortMission("STOP pressed"); centreSticks(); done(true, "") }
+            "goto" -> startMission(args, done)
+            "goto_cancel" -> { abortMission("cancelled from the PC"); done(true, "") }
             "control_on" -> enableControl(args.optDouble("speed", 0.3), done)
             "control_off" -> { releaseControl("PC turned keyboard control off"); done(true, "") }
             "gimbal" -> gimbal(args.optDouble("pitch", 0.0), done, fail)
@@ -298,8 +302,14 @@ object DroneController {
         if (loopStarted) return
         loopStarted = true
         controlLoop.scheduleWithFixedDelay({
-            try { sendVelocity() } catch (e: Exception) { event("Control loop error: ${e.message}") }
+            try { tick() } catch (e: Exception) { event("Control loop error: ${e.message}") }
         }, 0, 100, java.util.concurrent.TimeUnit.MILLISECONDS)
+    }
+
+    private fun tick() {
+        if (!productConnected) return
+        val m = mission
+        if (m != null) missionTick(m) else sendVelocity()
     }
 
     private fun sendVelocity() {
@@ -320,21 +330,138 @@ object DroneController {
         val horizontal = speedLevel * 10.0          // m/s at full stick (0.3 -> 3 m/s, max 5 m/s)
         val vertical = min(3.0, speedLevel * 6.0)   // m/s
         val yawRate = 60.0 * speedLevel / 0.5       // deg/s
+        sendBody(y * horizontal, x * horizontal, z * vertical, r * yawRate)
+    }
+
+    /** One velocity command in the drone's body frame: m/s forward/right/up, deg/s turn. */
+    private fun sendBody(forward: Double, right: Double, up: Double, yawRate: Double) {
         val param = VirtualStickFlightControlParam().apply {
             rollPitchCoordinateSystem = FlightCoordinateSystem.BODY
             rollPitchControlMode = RollPitchControlMode.VELOCITY
             verticalControlMode = VerticalControlMode.VELOCITY
             yawControlMode = YawControlMode.ANGULAR_VELOCITY
-            if (FORWARD_IS_ROLL) { roll = y * horizontal; pitch = x * horizontal }
-            else { pitch = y * horizontal; roll = x * horizontal }
-            verticalThrottle = z * vertical
-            yaw = r * yawRate
+            if (FORWARD_IS_ROLL) { roll = forward; pitch = right } else { pitch = forward; roll = right }
+            verticalThrottle = up
+            yaw = yawRate
         }
         VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param)
     }
 
+    // ---------- auto-fly to a point ----------
+    // Take off if needed, climb to the set height, turn towards the target, fly there (slowing
+    // down near the end), then hover / land / return home. Cancelled by any manual input, STOP,
+    // the pilot's controller, or the PC link going quiet.
+
+    private class Mission(val lat: Double, val lon: Double, val alt: Double, val speed: Double, val arrive: String) {
+        @Volatile var state = "TAKING_OFF"   // TAKING_OFF, ENABLING, CLIMB, CRUISE, ARRIVED
+        @Volatile var distance = -1.0
+        var enabling = false
+        var arrivedAt = 0L
+    }
+
+    @Volatile private var mission: Mission? = null
+    val missionActive get() = mission != null
+
+    private fun startMission(args: JSONObject, done: (Boolean, String) -> Unit) {
+        if (!productConnected) { done(false, "Drone not connected"); return }
+        val t = telemetry()
+        if (!t.has("lat")) { done(false, "No GPS position yet"); return }
+        val lat = args.optDouble("lat"); val lon = args.optDouble("lon")
+        if (lat.isNaN() || lon.isNaN()) { done(false, "No target"); return }
+        val homeLat = t.optDouble("home_lat", t.getDouble("lat")); val homeLon = t.optDouble("home_lon", t.getDouble("lon"))
+        val fromHome = distanceM(homeLat, homeLon, lat, lon)
+        if (fromHome > maxDistance) { done(false, "Target is ${fromHome.toInt()} m from home; the limit is ${maxDistance.toInt()} m"); return }
+        val m = Mission(lat, lon, max(5.0, min(maxAltitude, args.optDouble("alt", 30.0))),
+            max(1.0, min(8.0, args.optDouble("speed", 5.0))), args.optString("arrive", "hover"))
+        val flying = t.optBoolean("flying", false)
+        m.state = if (flying) "ENABLING" else "TAKING_OFF"
+        mission = m
+        startControlLoop()
+        if (!flying) {
+            KeyManager.getInstance().performAction(KeyTools.createKey(FlightControllerKey.KeyStartTakeoff),
+                object : CommonCallbacks.CompletionCallbackWithParam<EmptyMsg> {
+                    override fun onSuccess(e: EmptyMsg?) {}
+                    override fun onFailure(error: IDJIError) { abortMission("take-off refused: ${error.description() ?: error.errorCode()}") }
+                })
+        }
+        event("Auto-fly started: ${distanceM(t.getDouble("lat"), t.getDouble("lon"), lat, lon).toInt()} m to go at ${m.alt.toInt()} m height")
+        done(true, "")
+    }
+
+    fun abortMission(why: String) {
+        if (mission == null) return
+        mission = null
+        centreSticks()
+        event("Auto-fly stopped: $why")
+        changed()
+    }
+
+    private fun missionTick(m: Mission) {
+        val t = telemetry()
+        when (m.state) {
+            "TAKING_OFF" -> if (t.optBoolean("flying") && t.optString("flight_mode") != "AUTO_TAKE_OFF") m.state = "ENABLING"
+            "ENABLING" -> if (controlByPc) m.state = "CLIMB" else if (!m.enabling) {
+                m.enabling = true
+                val vs = VirtualStickManager.getInstance()
+                vs.enableVirtualStick(object : CommonCallbacks.CompletionCallback {
+                    override fun onSuccess() { vs.setVirtualStickAdvancedModeEnabled(true); controlByPc = true; lastStickAt = System.currentTimeMillis(); m.state = "CLIMB"; changed() }
+                    override fun onFailure(error: IDJIError) { abortMission("could not take control: ${error.description() ?: error.errorCode()}") }
+                })
+            }
+            "CLIMB", "CRUISE" -> {
+                if (!controlByPc) { abortMission("the pilot took control"); return }
+                if (!t.has("lat")) { sendBody(0.0, 0.0, 0.0, 0.0); return }
+                val lat = t.getDouble("lat"); val lon = t.getDouble("lon")
+                val dist = distanceM(lat, lon, m.lat, m.lon); m.distance = dist
+                val bearing = bearingDeg(lat, lon, m.lat, m.lon)
+                val hdgErr = wrap180(bearing - t.optDouble("heading", 0.0))
+                val altErr = m.alt - t.optDouble("altitude", 0.0)
+                val up = max(-2.0, min(2.0, 0.8 * altErr))
+                val yawRate = if (dist > 3) max(-60.0, min(60.0, 2.0 * hdgErr)) else 0.0
+                var forward = 0.0
+                if (m.state == "CLIMB" && abs(altErr) < 2.0) m.state = "CRUISE"
+                if (m.state == "CRUISE") {
+                    if (dist < 2.0) { m.state = "ARRIVED"; m.arrivedAt = System.currentTimeMillis(); event("Auto-fly: arrived") }
+                    else if (abs(hdgErr) < 30) forward = min(m.speed, max(0.5, 0.4 * dist)) * cos(Math.toRadians(hdgErr))
+                }
+                sendBody(forward, 0.0, if (m.state == "ARRIVED") 0.0 else up, yawRate)
+            }
+            "ARRIVED" -> {
+                sendBody(0.0, 0.0, 0.0, 0.0)
+                if (System.currentTimeMillis() - m.arrivedAt < 2000 && t.optDouble("speed", 0.0) > 0.3) return
+                mission = null
+                when (m.arrive) {
+                    "land" -> handOverThen(FlightControllerKey.KeyStartAutoLanding, "landing at the target")
+                    "home" -> handOverThen(FlightControllerKey.KeyStartGoHome, "returning home")
+                    else -> event("Auto-fly: hovering over the target")
+                }
+                changed()
+            }
+        }
+    }
+
+    /** Give control back to the flight controller, then start a DJI automatic action. */
+    private fun handOverThen(key: DJIActionKeyInfo<EmptyMsg, EmptyMsg>, what: String) {
+        VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
+            override fun onSuccess() {
+                controlByPc = false
+                action(key, { ok, err -> event(if (ok) "Auto-fly: $what" else "Auto-fly: $what failed: $err") },
+                    { e -> event("Auto-fly: $what failed: ${e.description()}") })
+            }
+            override fun onFailure(error: IDJIError) { event("Auto-fly: could not hand over: ${error.description()}") }
+        })
+    }
+
+    private fun bearingDeg(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val p1 = Math.toRadians(lat1); val p2 = Math.toRadians(lat2); val dl = Math.toRadians(lon2 - lon1)
+        return Math.toDegrees(atan2(sin(dl) * cos(p2), cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)))
+    }
+
+    private fun wrap180(a: Double): Double { var x = (a + 540.0) % 360.0 - 180.0; if (x < -180) x += 360.0; return x }
+
     /** Hand control back to the pilot's sticks. Safe to call any time. */
     fun releaseControl(why: String) {
+        abortMission(why)
         if (!controlByPc) return
         centreSticks()
         VirtualStickManager.getInstance().disableVirtualStick(object : CommonCallbacks.CompletionCallback {
@@ -349,6 +476,7 @@ object DroneController {
 
     /** Sticks from the PC, each -1..1: x = right, y = forward, z = up, r = turn right. */
     fun setSticks(x0: Double, y0: Double, z0: Double, r0: Double) {
+        if (mission != null && (abs(x0) > 0.05 || abs(y0) > 0.05 || abs(z0) > 0.05 || abs(r0) > 0.05)) abortMission("manual control")
         if (!controlByPc) return
         targetX = clamp(x0); targetY = clamp(y0); targetZ = clamp(z0); targetR = clamp(r0)
         lastStickAt = System.currentTimeMillis()

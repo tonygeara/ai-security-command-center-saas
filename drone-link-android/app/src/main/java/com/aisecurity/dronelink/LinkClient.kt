@@ -82,7 +82,7 @@ class LinkClient(
             try {
                 while (running && socket === s) {
                     send(out, DroneController.telemetry())
-                    if (DroneController.controlByPc && System.currentTimeMillis() - lastFromPc > HEARTBEAT_TIMEOUT_MS) {
+                    if ((DroneController.controlByPc || DroneController.missionActive) && System.currentTimeMillis() - lastFromPc > HEARTBEAT_TIMEOUT_MS) {
                         DroneController.releaseControl("no heartbeat from the PC")
                     }
                     Thread.sleep(200)
