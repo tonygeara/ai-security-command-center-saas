@@ -1,22 +1,33 @@
-import {redirect} from "next/navigation";
+import Link from "next/link";
 import {createClient} from "../../lib/supabase/server";
-import SignOut from "../SignOut";
-import SubscriptionControls from "./SubscriptionControls";
-import FeatureToggle from "./FeatureToggle";
-const FEATURES=[["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","License Plate Recognition"],["drone_live","Drone Live"],["drone_ai","Drone AI"],["drone_tracking","Drone Tracking"]] as const;
-export default async function Admin(){
- const supabase=await createClient(); const {data:{user}}=await supabase.auth.getUser(); if(!user)redirect("/login");
- const {data:sa}=await supabase.from("super_admins").select("user_id").eq("user_id",user.id).maybeSingle(); if(!sa)redirect("/unauthorized");
- const [{data:users},{data:orgs},{data:subs},{data:devices},{data:sources},{data:overrides},{data:defaults}]=await Promise.all([
-  supabase.rpc("super_admin_user_directory"),supabase.from("organizations").select("id,name,slug,plan_code,status,created_at").order("created_at",{ascending:false}),
-  supabase.from("subscriptions").select("organization_id,plan_code,status,current_period_end,provider_subscription_id"),supabase.from("edge_devices").select("id,organization_id,device_name,status,last_seen_at,app_version"),
-  supabase.from("video_sources").select("id,organization_id,name,source_type,enabled"),supabase.from("feature_entitlements").select("organization_id,feature_key,enabled,source"),
-  supabase.from("plan_features").select("plan_code,feature_key,enabled,limit_value")
- ]);
- const now=Date.now(), online=(d:any)=>d.status==="online"&&d.last_seen_at&&(now-new Date(d.last_seen_at).getTime())<90000;
- return <main className="shell"><div className="brand">AI SECURITY COMMAND CENTER</div>
- <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Operations Console</h1><p className="muted">Full platform visibility · {user.email}</p></div><div className="portalActions"><a className="btn" href="http://127.0.0.1:8081">Open Command Center</a><a className="btn" href="/admin/licenses">Licences & clients</a><a className="ghost" href="/portal">My dashboard</a><SignOut/></div></div>
- <section className="grid"><article className="card"><h2>Users</h2><strong>{users?.length??0}</strong><p className="muted">registered accounts</p></article><article className="card"><h2>Customers</h2><strong>{orgs?.length??0}</strong><p className="muted">organizations</p></article><article className="card"><h2>Edge Agents</h2><strong>{devices?.filter(online).length??0}/{devices?.length??0}</strong><p className="muted">online now</p></article><article className="card"><h2>Sources</h2><strong>{sources?.length??0}</strong><p className="muted">cameras & drones</p></article></section>
- <p><a className="ghost" href="https://downloads.aisecuritycommandcenter.com/">Latest Windows Command Center release</a></p><h2>Users</h2><div className="card tableWrap"><table className="adminTable"><thead><tr><th>User</th><th>Organization</th><th>Role</th><th>Last sign-in</th></tr></thead><tbody>{(users??[]).map((u:any)=><tr key={u.user_id+String(u.organization_id)}><td><b>{u.full_name||u.email}</b><div className="muted">{u.email}</div></td><td>{u.organization_name||"—"}</td><td>{u.role||"—"}</td><td>{u.last_sign_in_at?new Date(u.last_sign_in_at).toLocaleString():"Never"}</td></tr>)}</tbody></table></div>
- <h2>Customers, devices & access</h2><section className="grid">{(orgs??[]).map(o=>{const sub=subs?.find(s=>s.organization_id===o.id);const plan=sub?.plan_code??o.plan_code;const ds=devices?.filter(d=>d.organization_id===o.id)??[];const ss=sources?.filter(s=>s.organization_id===o.id)??[];return <article className="card" key={o.id}><span className="badge">{String(plan).toUpperCase()}</span><h2>{o.name}</h2><p className="muted">{o.slug} · {sub?.status??o.status}</p><p><b>{ds.filter(online).length}/{ds.length}</b> edge agents online · <b>{ss.length}</b> sources</p><p><a className="btn" href={"/portal?organization="+encodeURIComponent(o.id)}>Open customer dashboard</a></p><SubscriptionControls orgId={o.id} initialPlan={plan} initialStatus={o.status} paid={!!sub?.provider_subscription_id}/><h3>Feature access</h3>{FEATURES.map(([key,label])=>{const ov=overrides?.find(e=>e.organization_id===o.id&&e.feature_key===key);const def=defaults?.find(e=>e.plan_code===plan&&e.feature_key===key);return <p key={key} className="toggleRow"><span>{label}</span><FeatureToggle orgId={o.id} feature={key} initial={ov?.enabled??def?.enabled??false}/></p>})}</article>})}</section></main>
+import {buildClients, isOnline, loadAdminData, needsAttention} from "../../lib/admin";
+
+const ICON: Record<string, string> = {expiry: "⏳", payment: "$", trial: "★", offline: "⚠", version: "⬆", suspended: "⏸"};
+
+export default async function Overview(){
+  const supabase = await createClient();
+  const data = await loadAdminData(supabase);
+  const clients = buildClients(data), alerts = needsAttention(data, clients);
+  const online = data.devices.filter(d => isOnline(d)).length;
+  const {data: activity} = await supabase.from("audit_logs").select("action,metadata,created_at,organization_id,target_type").order("created_at", {ascending: false}).limit(8);
+  return <>
+    <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Overview</h1><p className="muted">What needs your attention today</p></div>
+      <div className="portalActions"><Link className="btn" href="/admin/licenses?new=onprem">+ New on-prem licence</Link><Link className="ghost" href="/admin/clients">All clients</Link></div></div>
+    <section className="grid">
+      <Link className="card statLink" href="/admin/clients"><h2>Clients</h2><strong>{clients.length}</strong><p className="muted">{clients.filter(c => c.type === "saas").length} online · {clients.filter(c => c.type === "onprem").length} on-prem</p></Link>
+      <Link className="card statLink" href="/admin/devices"><h2>PCs online</h2><strong className={online < data.devices.length ? "locked" : "ok"}>{online}/{data.devices.length}</strong><p className="muted">client Edge Agents</p></Link>
+      <Link className="card statLink" href="/admin/devices"><h2>Cameras & drones</h2><strong>{data.sources.length}</strong><p className="muted">registered by online clients</p></Link>
+      <Link className="card statLink" href="/admin/users"><h2>Users</h2><strong>{data.users.length}</strong><p className="muted">accounts</p></Link>
+    </section>
+    <h2>Needs attention {alerts.length > 0 && <span className="badge">{alerts.length}</span>}</h2>
+    <div className="card attention">{alerts.length ? alerts.map((a, i) => <Link key={i} href={a.href} className={"alertRow " + a.level}>
+      <i>{ICON[a.kind] ?? "•"}</i><div><b>{a.title}</b><div className="muted">{a.detail}</div></div><span className="alertLevel">{a.level === "high" ? "urgent" : a.level === "medium" ? "soon" : "info"}</span></Link>)
+      : <p className="ok">✓ All clear: no expiring licences, overdue payments or offline PCs.</p>}</div>
+    <h2>Recent activity</h2>
+    <div className="card tableWrap"><table className="adminTable"><tbody>{(activity ?? []).map((e: any, i: number) => <tr key={i}>
+      <td className="muted" style={{whiteSpace: "nowrap"}}>{new Date(e.created_at).toLocaleString()}</td>
+      <td><b>{e.action.replace(/_/g, " ")}</b></td><td>{e.metadata?.client ?? clients.find(c => c.orgId === e.organization_id)?.name ?? ""}</td>
+      <td className="muted">{e.metadata?.feature ?? (e.metadata?.cameras != null ? `${e.metadata.cameras} cam · ${e.metadata.drones} drone` : "")}</td></tr>)}
+      {!activity?.length && <tr><td className="muted">No activity yet.</td></tr>}</tbody></table></div>
+  </>;
 }

@@ -1,5 +1,5 @@
 "use client";
-import {useMemo, useState} from "react";
+import {useEffect, useMemo, useState} from "react";
 import {useRouter} from "next/navigation";
 import {createClient} from "../../../lib/supabase/client";
 
@@ -20,7 +20,7 @@ function download(l: Lic){
   document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
 }
 
-export default function LicenseManager({licenses, orgs, limits}: {licenses: Lic[]; orgs: Lic[]; limits: Lic[]}){
+export default function LicenseManager({licenses, orgs, limits, open}: {licenses: Lic[]; orgs: Lic[]; limits: Lic[]; open?: Record<string, string>}){
   const router = useRouter();
   const [form, setForm] = useState<Lic | null>(null);
   const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [filter, setFilter] = useState("all");
@@ -36,6 +36,16 @@ export default function LicenseManager({licenses, orgs, limits}: {licenses: Lic[
   function renew(l: Lic){ edit(l); setForm(f => ({...f!, expires_on: inYear(), renewing: true})); }
   function fromOrg(o: Lic){ setMsg(""); const cam = orgLimit(o.id, "camera_ai"), dr = orgLimit(o.id, "drone_live");
     setForm({...blank(), edition: "saas", client_name: o.name, organization_id: o.id, plan: o.plan_code, cameras: cam?.limit_value ?? 1, drones: dr?.enabled === false ? 0 : (dr?.limit_value ?? 1)}); }
+
+  // Opened from a client page or the overview: ?new=onprem, ?edit=<id>, ?renew=<id>, ?org=<organization id>
+  useEffect(() => {
+    if(!open) return;
+    const rec = licenses.find(l => l.id === (open.edit || open.renew));
+    if(open.renew && rec) renew(rec);
+    else if(open.edit && rec) edit(rec);
+    else if(open.org){ const o = orgs.find(x => x.id === open.org); if(o) fromOrg(o); }
+    else if(open.new) setForm({...blank(), edition: open.new === "saas" ? "saas" : "onprem"});
+  }, []);
 
   async function save(){
     if(!form) return;
@@ -73,6 +83,7 @@ export default function LicenseManager({licenses, orgs, limits}: {licenses: Lic[
         setMsg(`Saved. ${org?.name ?? "Client"} is now limited to ${cameras} camera(s) and ${drones} drone(s).`);
       }
       setForm(null); router.refresh();
+      if(open?.edit || open?.renew || open?.org) router.push(form.organization_id ? "/admin/clients/org-" + form.organization_id : form.id ? "/admin/clients/lic-" + form.id : "/admin/clients");
     } catch(e){ setMsg(e instanceof Error ? e.message : "Save failed"); }
     finally{ setBusy(false); }
   }
