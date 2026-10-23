@@ -27,3 +27,6 @@ deno.lock
 # On-prem build env and issued customer licenses (never commit)
 edge/.venv-onprem/
 *.lic
+tsconfig.tsbuildinfo
+next-env.d.ts
+docs/ADMIN-GUIDE.txt

@@ -48,6 +48,41 @@ def _public_key():
     return Ed25519PublicKey.from_public_bytes(base64.b64decode(PUBLIC_KEY_B64))
 
 
+def _signature_ok(payload, signature):
+    try:
+        _public_key().verify(base64.b64decode(signature), canonical(payload))
+        return True
+    except Exception:
+        return False
+
+
+def device_fingerprint(device_token):
+    """What the cloud puts in an online lease to bind it to one paired PC (it stores the same hash)."""
+    return hashlib.sha256(str(device_token or "").encode("utf-8")).hexdigest()
+
+
+def verify_lease(document, device_token, now=None):
+    """Check an online (SaaS) licence lease signed by the cloud. Returns (ok, reason, payload).
+    Leases let a paired PC keep its plan for a few days without internet; only the vendor's key
+    can make one, and each is bound to one device token, so it cannot be edited or copied."""
+    if not isinstance(document, dict):
+        return False, "No lease.", None
+    payload, signature = document.get("license"), document.get("signature")
+    if not isinstance(payload, dict) or not signature or payload.get("kind") != "saas-lease":
+        return False, "No lease.", None
+    if not _signature_ok(payload, signature):
+        return False, "Lease signature is invalid.", payload
+    if payload.get("device") != device_fingerprint(device_token):
+        return False, "Lease belongs to a different device.", payload
+    try:
+        expires = datetime.datetime.fromisoformat(str(payload.get("expires_at")).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return False, "Lease expiry is invalid.", payload
+    if (now or time.time()) > expires:
+        return False, "Lease expired.", payload
+    return True, "Valid", payload
+
+
 def verify(document, machine=None, now=None):
     """Check a license document. Returns (ok, reason, payload)."""
     if not isinstance(document, dict):
@@ -56,10 +91,10 @@ def verify(document, machine=None, now=None):
     signature = document.get("signature")
     if not isinstance(payload, dict) or not signature:
         return False, "Not a license file.", None
-    try:
-        _public_key().verify(base64.b64decode(signature), canonical(payload))
-    except Exception:
+    if not _signature_ok(payload, signature):
         return False, "License signature is invalid (the file was changed or not issued by the vendor).", payload
+    if payload.get("kind"):  # online leases are not installable license files
+        return False, "Not a license file.", payload
     if str(payload.get("machine_id", "")).upper() != str(machine or machine_id()).upper():
         return False, "This license belongs to a different computer.", payload
     expires = str(payload.get("expires") or "")

@@ -10,6 +10,7 @@ import concurrent.futures
 import ipaddress
 import os
 import math
+import datetime
 import csv
 import time
 import cv2
@@ -2180,47 +2181,42 @@ cloud_state = {
 }
 
 # A security system must keep running when the internet or the cloud is down.
-# The last good license is cached locally and honoured for LICENSE_GRACE_SECONDS.
+# The cloud's signed lease is cached locally and honoured until it expires (about LICENSE_GRACE_SECONDS).
 LICENSE_CACHE_FILE = os.path.join(BASE_FOLDER, "license_cache.json")
 LICENSE_GRACE_SECONDS = 7 * 24 * 3600
-LICENSE_FIELDS = ("organization_status", "plan_code", "features", "usage", "limits")
 
-def _license_signature(token, payload):
-    import hashlib, hmac
-    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hmac.new(token.encode("utf-8"), body, hashlib.sha256).hexdigest()
-
-def save_license_cache(token, data, saved_at):
-    payload = {k: data.get(k) for k in LICENSE_FIELDS}
-    payload["saved_at"] = saved_at
+def save_license_cache(token, data):
+    """Keep the cloud-signed lease for offline use. Only the vendor's key can make one and it is
+    bound to this PC's device token, so it can't be edited or copied (no lease = online only)."""
+    lease = data.get("lease")
+    ok, reason, _ = licensing.verify_lease(lease, token)
+    if not ok:
+        if lease:
+            print("Cloud lease rejected:", reason)
+        return
     try:
         tmp = LICENSE_CACHE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"license": payload, "signature": _license_signature(token, payload)}, f)
+            json.dump(lease, f)
         os.replace(tmp, LICENSE_CACHE_FILE)
     except Exception as e:
         print("License cache save error:", e)
 
 def load_license_cache(token, now=None):
-    """Return the cached license if it is genuine and still inside the grace period."""
-    now = now or time.time()
+    """Return the cached lease's licence if it is genuine, for this PC and not expired."""
     try:
         with open(LICENSE_CACHE_FILE, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        payload = raw.get("license") or {}
-        import hmac
-        if not hmac.compare_digest(str(raw.get("signature") or ""), _license_signature(token, payload)):
-            print("License cache ignored: signature mismatch")
-            return None
-        saved_at = float(payload.get("saved_at") or 0)
-        if not 0 < saved_at <= now + 300 or now - saved_at > LICENSE_GRACE_SECONDS:
-            return None
-        return payload
+            lease = json.load(f)
     except FileNotFoundError:
         return None
     except Exception as e:
         print("License cache read error:", e)
         return None
+    ok, reason, payload = licensing.verify_lease(lease, token, now=now)
+    if not ok:
+        print("License cache ignored:", reason)
+        return None
+    return payload
 
 def _apply_license(data, connected, last_success):
     org_active = str(data.get("organization_status") or "").lower() in {"active", "trial"}
@@ -2364,7 +2360,8 @@ def cloud_control_worker():
     # Start from the cached license so features work immediately, even offline.
     cached = load_license_cache(token)
     if cached:
-        _apply_license(cached, connected=False, last_success=float(cached["saved_at"]))
+        issued = datetime.datetime.fromisoformat(str(cached["issued_at"]).replace("Z", "+00:00")).timestamp()
+        _apply_license(cached, connected=False, last_success=issued)
         print("Using cached license until cloud responds")
 
     while True:
@@ -2381,7 +2378,7 @@ def cloud_control_worker():
             org_active, features = _apply_license(data, connected=True, last_success=now)
             with cloud_lock:
                 cloud_state["last_error"] = ""
-            save_license_cache(token, data, now)
+            save_license_cache(token, data)
 
             # Enforce cloud subscription controls locally.
             drone_ai_allowed = org_active and bool((features.get("drone_ai") or {}).get("enabled"))
@@ -4338,6 +4335,44 @@ def api_setup_drone():
         return jsonify({"ok": False, "error": f"Drone setup failed safely: {e}"}), 500
 
 
+# Licence limits are enforced on what Frigate actually runs, however the camera or drone was
+# added (wizard, launcher or a hand-edited config): sources beyond the limit are switched off.
+over_limit_sources = set()
+
+
+def _sources_over_limit(names=None):
+    names = names if names is not None else _frigate_camera_names()
+    with cloud_lock:
+        limits = dict(cloud_state.get("limits") or {})
+    cams = [n for n in names if not _is_drone_name(n)]
+    drones = [n for n in names if _is_drone_name(n)]
+    # Keep the main camera / first drone, then the rest in config order.
+    cams.sort(key=lambda n: n != CAMERA_NAME)
+    drones.sort(key=lambda n: n != DRONE_CAMERA_NAME)
+    over = set()
+    for group, limit in ((cams, limits.get("cameras")), (drones, limits.get("drones"))):
+        if limit is not None:
+            over.update(group[max(0, int(limit)):])
+    return over
+
+
+def _enforce_source_limits_worker():
+    global over_limit_sources
+    while True:
+        try:
+            over = _sources_over_limit()
+            if over != over_limit_sources:
+                if over:
+                    print("Licence limit: switching off", ", ".join(sorted(over)))
+                over_limit_sources = over
+            if over and mqtt_connected and mqtt_client is not None:
+                for name in over:
+                    mqtt_client.publish(f"frigate/{name}/enabled/set", "OFF")
+        except Exception as e:
+            print("Licence limit check error:", e)
+        time.sleep(30)
+
+
 @app.route("/api/cameras")
 def api_cameras():
     """Every camera and drone Frigate knows, with live status, for the multi-camera grid."""
@@ -4355,7 +4390,8 @@ def api_cameras():
         items.append({"name": name, "kind": "drone" if _is_drone_name(name) else "camera",
                       "online": fps > 0, "fps": round(fps, 1),
                       "primary": name in (CAMERA_NAME, DRONE_CAMERA_NAME),
-                      "feed_visible": name not in hidden, "paused": name in paused})
+                      "feed_visible": name not in hidden, "paused": name in paused or name in over_limit_sources,
+                      "over_limit": name in over_limit_sources})
     return jsonify({"ok": True, "main": CAMERA_NAME, "drone": DRONE_CAMERA_NAME, "cameras": items})
 
 
@@ -4389,6 +4425,8 @@ def api_source_pause(name):
     if not mqtt_connected or mqtt_client is None:
         return jsonify({"ok": False, "error": "MQTT is offline."}), 503
     paused = bool((request.get_json(silent=True) or {}).get("paused"))
+    if not paused and name in _sources_over_limit():
+        return jsonify({"ok": False, "error": "This source is beyond your licence limit. Remove another source or upgrade the licence."}), 403
     mqtt_client.publish(f"frigate/{name}/enabled/set", "OFF" if paused else "ON")
     current = set(load_local_settings().get("paused_sources") or [])
     (current.add if paused else current.discard)(name)
@@ -8748,7 +8786,8 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
         const dot = t.querySelector(".tile-dot");
         dot.classList.toggle("on", !!c.online && !c.paused);
         dot.classList.toggle("paused", !!c.paused);
-        t.querySelector(".tile-fps").textContent = c.paused ? "STOPPED" : (c.online ? c.fps + " FPS" : "OFFLINE");
+        t.querySelector(".tile-fps").textContent = c.over_limit ? "OVER LICENCE LIMIT" : c.paused ? "STOPPED" : (c.online ? c.fps + " FPS" : "OFFLINE");
+        t.title = c.over_limit ? "Switched off: your licence allows fewer cameras/drones. Remove one or upgrade the licence." : "";
         t.querySelector('[data-act="pause"]').textContent = c.paused ? "START" : "STOP";
     }
 
@@ -12019,7 +12058,8 @@ async function load(){
     '<div class="hud-row"><div><b>Licensed to</b></div><span class="state">'+esc(d.customer)+'</span></div>'+
     '<div class="hud-row"><div><b>Plan</b><div class="muted">'+esc((d.features||[]).join(', '))+'</div></div><span class="state">'+esc(String(d.plan||'').toUpperCase())+'</span></div>'+
     '<div class="hud-row"><div><b>Cameras</b></div><span class="state">'+esc(u.cameras)+' / '+esc(l.cameras??'∞')+'</span></div>'+
-    '<div class="hud-row"><div><b>Drones</b></div><span class="state">'+esc(u.drones)+' / '+esc(l.drones??'∞')+'</span></div>':'';
+    '<div class="hud-row"><div><b>Drones</b></div><span class="state">'+esc(u.drones)+' / '+esc(l.drones??'∞')+'</span></div>'+
+    '<div class="hud-row"><div><b>Licence ID</b><div class="muted">Same ID as in your supplier records</div></div><span class="state">'+esc(String(d.license_id||'').slice(0,8).toUpperCase())+'</span></div>':'';
 }
 document.getElementById('install').onclick=async()=>{
   const f=document.getElementById('file').files[0],m=document.getElementById('msg');
@@ -12159,7 +12199,7 @@ def api_license():
     return jsonify({"ok": True, "machine_id": licensing.machine_id(), "edition": edition.EDITION,
                     "product": edition.PRODUCT_NAME, "valid": onprem_mode(),
                     "reason": offline_license.get("reason"), "customer": payload.get("customer"),
-                    "plan": payload.get("plan"), "expires": payload.get("expires"),
+                    "plan": payload.get("plan"), "expires": payload.get("expires"), "license_id": payload.get("license_id"),
                     "features": payload.get("features") or [], "limits": payload.get("limits") or {},
                     "usage": local_source_usage()})
 
@@ -12634,6 +12674,7 @@ def main():
     launcher (which imports this module, also when it is compiled to native code)."""
     _start_v105_recovery()
     start_drone_link()
+    threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     print()
     print(
         "======================================"
