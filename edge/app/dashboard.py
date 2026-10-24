@@ -5117,10 +5117,41 @@ DRONE_LIMITS = {"max_altitude_m": 120, "max_distance_m": 500, "max_speed_level":
 DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "confirm_land", "goto", "goto_cancel", "go_home", "cancel_go_home", "hover",
                   "control_on", "control_off", "gimbal", "photo", "record_start", "record_stop",
                   "sim_on", "sim_off", "stream_on", "stream_off"}
-drone_link = {"conn": None, "lock": threading.Lock(), "telemetry": {}, "tel_at": 0.0, "device": "",
-              "connected_at": 0.0, "events": [], "acks": {}, "next_id": 1, "stick_at": 0.0,
-              "stick_active": False, "error": ""}
+def _new_link():
+    return {"conn": None, "lock": threading.Lock(), "telemetry": {}, "tel_at": 0.0, "device": "",
+            "connected_at": 0.0, "events": [], "acks": {}, "next_id": 1, "stick_at": 0.0,
+            "stick_active": False, "error": ""}
+
+
+# One link per drone slot (drone, drone2, …: the drone cameras in Frigate, up to the licence).
+# Each slot has its own phone, pairing code, telemetry and video path rtmp://PC:1935/<slot>.
+drone_links = {DRONE_CAMERA_NAME: _new_link()}
+drone_link = drone_links[DRONE_CAMERA_NAME]  # the first drone
 drone_ack_cond = threading.Condition()
+
+
+_slots_cache = {"at": 0.0, "slots": [DRONE_CAMERA_NAME]}
+
+
+def drone_slots():
+    """Drone slots in order (first drone first); always at least the first one."""
+    if time.time() - _slots_cache["at"] > 5:  # sticks call this 10x per second; the config rarely changes
+        names = {n for n in _frigate_camera_names() if _is_drone_name(n)} | {DRONE_CAMERA_NAME}
+        _slots_cache.update(at=time.time(), slots=sorted(names, key=lambda n: (n != DRONE_CAMERA_NAME, len(n), n)))
+    return list(_slots_cache["slots"])
+
+
+def drone_label(slot):
+    return "Drone 1" if slot == DRONE_CAMERA_NAME else "Drone " + (slot[len(DRONE_CAMERA_NAME):] or "?")
+
+
+def get_link(slot=None):
+    return drone_links.setdefault(slot or DRONE_CAMERA_NAME, _new_link())
+
+
+def _req_slot():
+    slot = request.args.get("drone") or (request.get_json(silent=True) or {}).get("drone") or DRONE_CAMERA_NAME
+    return slot if slot in drone_slots() else None
 
 
 def _distance_m(lat1, lon1, lat2, lon2):
@@ -5136,53 +5167,61 @@ def drone_control_allowed():
     return cloud_feature_enabled("drone_live")
 
 
-def drone_link_token(reset=False):
+def _token_file(slot):
+    return DRONE_LINK_TOKEN_FILE if slot in (None, DRONE_CAMERA_NAME) else f"{DRONE_LINK_TOKEN_FILE}_{slot}"
+
+
+def drone_link_token(reset=False, slot=None):
     import secrets
+    path = _token_file(slot)
     if not reset:
         try:
-            with open(DRONE_LINK_TOKEN_FILE, "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 token = f.read().strip()
             if len(token) >= 32:
                 return token
         except OSError:
             pass
     token = secrets.token_hex(24)
-    tmp = DRONE_LINK_TOKEN_FILE + ".tmp"
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(token)
-    os.replace(tmp, DRONE_LINK_TOKEN_FILE)
+    os.replace(tmp, path)
     return token
 
 
-def _drone_send(msg):
-    """Send one message to the phone; False when no phone is connected."""
-    with drone_link["lock"]:
-        conn = drone_link["conn"]
+def _drone_send(msg, slot=None):
+    """Send one message to that drone's phone; False when it is not connected."""
+    link = get_link(slot)
+    with link["lock"]:
+        conn = link["conn"]
         if conn is None:
             return False
         try:
             conn.sendall((json.dumps(msg, separators=(",", ":")) + "\n").encode())
             return True
         except OSError:
-            _drone_drop(conn, "send failed")
+            _drone_drop(conn, "send failed", slot)
             return False
 
 
-def _drone_drop(conn, why):
-    # Caller holds drone_link["lock"] or owns conn.
-    if drone_link["conn"] is conn:
-        drone_link["conn"] = None
-        drone_link["stick_active"] = False
-        drone_link["error"] = why
-        _drone_event(f"Phone disconnected ({why}).")
+def _drone_drop(conn, why, slot=None):
+    # Caller holds the link's lock or owns conn.
+    link = get_link(slot)
+    if link["conn"] is conn:
+        link["conn"] = None
+        link["stick_active"] = False
+        link["error"] = why
+        _drone_event(f"Phone disconnected ({why}).", slot)
     try:
         conn.close()
     except OSError:
         pass
 
 
-def _drone_event(msg):
-    drone_link["events"] = (drone_link["events"] + [{"at": time.time(), "msg": str(msg)[:200]}])[-30:]
+def _drone_event(msg, slot=None):
+    link = get_link(slot)
+    link["events"] = (link["events"] + [{"at": time.time(), "msg": str(msg)[:200]}])[-30:]
 
 
 def _drone_session(conn, addr):
@@ -5195,8 +5234,10 @@ def _drone_session(conn, addr):
         hello = json.loads(reader.readline() or "{}")
     except ValueError:
         hello = {}
-    expected = hmac.new(drone_link_token().encode(), nonce.encode(), hashlib.sha256).hexdigest()
-    if hello.get("t") != "hello" or not hmac.compare_digest(str(hello.get("mac", "")), expected):
+    # The pairing code the phone holds tells which drone slot it is.
+    slot = next((s for s in drone_slots() if hello.get("t") == "hello" and hmac.compare_digest(
+        str(hello.get("mac", "")), hmac.new(drone_link_token(slot=s).encode(), nonce.encode(), hashlib.sha256).hexdigest())), None)
+    if slot is None:
         conn.sendall(b'{"t":"denied","error":"Pairing code does not match. Scan the QR code again."}\n')
         conn.close()
         print(f"Drone link: refused {addr[0]} (wrong pairing code)")
@@ -5205,14 +5246,19 @@ def _drone_session(conn, addr):
         conn.sendall(b'{"t":"denied","error":"Drone control is not included in this license."}\n')
         conn.close()
         return
-    with drone_link["lock"]:
-        if drone_link["conn"] is not None:
-            _drone_drop(drone_link["conn"], "replaced by a new phone connection")
-        drone_link.update({"conn": conn, "device": str(hello.get("device", ""))[:80], "connected_at": time.time(),
-                           "telemetry": {}, "tel_at": 0.0, "error": ""})
-        _drone_event(f"Phone connected: {drone_link['device'] or addr[0]}")
+    if slot in _sources_over_limit():
+        conn.sendall(b'{"t":"denied","error":"This drone is beyond the licence limit."}\n')
+        conn.close()
+        return
+    link = get_link(slot)
+    with link["lock"]:
+        if link["conn"] is not None:
+            _drone_drop(link["conn"], "replaced by a new phone connection", slot)
+        link.update({"conn": conn, "device": str(hello.get("device", ""))[:80], "connected_at": time.time(),
+                     "telemetry": {}, "tel_at": 0.0, "error": ""})
+        _drone_event(f"Phone connected: {link['device'] or addr[0]}", slot)
     conn.settimeout(5)  # telemetry arrives 5x per second; silence means the link is gone
-    _drone_send({"t": "welcome", "rtmp": f"rtmp://{_lan_ip()}:1935/{DRONE_CAMERA_NAME}", "limits": DRONE_LIMITS})
+    _drone_send({"t": "welcome", "rtmp": f"rtmp://{_lan_ip()}:1935/{slot}", "limits": DRONE_LIMITS}, slot)
     try:
         for line in reader:
             try:
@@ -5222,31 +5268,32 @@ def _drone_session(conn, addr):
             kind = msg.get("t")
             if kind == "tel":
                 msg.pop("t", None)
-                drone_link["telemetry"], drone_link["tel_at"] = msg, time.time()
+                link["telemetry"], link["tel_at"] = msg, time.time()
             elif kind == "ack":
                 with drone_ack_cond:
-                    drone_link["acks"][int(msg.get("id") or 0)] = msg
+                    link["acks"][int(msg.get("id") or 0)] = msg
                     drone_ack_cond.notify_all()
             elif kind == "event":
-                _drone_event(msg.get("msg", ""))
+                _drone_event(msg.get("msg", ""), slot)
     except OSError:
         pass
     finally:
-        with drone_link["lock"]:
-            _drone_drop(conn, "connection closed")
+        with link["lock"]:
+            _drone_drop(conn, "connection closed", slot)
 
 
 def _drone_heartbeat_worker():
     while True:
         time.sleep(0.25)
-        if drone_link["conn"] is None:
-            continue
-        _drone_send({"t": "ping"})
-        # The browser holds the sticks by re-sending them; if it stops (tab closed, crash),
-        # centre the sticks so the drone hovers.
-        if drone_link["stick_active"] and time.time() - drone_link["stick_at"] > DRONE_STICK_TIMEOUT:
-            drone_link["stick_active"] = False
-            _drone_send({"t": "stick", "x": 0, "y": 0, "z": 0, "r": 0})
+        for slot, link in list(drone_links.items()):
+            if link["conn"] is None:
+                continue
+            _drone_send({"t": "ping"}, slot)
+            # The browser holds the sticks by re-sending them; if it stops (tab closed, crash),
+            # centre the sticks so the drone hovers.
+            if link["stick_active"] and time.time() - link["stick_at"] > DRONE_STICK_TIMEOUT:
+                link["stick_active"] = False
+                _drone_send({"t": "stick", "x": 0, "y": 0, "z": 0, "r": 0}, slot)
 
 
 def _drone_link_server():
@@ -5269,56 +5316,92 @@ def start_drone_link():
     threading.Thread(target=_drone_heartbeat_worker, daemon=True).start()
 
 
-def drone_command(cmd, args=None, timeout=8.0):
-    """Send a command to the phone and wait for its acknowledgement."""
+def drone_command(cmd, args=None, timeout=8.0, slot=None):
+    """Send a command to that drone's phone and wait for its acknowledgement."""
+    link = get_link(slot)
     with drone_ack_cond:
-        cid = drone_link["next_id"]
-        drone_link["next_id"] += 1
-    if not _drone_send({"t": "cmd", "id": cid, "cmd": cmd, "args": args or {}}):
-        return {"ok": False, "error": "The Drone Link phone app is not connected."}
+        cid = link["next_id"]
+        link["next_id"] += 1
+    if not _drone_send({"t": "cmd", "id": cid, "cmd": cmd, "args": args or {}}, slot):
+        return {"ok": False, "error": f"The Drone Link phone for {drone_label(slot or DRONE_CAMERA_NAME)} is not connected."}
     deadline = time.time() + timeout
     with drone_ack_cond:
-        while cid not in drone_link["acks"]:
+        while cid not in link["acks"]:
             left = deadline - time.time()
             if left <= 0:
                 return {"ok": False, "error": "The phone did not answer in time."}
             drone_ack_cond.wait(left)
-        ack = drone_link["acks"].pop(cid)
+        ack = link["acks"].pop(cid)
     return {"ok": bool(ack.get("ok")), "error": ack.get("error") or ""}
 
 
-def _drone_link_status():
-    tel = drone_link["telemetry"]
-    fresh = drone_link["conn"] is not None and time.time() - drone_link["tel_at"] < 2
-    return {"ok": True, "allowed": drone_control_allowed(), "phone_connected": drone_link["conn"] is not None,
-            "telemetry_fresh": fresh, "device": drone_link["device"], "telemetry": tel if fresh else {},
-            "events": drone_link["events"][-10:], "error": drone_link["error"], "limits": DRONE_LIMITS,
+def link_fresh(slot=None, seconds=3):
+    link = get_link(slot)
+    return link["conn"] is not None and time.time() - link["tel_at"] < seconds
+
+
+def _drone_link_status(slot=None):
+    link = get_link(slot)
+    fresh = link_fresh(slot, 2)
+    return {"ok": True, "drone": slot or DRONE_CAMERA_NAME, "label": drone_label(slot or DRONE_CAMERA_NAME),
+            "allowed": drone_control_allowed(), "phone_connected": link["conn"] is not None,
+            "telemetry_fresh": fresh, "device": link["device"], "telemetry": link["telemetry"] if fresh else {},
+            "events": link["events"][-10:], "error": link["error"], "limits": DRONE_LIMITS,
             "link": {"host": _lan_ip(), "port": DRONE_LINK_PORT}}
 
 
 @app.route("/api/drone/link")
 def api_drone_link():
-    return jsonify(_drone_link_status())
+    slot = _req_slot()
+    if slot is None:
+        return jsonify({"ok": False, "error": "Unknown drone."}), 404
+    return jsonify(_drone_link_status(slot))
+
+
+@app.route("/api/drone/links")
+def api_drone_links():
+    """Every drone slot with a short status, for the drone selector and the map."""
+    over = _sources_over_limit()
+    out = []
+    for s in drone_slots():
+        link, fresh = get_link(s), link_fresh(s, 3)
+        t = link["telemetry"] if fresh else {}
+        out.append({"drone": s, "label": drone_label(s), "phone_connected": link["conn"] is not None,
+                    "drone_connected": bool(t.get("drone_connected")), "battery": t.get("battery"), "flying": t.get("flying"),
+                    "lat": t.get("lat"), "lon": t.get("lon"), "heading": t.get("heading"), "over_limit": s in over})
+    allowed = api_cloud_can_add_source("drone").get_json()
+    busy = {drone_response.get("drone"): "response"} if drone_response["active"] else {}
+    if route_run["active"]:
+        busy[route_run.get("drone")] = "route"
+    for d in out:
+        d["mission"] = busy.get(d["drone"], "")
+    return jsonify({"ok": True, "drones": out, "can_add": bool(allowed.get("allowed")), "limit": allowed.get("limit"),
+                    "used": allowed.get("used"), "message": allowed.get("message")})
 
 
 @app.route("/api/drone/link/pair")
 def api_drone_link_pair():
-    """QR code the phone app scans: where to connect and the pairing code."""
+    """QR code the phone app scans: where to connect and that drone's pairing code."""
     if not drone_control_allowed():
         return jsonify({"ok": False, "error": "Drone control is not included in this license."}), 403
+    slot = _req_slot()
+    if slot is None:
+        return jsonify({"ok": False, "error": "Unknown drone."}), 404
     host = _lan_ip()
     payload = json.dumps({"app": "ai-drone-link", "host": host, "port": DRONE_LINK_PORT,
-                          "token": drone_link_token()}, separators=(",", ":"))
-    return jsonify({"ok": True, "host": host, "port": DRONE_LINK_PORT, "qr": _qr_svg(payload)})
+                          "token": drone_link_token(slot=slot)}, separators=(",", ":"))
+    return jsonify({"ok": True, "host": host, "port": DRONE_LINK_PORT, "drone": slot, "label": drone_label(slot), "qr": _qr_svg(payload)})
 
 
 @app.route("/api/drone/link/pair/reset", methods=["POST"])
 def api_drone_link_pair_reset():
-    """New pairing code: the old phone must scan again (use if a phone was lost)."""
-    drone_link_token(reset=True)
-    with drone_link["lock"]:
-        if drone_link["conn"] is not None:
-            _drone_drop(drone_link["conn"], "pairing code changed")
+    """New pairing code for one drone: its phone must scan again (use if a phone was lost)."""
+    slot = _req_slot() or DRONE_CAMERA_NAME
+    drone_link_token(reset=True, slot=slot)
+    link = get_link(slot)
+    with link["lock"]:
+        if link["conn"] is not None:
+            _drone_drop(link["conn"], "pairing code changed", slot)
     return jsonify({"ok": True})
 
 
@@ -5326,6 +5409,10 @@ def api_drone_link_pair_reset():
 def api_drone_command():
     if not drone_control_allowed():
         return jsonify({"ok": False, "error": "Drone control is not included in this license."}), 403
+    slot = _req_slot()
+    if slot is None:
+        return jsonify({"ok": False, "error": "Unknown drone."}), 404
+    link = get_link(slot)
     data = request.get_json(silent=True) or {}
     cmd = str(data.get("cmd") or "")
     if cmd not in DRONE_COMMANDS:
@@ -5342,7 +5429,7 @@ def api_drone_command():
             lat, lon = float(args["lat"]), float(args["lon"])
         except (KeyError, TypeError, ValueError):
             return jsonify({"ok": False, "error": "Click the map to choose where to fly."}), 400
-        tel = drone_link["telemetry"]
+        tel = link["telemetry"]
         home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
         if None in home:
             return jsonify({"ok": False, "error": "The drone has no GPS position yet."}), 409
@@ -5352,16 +5439,16 @@ def api_drone_command():
         args = {"lat": lat, "lon": lon, "arrive": arrive,
                 "alt": max(5.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(args.get("alt") or 30))),
                 "speed": max(1.0, min(8.0, float(args.get("speed") or 5)))}
-    if cmd == "sim_on" and time.time() - drone_link.get("sim_off_at", 0) < 60:
+    if cmd == "sim_on" and time.time() - link.get("sim_off_at", 0) < 60:
         # Re-enabling the simulator soon after disabling it made the Mini 3 Pro switch itself off.
-        wait = int(60 - (time.time() - drone_link["sim_off_at"]))
+        wait = int(60 - (time.time() - link["sim_off_at"]))
         return jsonify({"ok": False, "error": f"Wait {wait} s before starting the simulator again (the drone can switch off otherwise)."}), 409
     if cmd == "sim_off":
-        drone_link["sim_off_at"] = time.time()
+        link["sim_off_at"] = time.time()
     if cmd in ("hover", "control_off"):
-        drone_link["stick_active"] = False
-    result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0)
-    _drone_event(f"{cmd}: {'OK' if result['ok'] else result['error']}")
+        link["stick_active"] = False
+    result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0, slot=slot)
+    _drone_event(f"{cmd}: {'OK' if result['ok'] else result['error']}", slot)
     return jsonify(result), (200 if result["ok"] else 409)
 
 
@@ -5370,18 +5457,37 @@ def api_drone_stick():
     """Virtual sticks from the browser (keyboard/gamepad), each -1..1, re-sent ~10x per second."""
     if not drone_control_allowed():
         return jsonify({"ok": False}), 403
+    slot = _req_slot()
+    if slot is None:
+        return jsonify({"ok": False}), 404
+    link = get_link(slot)
     data = request.get_json(silent=True) or {}
     clamp = lambda v: max(-1.0, min(1.0, float(v or 0)))
     stick = {"t": "stick", "x": clamp(data.get("x")), "y": clamp(data.get("y")),
              "z": clamp(data.get("z")), "r": clamp(data.get("r"))}
-    drone_link["stick_at"] = time.time()
-    drone_link["stick_active"] = any(stick[k] for k in "xyzr")
-    return jsonify({"ok": _drone_send(stick)})
+    link["stick_at"] = time.time()
+    link["stick_active"] = any(stick[k] for k in "xyzr")
+    return jsonify({"ok": _drone_send(stick, slot)})
+
+
+@app.route("/api/drone/add", methods=["POST"])
+def api_drone_add():
+    """Add the next drone slot (within the licence): its video path and pairing code."""
+    _slots_cache["at"] = 0.0
+    r = api_setup_drone()
+    _slots_cache["at"] = 0.0
+    return r
 
 
 @app.route("/drone-control")
 def drone_control_page():
-    return DRONE_CONTROL_PAGE
+    slot = request.args.get("drone") or DRONE_CAMERA_NAME
+    if slot not in drone_slots():
+        slot = DRONE_CAMERA_NAME
+    return (DRONE_CONTROL_PAGE.replace('data-live-camera="drone"', f'data-live-camera="{slot}"')
+            .replace("const DRONE='drone';", f"const DRONE={json.dumps(slot)};")
+            .replace("<title>", f"<title>{drone_label(slot)} · ", 1)
+            .replace('<h1 class="page-title">Drone Control</h1>', f'<h1 class="page-title">Drone Control · {drone_label(slot)}</h1>', 1))
 
 
 DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
@@ -5406,12 +5512,20 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 .dc-ctl-on{box-shadow:0 0 0 2px #26ee89 inset}
 .dc-pair{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
 .dc-pair .qr{background:#fff;border-radius:4px;padding:4px}
+.dc-fleet{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px}
+.dc-fleet a,.dc-fleet button{display:flex;align-items:center;gap:7px;padding:8px 12px;border:1px solid #155879;border-radius:4px;background:#05131d;color:#9edfff;text-decoration:none;font:bold 12px Arial,sans-serif;letter-spacing:.5px;cursor:pointer}
+.dc-fleet a.on{border-color:#5bd9ff;background:rgba(53,202,255,.14);color:#fff;box-shadow:0 0 0 1px #5bd9ff inset}
+.dc-fleet a small{color:#6d8b9d;font-weight:normal}
+.dc-fleet i{width:8px;height:8px;border-radius:50%;background:#53636d;display:inline-block}
+.dc-fleet i.ok{background:#26ee89}.dc-fleet i.half{background:#ffb23c}
+.dc-fleet button:disabled{opacity:.5;cursor:not-allowed}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Drone</div><h1 class="page-title">Drone Control</h1>
 <div class="page-sub">Fly the drone from this PC through the Drone Link app on the controller's phone. Keep the drone in sight — the pilot's controller can take over at any time.</div></div>
 <div class="actions"><span class="state" id="linkState"><i class="dot bad"></i>PHONE NOT CONNECTED</span></div></div>
+<div class="dc-fleet" id="fleet"></div>
 
 <section class="panel" id="pairPanel"><div class="panel-head"><div class="panel-title">⌁ Connect the phone</div><div class="live">PAIRING</div></div>
 <div class="panel-body dc-pair"><div class="qr" id="pairQr"></div><div style="flex:1;min-width:240px">
@@ -5479,7 +5593,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div class="muted" style="margin-top:6px">Runs a saved route on chosen days. <b>Ask first</b> sends you a Telegram Start/Skip message; <b>auto-start</b> flies after the safety checks. The drone and controller must be on and connected at patrol time, and a pilot must be able to take over.</div>
 <div id="schedList" style="margin-top:8px"></div>
 <div class="actions" style="margin-top:8px;align-items:center"><select id="scRoute" style="flex:1;min-width:120px"></select><input id="scTime" type="time" value="02:00" style="width:110px">
-<span id="scDays" style="display:flex;gap:4px;flex-wrap:wrap"></span></div>
+<span id="scDays" style="display:flex;gap:4px;flex-wrap:wrap"></span><select id="scDrone" style="min-width:120px" title="Which drone flies it"><option value="">Any ready drone</option></select></div>
 <div class="actions" style="margin-top:8px;align-items:center"><label style="margin:0;display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="scAuto"> Auto-start (no confirmation)</label>
 <button class="hud-btn primary" onclick="addSched()">Add schedule</button></div>
 <div id="schedMsg" class="hud-msg"></div></div>
@@ -5528,9 +5642,27 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 </main>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
+const DRONE='drone';
+{const f=window.fetch.bind(window);
+ window.fetch=(u,o)=>f(typeof u==='string'&&/^\/api\/(drone\/|routes\/fly|response\/dispatch)/.test(u)?u+(u.includes('?')?'&':'?')+'drone='+encodeURIComponent(DRONE):u,o)}
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const fmt=(v,d=1)=>v==null||isNaN(v)?'–':Number(v).toFixed(d);
+async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  const many=d.drones.length>1;droneNames=Object.fromEntries(d.drones.map(x=>[x.drone,x.label]));
+  const sel=$('scDrone');if(sel&&sel.options.length!==d.drones.length+1){const v=sel.value;sel.innerHTML='<option value="">Any ready drone</option>'+d.drones.map(x=>`<option value="${esc(x.drone)}">${esc(x.label)}</option>`).join('');sel.value=v;sel.style.display=many?'':'none'}
+  $('fleet').innerHTML=d.drones.map(x=>{const dot=x.drone_connected?'ok':x.phone_connected?'half':'';
+    const info=x.over_limit?'over licence':x.mission?(x.mission==='route'?'on route':'responding'):x.drone_connected?(x.flying?'flying':'ready')+(x.battery!=null?' · '+x.battery+'%':''):x.phone_connected?'drone off':'not paired';
+    return `<a href="/drone-control?drone=${encodeURIComponent(x.drone)}" class="${x.drone===DRONE?'on':''}"><i class="${dot}"></i>${esc(x.label)} <small>${esc(info)}</small></a>`}).join('')
+    +`<button onclick="addDroneSlot()" ${d.can_add?'':'disabled'} title="${esc(d.message||'')}">+ Add drone <small>${d.used??'?'} of ${d.limit??'∞'}</small></button>`;
+  if(!many&&!d.can_add)$('fleet').querySelector('button').style.display='none';
+  others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers()}catch(e){}}
+async function addDroneSlot(){if(!confirm('Add another drone? It gets its own pairing QR code and video. Frigate restarts (about 20 s).'))return;
+  const d=await fetch('/api/drone/add',{method:'POST'}).then(r=>r.json());
+  if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else alert(d.error||'Could not add a drone.')}
+let others=[],oMarks=[],droneNames={};
+function drawOthers(){if(!map||!window.L)return;oMarks.forEach(m=>m.remove());
+  oMarks=others.map(x=>L.circleMarker([x.lat,x.lon],{radius:7,color:'#ffb23c',fillColor:'#ffb23c',fillOpacity:.8}).bindTooltip(x.label,{permanent:true,direction:'right',className:''}).addTo(map))}
 let st={},control=false,map=null,dMark=null,hMark=null,trail=null,keys=new Set(),lastStickZero=true;
 function msg(t,ok){const e=$('cmdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))return;msg(c.replace('_',' ')+'…');
@@ -5599,14 +5731,14 @@ const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];let scheds=[];
 function scmsg(t,ok){const e=$('schedMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function renderScheds(){const names=Object.keys(routes);$('scRoute').innerHTML=names.length?names.map(n=>`<option>${esc(n)}</option>`).join(''):'<option value="">Save a route first</option>';
   if(!$('scDays').children.length)$('scDays').innerHTML=DAYS.map((d,i)=>`<label style="margin:0;display:flex;gap:3px;align-items:center;text-transform:none;letter-spacing:0;font-size:12px"><input type="checkbox" data-day="${i}" checked>${d}</label>`).join('');
-  $('schedList').innerHTML=scheds.map((s,i)=>`<div class="hud-row"><div><b>${esc(s.route)}</b> at ${esc(s.time)}<div class="muted">${s.days.length===7?'Every day':s.days.map(d=>DAYS.at(d)).join(', ')} · ${s.auto_start?'auto-start':'asks first on Telegram'}${s.enabled?'':' · paused'}</div></div>
+  $('schedList').innerHTML=scheds.map((s,i)=>`<div class="hud-row"><div><b>${esc(s.route)}</b> at ${esc(s.time)}<div class="muted">${s.days.length===7?'Every day':s.days.map(d=>DAYS.at(d)).join(', ')} · ${s.auto_start?'auto-start':'asks first on Telegram'}${s.drone?' · '+esc(droneNames[s.drone]||s.drone):''}${s.enabled?'':' · paused'}</div></div>
     <div class="actions"><button class="hud-btn" onclick="toggleSched(${i})">${s.enabled?'Pause':'Resume'}</button><button class="hud-btn danger" onclick="delSched(${i})">Delete</button></div></div>`).join('')||'<p class="muted">No scheduled patrols.</p>'}
 async function saveScheds(note){const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({patrol_schedules:scheds})}).then(r=>r.json());
   if(d.ok){scheds=d.settings.patrol_schedules;scmsg(note,true)}else scmsg(d.error,false);renderScheds()}
 function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySelectorAll('input:checked')].map(x=>+x.dataset.day);
   if(!route){scmsg('Save a route first.',false);return}if(!days.length){scmsg('Choose at least one day.',false);return}
   const auto=$('scAuto').checked;if(auto&&!confirm('Auto-start flies the drone with no confirmation at '+$('scTime').value+'. Only use it when the drone and controller are on, the area is clear, and a pilot can take over. Continue?'))return;
-  scheds=[...scheds,{route,time:$('scTime').value,days,enabled:true,auto_start:auto}];saveScheds('Schedule added.')}
+  scheds=[...scheds,{route,time:$('scTime').value,days,enabled:true,auto_start:auto,drone:$('scDrone').value}];saveScheds('Schedule added.')}
 function toggleSched(i){scheds=scheds.map((s,j)=>j===i?{...s,enabled:!s.enabled}:s);saveScheds('Updated.')}
 function delSched(i){if(!confirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
 async function loadScheds(){try{const d=await fetch('/api/response/settings').then(r=>r.json());scheds=d.settings.patrol_schedules||[];renderScheds()}catch(e){}}
@@ -5674,7 +5806,7 @@ async function resetPair(){if(!confirm('Make a new pairing code? The phone will 
 function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
   const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
   if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
-$('speedVal').textContent='30%';loadPair();poll();loadResp();loadRoutes().then(loadScheds);setInterval(poll,500);
+$('speedVal').textContent='30%';loadFleet();setInterval(loadFleet,3000);loadPair();poll();loadResp();loadRoutes().then(loadScheds);setInterval(poll,500);
 </script>""", active="drone")
 _body_end = DRONE_CONTROL_PAGE.rfind("</body>")
 DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_CONTROL_PAGE[_body_end:]
@@ -5793,17 +5925,41 @@ def save_response_settings(data):
 
 
 # ---------- drone response ----------
-drone_response = {"active": False, "camera": "", "phase": "", "started": 0.0, "arrived": 0.0, "stay_until": 0.0, "by": "", "message": ""}
+drone_response = {"active": False, "drone": DRONE_CAMERA_NAME, "camera": "", "phase": "", "started": 0.0, "arrived": 0.0,
+                  "stay_until": 0.0, "by": "", "message": ""}
 
 
-def _drone_ready_problem(camera):
-    """Why the drone can't be sent to this camera right now (empty string = ready)."""
+def _pick_drone(check, drone=None):
+    """First drone (or the one asked for) that passes check(slot) == ''. Returns (slot, problem)."""
+    slots = [drone] if drone else [d for d in drone_slots() if d not in _sources_over_limit()]
+    problems = []
+    for d in slots:
+        problem = check(d)
+        if not problem:
+            return d, ""
+        problems.append((d, problem))
+    if len(problems) == 1:
+        return None, problems[0][1]
+    connected = [(d, pr) for d, pr in problems if get_link(d)["conn"] is not None] or problems
+    return None, "No drone is ready. " + " ".join(f"{drone_label(d)}: {pr}" for d, pr in connected)
+
+
+def _drone_busy(slot):
+    return ((drone_response["active"] and drone_response.get("drone") == slot)
+            or (route_run["active"] and route_run.get("drone") == slot))
+
+
+def _drone_ready_problem(camera, slot=None):
+    """Why that drone (any drone when slot is None) can't be sent to this camera now ('' = ready)."""
+    if slot is None:
+        return _pick_drone(lambda d: _drone_ready_problem(camera, d))[1]
     if not drone_control_allowed():
         return "Drone control is not included in this licence."
-    if drone_link["conn"] is None:
+    link = get_link(slot)
+    if link["conn"] is None:
         return "The Drone Link phone is not connected."
-    tel = drone_link["telemetry"]
-    if time.time() - drone_link["tel_at"] > 3 or not tel.get("drone_connected"):
+    tel = link["telemetry"]
+    if time.time() - link["tel_at"] > 3 or not tel.get("drone_connected"):
         return "The drone is not connected to the controller."
     cfg = load_response_settings()
     loc = cfg["camera_locations"].get(camera)
@@ -5816,39 +5972,43 @@ def _drone_ready_problem(camera):
         return "The drone has no GPS position yet."
     if _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
         return f"That camera is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."
-    if drone_response["active"] or route_run["active"]:
+    if _drone_busy(slot):
         return "The drone is already on a mission."
     return ""
 
 
-def dispatch_drone(camera, by="dashboard"):
-    problem = _drone_ready_problem(camera)
+def dispatch_drone(camera, by="dashboard", drone=None):
+    if drone_response["active"]:
+        return {"ok": False, "error": f"{drone_label(drone_response['drone'])} is already responding to {drone_response['camera']}."}
+    slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d), drone)
     if problem:
         return {"ok": False, "error": problem}
     cfg = load_response_settings()
     loc = cfg["camera_locations"][camera]
     result = drone_command("goto", {"lat": loc["lat"], "lon": loc["lon"], "alt": cfg["altitude_m"],
-                                    "speed": cfg["speed_ms"], "arrive": "hover"}, timeout=15.0)
+                                    "speed": cfg["speed_ms"], "arrive": "hover"}, timeout=15.0, slot=slot)
     if not result["ok"]:
         return result
-    drone_response.update(active=True, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
-                          message=f"Drone on its way to {camera}")
-    _drone_event(f"Drone response to {camera} started ({by})")
-    return {"ok": True, "message": f"Drone on its way to {camera} at {int(cfg['altitude_m'])} m."}
+    who = drone_label(slot) if len(drone_slots()) > 1 else "Drone"
+    drone_response.update(active=True, drone=slot, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
+                          message=f"{who} on its way to {camera}")
+    _drone_event(f"Drone response to {camera} started ({by})", slot)
+    return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
 
 
 def recall_drone(reason="recalled"):
     if not drone_response["active"]:
         return {"ok": False, "error": "No drone response in progress."}
-    result = drone_command("go_home", timeout=10.0)
+    result = drone_command("go_home", timeout=10.0, slot=drone_response["drone"])
     drone_response.update(phase="returning", message=f"Returning home ({reason})")
-    _drone_event(f"Drone response: returning home ({reason})")
+    _drone_event(f"Drone response: returning home ({reason})", drone_response["drone"])
     return result
 
 
-def _drone_snapshot():
+def _drone_snapshot(slot=None):
+    slot = slot or (drone_response["drone"] if drone_response["active"] else DRONE_CAMERA_NAME)
     try:
-        r = requests.get(f"{FRIGATE_API_URL}/api/{DRONE_CAMERA_NAME}/latest.jpg", params={"bbox": 1, "h": 720}, timeout=4)
+        r = requests.get(f"{FRIGATE_API_URL}/api/{slot}/latest.jpg", params={"bbox": 1, "h": 720}, timeout=4)
         if r.ok and r.content[:2] == b"\xff\xd8":
             return r.content
     except Exception:
@@ -5862,9 +6022,10 @@ def _drone_response_worker():
         if not drone_response["active"]:
             continue
         try:
-            if time.time() - drone_link["tel_at"] > 5:
+            link = get_link(drone_response["drone"])
+            if time.time() - link["tel_at"] > 5:
                 continue  # no fresh telemetry (Wi-Fi hiccup): wait instead of deciding anything
-            tel = drone_link["telemetry"]
+            tel = link["telemetry"]
             mission = tel.get("mission")
             cam = drone_response["camera"]
             cfg = load_response_settings()
@@ -5875,7 +6036,7 @@ def _drone_response_worker():
                     if near:
                         drone_response.update(phase="hovering", arrived=time.time(), stay_until=time.time() + cfg["hover_seconds"],
                                               message=f"Hovering over {cam}")
-                        send_telegram(f"🚁 Drone is over {cam} at {int(tel.get('altitude') or 0)} m. Battery {tel.get('battery')}%.\n"
+                        send_telegram(f"🚁 {drone_label(drone_response['drone'])} is over {cam} at {int(tel.get('altitude') or 0)} m. Battery {tel.get('battery')}%.\n"
                                       f"{'Returning home in ' + str(int(cfg['hover_seconds'])) + ' s.' if cfg['auto_return'] else 'Staying until you send it home.'}",
                                       _drone_snapshot(), [[{"text": "🏠 Return now", "callback_data": "home"}, {"text": "⏱ Stay 2 min", "callback_data": "stay"}],
                                                           [{"text": "📷 New snapshot", "callback_data": "dsnap"}]])
@@ -6024,14 +6185,23 @@ def status_text():
 def _drone_status_line():
     if not drone_control_allowed():
         return "🚁 Drone control: not licensed"
-    if drone_link["conn"] is None:
-        return "🚁 Drone: phone not connected"
-    t = drone_link["telemetry"]
-    if not t.get("drone_connected"):
-        return "🚁 Drone: not connected to the controller"
-    state = "flying" if t.get("flying") else "on the ground"
-    resp = f" · responding to {drone_response['camera']} ({drone_response['phase']})" if drone_response["active"] else ""
-    return f"🚁 Drone: {state}, battery {t.get('battery')}%, GPS {t.get('gps_satellites')}{resp}"
+    slots = drone_slots()
+    lines = []
+    for slot in slots:
+        name = drone_label(slot) if len(slots) > 1 else "Drone"
+        link = get_link(slot)
+        t = link["telemetry"]
+        if link["conn"] is None:
+            lines.append(f"🚁 {name}: phone not connected")
+        elif not t.get("drone_connected"):
+            lines.append(f"🚁 {name}: not connected to the controller")
+        else:
+            state = "flying" if t.get("flying") else "on the ground"
+            resp = (f" · responding to {drone_response['camera']} ({drone_response['phase']})"
+                    if drone_response["active"] and drone_response["drone"] == slot else "")
+            route = f" · flying route {route_run['name']}" if route_run["active"] and route_run.get("drone") == slot else ""
+            lines.append(f"🚁 {name}: {state}, battery {t.get('battery')}%, GPS {t.get('gps_satellites')}{resp}{route}")
+    return "\n".join(lines)
 
 
 def answer_question(text):
@@ -6245,7 +6415,7 @@ def start_assistant():
 # ---------- multi-stop routes (draw on the map, fly stop by stop) ----------
 ROUTES_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_routes.json")
 ROUTE_MAX_POINTS = 25
-route_run = {"active": False, "name": "", "index": 0, "total": 0, "phase": "", "message": "", "stop": False}
+route_run = {"active": False, "drone": DRONE_CAMERA_NAME, "name": "", "index": 0, "total": 0, "phase": "", "message": "", "stop": False}
 
 
 def load_routes():
@@ -6285,13 +6455,16 @@ def delete_route(name):
         json.dump(routes, f, indent=2)
 
 
-def _route_problem(route):
+def _route_problem(route, slot=None):
+    if slot is None:
+        return _pick_drone(lambda d: _route_problem(route, d))[1]
     if not drone_control_allowed():
         return "Drone control is not included in this licence."
-    if drone_link["conn"] is None:
+    link = get_link(slot)
+    if link["conn"] is None:
         return "The Drone Link phone is not connected."
-    tel = drone_link["telemetry"]
-    if time.time() - drone_link["tel_at"] > 3 or not tel.get("drone_connected"):
+    tel = link["telemetry"]
+    if time.time() - link["tel_at"] > 3 or not tel.get("drone_connected"):
         return "The drone is not connected to the controller."
     pts = route["points"]
     if len(pts) < 1:
@@ -6305,7 +6478,7 @@ def _route_problem(route):
             return f"Stop {i} is {int(d)} m from home (limit {DRONE_LIMITS['max_distance_m']} m)."
     if (tel.get("battery") or 0) < load_response_settings()["min_battery"]:
         return f"Battery is {tel.get('battery')}%."
-    if drone_response["active"] or route_run["active"]:
+    if _drone_busy(slot):
         return "The drone is already on a mission."
     return ""
 
@@ -6316,11 +6489,12 @@ def _wait_arrival(p, started):
         time.sleep(0.5)
         if route_run["stop"]:
             return "stopped from the PC"
-        if time.time() - drone_link["tel_at"] > 5:
+        link = get_link(route_run["drone"])
+        if time.time() - link["tel_at"] > 5:
             if time.time() - started > 900:
                 return "lost contact with the drone"
             continue  # Wi-Fi hiccup: wait
-        tel = drone_link["telemetry"]
+        tel = link["telemetry"]
         if tel.get("mission"):
             continue
         if time.time() - started < 3:
@@ -6330,15 +6504,16 @@ def _wait_arrival(p, started):
         return "STOP pressed, the pilot took control or the link dropped"
 
 
-def _run_route(name, route, by):
+def _run_route(name, route, by, slot):
     pts = route["points"]
-    route_run.update(active=True, name=name, index=0, total=len(pts), phase="flying", stop=False, message=f"Route {name} started")
-    _drone_event(f"Route {name} started ({len(pts)} stops, {by})")
-    send_telegram(f"🗺️ Route “{name}” started: {len(pts)} stops at {int(route['alt'])} m.") if telegram_ready() else None
+    who = f" ({drone_label(slot)})" if len(drone_slots()) > 1 else ""
+    _drone_event(f"Route {name} started ({len(pts)} stops, {by})", slot)
+    send_telegram(f"🗺️ Route “{name}”{who} started: {len(pts)} stops at {int(route['alt'])} m.") if telegram_ready() else None
     try:
         for i, p in enumerate(pts):
             route_run.update(index=i + 1, phase="flying", message=f"Flying to stop {i + 1} of {len(pts)}")
-            r = drone_command("goto", {"lat": p["lat"], "lon": p["lon"], "alt": route["alt"], "speed": route["speed"], "arrive": "hover"}, timeout=15.0)
+            r = drone_command("goto", {"lat": p["lat"], "lon": p["lon"], "alt": route["alt"], "speed": route["speed"], "arrive": "hover"},
+                              timeout=15.0, slot=slot)
             if not r["ok"]:
                 raise RuntimeError(r["error"] or "the drone refused the next stop")
             why = _wait_arrival(p, time.time())
@@ -6352,31 +6527,37 @@ def _run_route(name, route, by):
                 raise RuntimeError("stopped from the PC")
         action = {"home": "go_home", "land": "land"}.get(route["end"])
         if action:
-            drone_command(action, timeout=10.0)
+            drone_command(action, timeout=10.0, slot=slot)
         done = {"home": "returning home", "land": "landing at the last stop", "hover": "hovering at the last stop"}[route["end"]]
         route_run.update(phase="done", message=f"Route {name} complete, {done}")
-        _drone_event(f"Route {name} complete ({done})")
+        _drone_event(f"Route {name} complete ({done})", slot)
         send_telegram(f"✅ Route “{name}” complete, {done}.") if telegram_ready() else None
     except Exception as e:
-        drone_command("hover", timeout=5.0)
+        drone_command("hover", timeout=5.0, slot=slot)
         route_run.update(phase="stopped", message=f"Route stopped at stop {route_run['index']}: {e}")
-        _drone_event(f"Route {name} stopped: {e}")
+        _drone_event(f"Route {name} stopped: {e}", slot)
         send_telegram(f"⚠️ Route “{name}” stopped at stop {route_run['index']}: {e}. The drone is hovering.") if telegram_ready() else None
     finally:
         route_run["active"] = False
 
 
-def fly_route(name=None, route=None, by="dashboard"):
+def fly_route(name=None, route=None, by="dashboard", drone=None):
     if route is None:
         route = load_routes().get(name or "")
         if not route:
             return {"ok": False, "error": f"No saved route named “{name}”."}
+    if route_run["active"]:
+        return {"ok": False, "error": f"{drone_label(route_run['drone'])} is already flying route {route_run['name']}."}
     route = _clean_route(route)
-    problem = _route_problem(route)
+    slot, problem = _pick_drone(lambda d: _route_problem(route, d), drone)
     if problem:
         return {"ok": False, "error": problem}
-    threading.Thread(target=_run_route, args=(name or "unsaved route", route, by), daemon=True).start()
-    return {"ok": True, "message": f"Route started: {len(route['points'])} stops."}
+    # Claimed here (not in the thread) so a second request can't start another route meanwhile.
+    route_run.update(active=True, drone=slot, name=name or "unsaved route", index=0, total=len(route["points"]), phase="flying",
+                     stop=False, message=f"Route {name or 'unsaved route'} started")
+    threading.Thread(target=_run_route, args=(name or "unsaved route", route, by, slot), daemon=True).start()
+    who = f"{drone_label(slot)}: " if len(drone_slots()) > 1 else ""
+    return {"ok": True, "drone": slot, "message": f"{who}Route started: {len(route['points'])} stops."}
 
 
 @app.route("/api/routes", methods=["GET", "POST", "DELETE"])
@@ -6398,7 +6579,9 @@ def api_routes():
 def api_routes_fly():
     data = request.get_json(silent=True) or {}
     try:
-        r = fly_route(data.get("name"), data if data.get("points") else None, by="dashboard")
+        drone = data.get("drone") or request.args.get("drone")
+        r = fly_route(data.get("name"), data if data.get("points") else None, by="dashboard",
+                      drone=drone if drone in drone_slots() else None)
     except (TypeError, ValueError, KeyError) as e:
         r = {"ok": False, "error": f"Invalid route: {e}"}
     return jsonify(r), (200 if r["ok"] else 409)
@@ -6407,7 +6590,7 @@ def api_routes_fly():
 @app.route("/api/routes/stop", methods=["POST"])
 def api_routes_stop():
     route_run["stop"] = True
-    drone_command("hover", timeout=5.0)
+    drone_command("hover", timeout=5.0, slot=route_run["drone"])
     return jsonify({"ok": True})
 
 
@@ -6427,17 +6610,21 @@ def _clean_schedules(items):
         days = sorted({int(d) for d in (s.get("days") or []) if str(d).isdigit() and 0 <= int(d) <= 6})
         if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", t) or not days:
             continue
+        drone = str(s.get("drone") or "")
         out.append({"id": re.sub(r"[^\w-]", "", str(s.get("id") or "")) or os.urandom(4).hex(), "route": str(s["route"])[:40],
-                    "time": t, "days": days, "enabled": bool(s.get("enabled", True)), "auto_start": bool(s.get("auto_start", False))})
+                    "time": t, "days": days, "enabled": bool(s.get("enabled", True)), "auto_start": bool(s.get("auto_start", False)),
+                    "drone": drone if _is_drone_name(drone) else ""})
     return out[:20]
 
 
-def _patrol_preflight(route):
-    """Everything a scheduled patrol must pass before take-off ('' = clear to fly)."""
-    problem = _route_problem(_clean_route(route))
+def _patrol_preflight(route, slot=None):
+    """Everything a scheduled patrol must pass before take-off ('' = clear to fly); any drone when slot is None."""
+    if slot is None:
+        return _pick_drone(lambda d: _patrol_preflight(route, d))[1]
+    problem = _route_problem(_clean_route(route), slot)
     if problem:
         return problem
-    tel = drone_link["telemetry"]
+    tel = get_link(slot)["telemetry"]
     if tel.get("flying"):
         return "The drone is already flying."
     if (tel.get("gps_satellites") or 0) < PATROL_MIN_SATELLITES:
@@ -6464,10 +6651,10 @@ def start_scheduled_patrol(sid, by):
     route = load_routes().get(s["route"])
     if not route:
         return {"ok": False, "error": f"Route “{s['route']}” no longer exists."}
-    problem = _patrol_preflight(route)
+    slot, problem = _pick_drone(lambda d: _patrol_preflight(route, d), s.get("drone") or None)
     if problem:
         return {"ok": False, "error": problem}
-    return fly_route(s["route"], by=by)
+    return fly_route(s["route"], by=by, drone=slot)
 
 
 def _patrol_scheduler_worker():
@@ -6485,15 +6672,17 @@ def _patrol_scheduler_worker():
                     continue
                 patrol_state["fired"][s["id"]] = today  # once per day, never flown late
                 route = load_routes().get(s["route"])
-                problem = _patrol_preflight(route) if route else f"Route “{s['route']}” no longer exists."
+                slot, problem = (_pick_drone(lambda d: _patrol_preflight(route, d), s.get("drone") or None) if route
+                                 else (None, f"Route “{s['route']}” no longer exists."))
                 if problem:
-                    _drone_event(f"Scheduled patrol {s['route']} skipped: {problem}")
+                    _drone_event(f"Scheduled patrol {s['route']} skipped: {problem}", s.get("drone") or None)
                     send_telegram(f"⏭ Scheduled patrol “{s['route']}” skipped: {problem}")
                     continue
-                tel = drone_link["telemetry"]
-                facts = f"Battery {tel.get('battery')}%, GPS {tel.get('gps_satellites')}, {len(route['points'])} stops."
+                tel = get_link(slot)["telemetry"]
+                who = f"{drone_label(slot)}: " if len(drone_slots()) > 1 else ""
+                facts = f"{who}Battery {tel.get('battery')}%, GPS {tel.get('gps_satellites')}, {len(route['points'])} stops."
                 if s["auto_start"]:
-                    r = fly_route(s["route"], by="schedule")
+                    r = fly_route(s["route"], by="schedule", drone=slot)
                     if not r["ok"]:
                         send_telegram(f"⚠️ Scheduled patrol “{s['route']}” could not start: {r['error']}")
                 else:
@@ -6531,10 +6720,12 @@ def api_response_settings():
 
 @app.route("/api/response/dispatch", methods=["POST"])
 def api_response_dispatch():
-    cam = str((request.get_json(silent=True) or {}).get("camera") or "")
-    r = dispatch_drone(cam, by="dashboard")
+    data = request.get_json(silent=True) or {}
+    cam = str(data.get("camera") or "")
+    drone = data.get("drone") or request.args.get("drone")
+    r = dispatch_drone(cam, by="dashboard", drone=drone if drone in drone_slots() else None)
     if r["ok"]:
-        send_telegram(f"🚁 Drone sent to {cam} from the dashboard.")
+        send_telegram(f"🚁 {drone_label(r['drone']) if len(drone_slots()) > 1 else 'Drone'} sent to {cam} from the dashboard.")
     return jsonify(r), (200 if r["ok"] else 409)
 
 
@@ -9888,6 +10079,40 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
 <div class="cam-name">DRONE 01</div>
 <div id="droneTrackingReadout">TRACKING ASSIST • WAITING</div>
 </div>
+<style>
+.drone-fleet{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;padding:9px;border-top:1px solid #123447}
+.drone-fleet a{display:block;padding:9px 11px;border:1px solid #164b67;border-radius:4px;background:rgba(2,15,24,.72);color:#d8f4ff;text-decoration:none;font-size:11px}
+.drone-fleet a:hover{border-color:#35caff;background:rgba(53,202,255,.10)}
+.drone-fleet b{color:#35caff;letter-spacing:1px}
+.drone-fleet .df-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#53636d;margin-right:6px}
+.drone-fleet .df-dot.ok{background:#26ee89}.drone-fleet .df-dot.half{background:#ffb23c}
+.drone-fleet .df-info{margin-top:5px;color:#8ba9b8;font-size:10px;letter-spacing:.5px}
+.drone-fleet .df-open{float:right;color:#5bd9ff;font-size:10px}
+</style>
+<div class="drone-fleet" id="droneFleet"></div>
+<script>
+(function () {
+    const box = document.getElementById("droneFleet");
+    const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+    async function refresh() {
+        let d;
+        try { d = await fetch("/api/drone/links", {cache: "no-store"}).then(r => r.json()); } catch (e) { return; }
+        if (!d.ok) return;
+        box.innerHTML = d.drones.map(x => {
+            const dot = x.drone_connected ? "ok" : x.phone_connected ? "half" : "";
+            const info = x.over_limit ? "Over licence limit"
+                : x.mission ? (x.mission === "route" ? "Flying a route" : "On a drone response")
+                : x.drone_connected ? (x.flying ? "Flying" : "Ready on the ground") + (x.battery != null ? " · battery " + x.battery + "%" : "")
+                : x.phone_connected ? "Phone connected · drone off" : "Phone not paired";
+            return '<a href="/drone-control?drone=' + encodeURIComponent(x.drone) + '" title="Open the controls for ' + esc(x.label) + '">'
+                + '<span class="df-open">CONTROLS →</span><span class="df-dot ' + dot + '"></span><b>' + esc(x.label).toUpperCase() + '</b>'
+                + '<div class="df-info">' + esc(info) + '</div></a>';
+        }).join("");
+    }
+    refresh();
+    setInterval(refresh, 4000);
+})();
+</script>
 </div>
 
 
@@ -9991,6 +10216,7 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
             + '<div class="tile-foot"><span><i class="tile-dot"></i><span class="tile-name">'
             + (c.kind === "drone" ? "✈ " : "▣ ") + esc(c.name) + '</span> <span class="tile-fps"></span></span>'
             + '<span class="tile-actions">'
+            + (c.kind === "drone" ? '<a class="tile-btn" href="/drone-control?drone=' + encodeURIComponent(c.name) + '" style="text-decoration:none">CONTROLS</a>' : '')
             + '<button type="button" class="feed-switch" data-act="feed">FEED <span class="knob"></span></button>'
             + '<button type="button" class="tile-btn" data-act="pause"></button>'
             + '<button type="button" class="tile-btn danger" data-act="remove">REMOVE</button>'
