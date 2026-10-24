@@ -4193,10 +4193,7 @@ def _write_managed_frigate(camera_name, source_url):
     cameras[camera_name] = camera
     cfg.setdefault("go2rtc", {}).setdefault("streams", {})[camera_name] = [source_url]
     shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-camera-setup")
-    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    os.replace(tmp, LIVE_FRIGATE_CONFIG)
+    _save_frigate_config(cfg)
 
 def _write_fresh_frigate(camera_name, source_url):
     # No live config yet (first setup): write a minimal one where Frigate reads it.
@@ -4285,6 +4282,26 @@ def api_setup_camera():
         if sid:_cloud_source("DELETE",{"id":sid})
         return jsonify({"ok":False,"error":f"Camera setup failed safely: {e}"}),500
 
+def _save_frigate_config(cfg):
+    """Write the live Frigate config. Docker or Frigate can hold the file open for a few seconds
+    (e.g. while Frigate restarts), which makes Windows refuse the swap, so retry, then write in place."""
+    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+    for _ in range(20):
+        try:
+            os.replace(tmp, LIVE_FRIGATE_CONFIG)
+            return
+        except PermissionError:
+            time.sleep(0.5)
+    with open(tmp, "r", encoding="utf-8") as src, open(LIVE_FRIGATE_CONFIG, "w", encoding="utf-8") as dst:
+        dst.write(src.read())
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+
+
 def _frigate_camera_names():
     """Camera names in the live Frigate config (main camera, extra cameras and drones)."""
     try:
@@ -4314,10 +4331,7 @@ def _write_drone_frigate(name):
     cameras[name] = camera
     cfg.setdefault("go2rtc", {}).setdefault("streams", {})[name] = [f"rtsp://host.docker.internal:8556/{name}"]
     shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-drone-setup")
-    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    os.replace(tmp, LIVE_FRIGATE_CONFIG)
+    _save_frigate_config(cfg)
 
 
 @app.route("/api/setup/drone", methods=["POST"])
@@ -4454,15 +4468,20 @@ def api_source_remove(name):
         return err
     if name in (CAMERA_NAME, DRONE_CAMERA_NAME):
         return jsonify({"ok": False, "error": "The main camera and first drone can't be removed here."}), 400
+    try:
+        return _remove_source(name)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not update the camera settings file ({e.strerror or e}). Wait a few seconds and try again."}), 409
+
+
+def _remove_source(name):
+    import shutil
     with open(LIVE_FRIGATE_CONFIG, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
     (cfg.get("cameras") or {}).pop(name, None)
     ((cfg.get("go2rtc") or {}).get("streams") or {}).pop(name, None)
     shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-remove-" + name)
-    tmp = LIVE_FRIGATE_CONFIG + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        yaml.safe_dump(cfg, f, sort_keys=False)
-    os.replace(tmp, LIVE_FRIGATE_CONFIG)
+    _save_frigate_config(cfg)
     settings = load_local_settings()
     save_local_settings({k: sorted(set(settings.get(k) or []) - {name}) for k in ("hidden_feeds", "paused_sources")})
     # Free the plan slot: drones are registered as "Drone N", cameras by their name.
@@ -4473,6 +4492,17 @@ def api_source_remove(name):
     if match:
         if not _cloud_source("DELETE", {"id": match.get("id")}).get("ok"):
             cloud_note = " (could not free the plan slot in the cloud)"
+    if _is_drone_name(name):  # forget that drone's phone link and pairing code
+        _slots_cache["at"] = 0.0
+        link = drone_links.get(name)
+        if link and link["conn"] is not None:
+            with link["lock"]:
+                _drone_drop(link["conn"], "drone removed", name)
+        drone_links.pop(name, None)
+        try:
+            os.remove(_token_file(name))
+        except OSError:
+            pass
     restarted, msg = _restart_frigate()
     return jsonify({"ok": True, "name": name, "frigate_restarted": restarted,
                     "message": f"{name} removed{cloud_note}."})
