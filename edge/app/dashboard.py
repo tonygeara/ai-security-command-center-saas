@@ -5194,7 +5194,10 @@ def _distance_m(lat1, lon1, lat2, lon2):
 def drone_control_allowed():
     if onprem_mode():
         return "drone_control" in set((offline_license.get("payload") or {}).get("features") or [])
-    return cloud_feature_enabled("drone_live")
+    with cloud_lock:
+        explicit = "drone_control" in (cloud_state.get("features") or {})
+    # Set per client in the admin portal; accounts never given that setting keep the drone-live rule.
+    return cloud_feature_enabled("drone_control" if explicit else "drone_live")
 
 
 def _token_file(slot):

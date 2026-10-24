@@ -76,11 +76,13 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         const {error} = f.id ? await sb.from("client_licenses").update(row).eq("id", f.id) : await sb.from("client_licenses").insert(row);
         if(error) throw error;
         // The Windows app enforces these through the client's portal entitlements.
-        for(const [feature, enabled, limit] of [["camera_ai", true, cameras], ["drone_live", drones > 0, drones]] as const){
-          const {error: e} = await sb.rpc("set_feature_override", {target_org: f.organization_id, target_feature: feature, target_enabled: enabled, target_limit: limit});
+        for(const [feature] of FEATURES){
+          const on = f.features.includes(feature) && (!feature.startsWith("drone") || drones > 0);
+          const limit = feature === "camera_ai" ? cameras : feature === "drone_live" ? drones : null;
+          const {error: e} = await sb.rpc("set_feature_override", {target_org: f.organization_id, target_feature: feature, target_enabled: feature === "camera_ai" || on, target_limit: limit});
           if(e) throw e;
         }
-        setMsg(`Saved. ${org?.name ?? "Client"} is now limited to ${cameras} camera(s) and ${drones} drone(s).`);
+        setMsg(`Saved. ${org?.name ?? "Client"}: ${cameras} camera(s), ${drones} drone(s), ${f.features.length} feature(s).`);
       }
       setForm(null); router.refresh();
       if(open?.edit || open?.renew || open?.org) router.push(form.organization_id ? "/admin/clients/org-" + form.organization_id : form.id ? "/admin/clients/lic-" + form.id : "/admin/clients");
@@ -136,9 +138,9 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         {F("expires_on", form.edition === "onprem" ? "Expires *" : "Contract ends", {type: "date", disabled: lockedFile})}
         {form.edition === "onprem" && F("plan", "Plan label", {disabled: lockedFile})}
       </div>
-      <div className="licFeatures">{FEATURES.map(([k, t]) => <label key={k} className="radio"><input type="checkbox" disabled={!!lockedFile || form.edition === "saas"}
+      <div className="licFeatures">{FEATURES.map(([k, t]) => <label key={k} className="radio"><input type="checkbox" disabled={!!lockedFile}
         checked={form.features.includes(k)} onChange={e => set("features", e.target.checked ? [...form.features, k] : form.features.filter((x: string) => x !== k))}/> {t}</label>)}</div>
-      {form.edition === "saas" && <p className="muted">Online clients get their features from their plan (set in the Operations Console). Cameras and drones above are applied as their limits.</p>}
+      {form.edition === "saas" && <p className="muted">Applied to the client's online account within a minute: the ticked features and the camera/drone limits replace what their plan includes.</p>}
       {lockedFile && <p className="muted">This licence file is signed and cannot be changed. Use <b>Renew</b> to issue a new file with different limits or a new expiry date.</p>}
       <h3>Price & payment</h3>
       <div className="licGrid">{F("price", "Price", {type: "number", min: 0, step: "0.01"})}{F("currency", "Currency", {maxLength: 3})}
