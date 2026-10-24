@@ -5475,6 +5475,15 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div class="actions" style="margin-top:12px"><input id="rtName" placeholder="Route name" style="flex:1;min-width:120px"><button class="hud-btn" onclick="saveRoute()">Save</button><button class="hud-btn danger" onclick="deleteRoute()">Delete</button></div>
 <div class="actions" style="margin-top:8px"><button class="hud-btn primary" onclick="flyRoute()">Fly route</button><button class="hud-btn danger" onclick="stopRoute()">Stop route</button></div>
 <div id="routeMsg" class="hud-msg"></div>
+<div style="margin-top:16px;border-top:1px solid #123447;padding-top:12px"><b style="color:#5bd9ff;font-size:11px;letter-spacing:1.5px">🗓 SCHEDULED PATROLS</b>
+<div class="muted" style="margin-top:6px">Runs a saved route on chosen days. <b>Ask first</b> sends you a Telegram Start/Skip message; <b>auto-start</b> flies after the safety checks. The drone and controller must be on and connected at patrol time, and a pilot must be able to take over.</div>
+<div id="schedList" style="margin-top:8px"></div>
+<div class="actions" style="margin-top:8px;align-items:center"><select id="scRoute" style="flex:1;min-width:120px"></select><input id="scTime" type="time" value="02:00" style="width:110px">
+<span id="scDays" style="display:flex;gap:4px;flex-wrap:wrap"></span></div>
+<div class="actions" style="margin-top:8px;align-items:center"><label style="margin:0;display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="scAuto"> Auto-start (no confirmation)</label>
+<button class="hud-btn primary" onclick="addSched()">Add schedule</button></div>
+<div id="schedMsg" class="hud-msg"></div></div>
+
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🚨 Drone response &amp; Telegram</div><div class="live" id="respState"></div></div>
 <div class="panel-body">
@@ -5586,6 +5595,21 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
     if(goal){tLine=tLine||L.polyline([],{color:'#ff5d6c',weight:2,dashArray:'6 6'}).addTo(map);tLine.setLatLngs([[t.lat,t.lon],goal])}
     else if(tLine){tLine.setLatLngs([])}}
   $('events').innerHTML=(st.events||[]).slice().reverse().map(e=>`<div>${new Date(e.at*1000).toLocaleTimeString()} · ${esc(e.msg)}</div>`).join('')}
+const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];let scheds=[];
+function scmsg(t,ok){const e=$('schedMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
+function renderScheds(){const names=Object.keys(routes);$('scRoute').innerHTML=names.length?names.map(n=>`<option>${esc(n)}</option>`).join(''):'<option value="">Save a route first</option>';
+  if(!$('scDays').children.length)$('scDays').innerHTML=DAYS.map((d,i)=>`<label style="margin:0;display:flex;gap:3px;align-items:center;text-transform:none;letter-spacing:0;font-size:12px"><input type="checkbox" data-day="${i}" checked>${d}</label>`).join('');
+  $('schedList').innerHTML=scheds.map((s,i)=>`<div class="hud-row"><div><b>${esc(s.route)}</b> at ${esc(s.time)}<div class="muted">${s.days.length===7?'Every day':s.days.map(d=>DAYS.at(d)).join(', ')} · ${s.auto_start?'auto-start':'asks first on Telegram'}${s.enabled?'':' · paused'}</div></div>
+    <div class="actions"><button class="hud-btn" onclick="toggleSched(${i})">${s.enabled?'Pause':'Resume'}</button><button class="hud-btn danger" onclick="delSched(${i})">Delete</button></div></div>`).join('')||'<p class="muted">No scheduled patrols.</p>'}
+async function saveScheds(note){const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({patrol_schedules:scheds})}).then(r=>r.json());
+  if(d.ok){scheds=d.settings.patrol_schedules;scmsg(note,true)}else scmsg(d.error,false);renderScheds()}
+function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySelectorAll('input:checked')].map(x=>+x.dataset.day);
+  if(!route){scmsg('Save a route first.',false);return}if(!days.length){scmsg('Choose at least one day.',false);return}
+  const auto=$('scAuto').checked;if(auto&&!confirm('Auto-start flies the drone with no confirmation at '+$('scTime').value+'. Only use it when the drone and controller are on, the area is clear, and a pilot can take over. Continue?'))return;
+  scheds=[...scheds,{route,time:$('scTime').value,days,enabled:true,auto_start:auto}];saveScheds('Schedule added.')}
+function toggleSched(i){scheds=scheds.map((s,j)=>j===i?{...s,enabled:!s.enabled}:s);saveScheds('Updated.')}
+function delSched(i){if(!confirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
+async function loadScheds(){try{const d=await fetch('/api/response/settings').then(r=>r.json());scheds=d.settings.patrol_schedules||[];renderScheds()}catch(e){}}
 let route=[],drawing=false,routes={},rLine=null,rMarks=[],rMax=500;
 function rtmsg(t,ok){const e=$('routeMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function toggleDraw(){drawing=!drawing;$('drawBtn').textContent=drawing?'Done drawing':'Draw route';$('drawBtn').classList.toggle('primary',drawing);if(drawing)rtmsg('Click the map to add stops.')}
@@ -5606,7 +5630,7 @@ function drawRoute(){routeInfo();if(!map||typeof L==='undefined')return;rMarks.f
     html:`<div style="width:22px;height:22px;border-radius:50%;background:#ffd23f;color:#111;font:bold 12px Arial;display:flex;align-items:center;justify-content:center;box-shadow:0 0 6px #000">${i+1}</div>`})}).addTo(map)))}
 async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||500;$('routeMax').textContent=rMax;
   const sel=$('routeSel'),cur=sel.value;sel.innerHTML='<option value="">Saved routes…</option>'+Object.keys(routes).map(n=>`<option>${esc(n)}</option>`).join('');sel.value=cur;
-  const r=d.run||{};$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
+  if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();const r=d.run||{};$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
 function loadRoute(n){const r=routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtName').value=n;drawRoute();
   if(map&&route.length)map.fitBounds(route.map(p=>[p.lat,p.lon]),{padding:[30,30]})}
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value}}
@@ -5650,7 +5674,7 @@ async function resetPair(){if(!confirm('Make a new pairing code? The phone will 
 function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
   const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
   if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
-$('speedVal').textContent='30%';loadPair();poll();loadResp();loadRoutes();setInterval(poll,500);
+$('speedVal').textContent='30%';loadPair();poll();loadResp();loadRoutes().then(loadScheds);setInterval(poll,500);
 </script>""", active="drone")
 _body_end = DRONE_CONTROL_PAGE.rfind("</body>")
 DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_CONTROL_PAGE[_body_end:]
@@ -5664,7 +5688,7 @@ DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_C
 SIGHTINGS_FILE = os.path.join(BASE_FOLDER, "sightings.jsonl")
 RESPONSE_SETTINGS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "response_settings.json")
 RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "hover_seconds": 60, "auto_return": True,
-                     "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00"}
+                     "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": []}
 sightings_lock = threading.Lock()
 _sighting_last = {}
 
@@ -5756,6 +5780,8 @@ def save_response_settings(data):
             v = max(lo, min(hi, float(v)))
         elif k in ("auto_return", "briefing_enabled"):
             v = bool(v)
+        elif k == "patrol_schedules":
+            v = _clean_schedules(v)
         elif k == "briefing_time":
             v = str(v) if re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(v)) else RESPONSE_DEFAULTS["briefing_time"]
         cfg[k] = v
@@ -6045,7 +6071,7 @@ HELP_TEXT = ("🤖 I can help with:\n"
              "/status – cameras, drone and today's numbers\n/snapshot [camera] – live picture\n"
              "/today · /yesterday · /night – who came\n/briefing – the full daily report\n"
              "/drone – drone status · /send <camera> – send the drone · /home – bring it back\n"
-             "/routes – saved routes · /fly <route> – fly a route\n"
+             "/routes – saved routes · /fly <route> – fly a route · /patrols – scheduled patrols\n"
              "/mute [minutes] · /unmute – pause detection alerts\n\n"
              "Or just ask: “who came today?”, “unknown last night?”, “Tony”, or a plate like ABC123.")
 
@@ -6085,6 +6111,8 @@ def _handle_command(text):
         routes = load_routes()
         send_telegram("🗺️ Saved routes:\n" + "\n".join(f"• {n}: {len(r['points'])} stops, {int(r['alt'])} m" for n, r in routes.items())
                       + "\n\nFly one with /fly <name>" if routes else "No saved routes yet (draw one on the Drone page).")
+    elif cmd == "/patrols":
+        send_telegram(patrols_text())
     elif cmd == "/fly":
         routes = load_routes()
         if arg not in routes:
@@ -6121,6 +6149,15 @@ def _handle_callback(data):
         cam = data.split(":", 1)[1]
         photo = _camera_snapshot(cam)
         send_telegram(f"📷 {cam} · {time.strftime('%H:%M:%S')}" if photo else f"Could not get a picture from {cam}.", photo)
+    elif data.startswith("patrolgo:"):
+        sid = data.split(":", 1)[1]
+        if patrol_state["pending"].pop(sid, None) is None:
+            return send_telegram("That patrol request has expired.")
+        r = start_scheduled_patrol(sid, by="schedule (confirmed on Telegram)")
+        send_telegram(("🗺️ " + r["message"]) if r["ok"] else f"⚠️ Patrol not started: {r['error']}")
+    elif data.startswith("patrolskip:"):
+        patrol_state["pending"].pop(data.split(":", 1)[1], None)
+        send_telegram("⏭ Patrol skipped.")
     elif data.startswith("route:"):
         r = fly_route(data.split(":", 1)[1], by="Telegram")
         send_telegram(("🗺️ " + r["message"]) if r["ok"] else f"⚠️ {r['error']}")
@@ -6202,6 +6239,7 @@ def start_assistant():
     threading.Thread(target=telegram_assistant_worker, daemon=True).start()
     threading.Thread(target=_briefing_worker, daemon=True).start()
     threading.Thread(target=_drone_response_worker, daemon=True).start()
+    threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
 
 
 # ---------- multi-stop routes (draw on the map, fly stop by stop) ----------
@@ -6371,6 +6409,113 @@ def api_routes_stop():
     route_run["stop"] = True
     drone_command("hover", timeout=5.0)
     return jsonify({"ok": True})
+
+
+# ---------- scheduled patrols (a saved route on chosen days at a set time) ----------
+PATROL_CONFIRM_MINUTES = 15
+PATROL_MIN_SATELLITES = 8
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+patrol_state = {"fired": {}, "pending": {}}  # fired: schedule id -> date run; pending: id -> confirm deadline
+
+
+def _clean_schedules(items):
+    out = []
+    for s in items if isinstance(items, list) else []:
+        if not isinstance(s, dict) or not str(s.get("route") or "").strip():
+            continue
+        t = str(s.get("time") or "")
+        days = sorted({int(d) for d in (s.get("days") or []) if str(d).isdigit() and 0 <= int(d) <= 6})
+        if not re.match(r"^([01]\d|2[0-3]):[0-5]\d$", t) or not days:
+            continue
+        out.append({"id": re.sub(r"[^\w-]", "", str(s.get("id") or "")) or os.urandom(4).hex(), "route": str(s["route"])[:40],
+                    "time": t, "days": days, "enabled": bool(s.get("enabled", True)), "auto_start": bool(s.get("auto_start", False))})
+    return out[:20]
+
+
+def _patrol_preflight(route):
+    """Everything a scheduled patrol must pass before take-off ('' = clear to fly)."""
+    problem = _route_problem(_clean_route(route))
+    if problem:
+        return problem
+    tel = drone_link["telemetry"]
+    if tel.get("flying"):
+        return "The drone is already flying."
+    if (tel.get("gps_satellites") or 0) < PATROL_MIN_SATELLITES:
+        return f"Only {tel.get('gps_satellites') or 0} GPS satellites (need {PATROL_MIN_SATELLITES})."
+    return ""
+
+
+def _next_run(s, now=None):
+    now = now or time.time()
+    lt = time.localtime(now)
+    hh, mm = map(int, s["time"].split(":"))
+    for add in range(8):
+        day = time.localtime(now + add * 86400)
+        when = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hh, mm, 0, 0, 0, -1))
+        if day.tm_wday in s["days"] and when > now:
+            return when
+    return None
+
+
+def start_scheduled_patrol(sid, by):
+    s = next((x for x in load_response_settings()["patrol_schedules"] if x["id"] == sid), None)
+    if not s:
+        return {"ok": False, "error": "That patrol schedule no longer exists."}
+    route = load_routes().get(s["route"])
+    if not route:
+        return {"ok": False, "error": f"Route “{s['route']}” no longer exists."}
+    problem = _patrol_preflight(route)
+    if problem:
+        return {"ok": False, "error": problem}
+    return fly_route(s["route"], by=by)
+
+
+def _patrol_scheduler_worker():
+    while True:
+        time.sleep(20)
+        try:
+            now = time.time()
+            today, hhmm, wday = time.strftime("%Y-%m-%d"), time.strftime("%H:%M"), time.localtime(now).tm_wday
+            for sid, deadline in list(patrol_state["pending"].items()):
+                if now > deadline:
+                    patrol_state["pending"].pop(sid, None)
+                    send_telegram("⏭ Patrol skipped: no answer within %d minutes." % PATROL_CONFIRM_MINUTES)
+            for s in load_response_settings()["patrol_schedules"]:
+                if not s["enabled"] or wday not in s["days"] or s["time"] != hhmm or patrol_state["fired"].get(s["id"]) == today:
+                    continue
+                patrol_state["fired"][s["id"]] = today  # once per day, never flown late
+                route = load_routes().get(s["route"])
+                problem = _patrol_preflight(route) if route else f"Route “{s['route']}” no longer exists."
+                if problem:
+                    _drone_event(f"Scheduled patrol {s['route']} skipped: {problem}")
+                    send_telegram(f"⏭ Scheduled patrol “{s['route']}” skipped: {problem}")
+                    continue
+                tel = drone_link["telemetry"]
+                facts = f"Battery {tel.get('battery')}%, GPS {tel.get('gps_satellites')}, {len(route['points'])} stops."
+                if s["auto_start"]:
+                    r = fly_route(s["route"], by="schedule")
+                    if not r["ok"]:
+                        send_telegram(f"⚠️ Scheduled patrol “{s['route']}” could not start: {r['error']}")
+                else:
+                    patrol_state["pending"][s["id"]] = now + PATROL_CONFIRM_MINUTES * 60
+                    send_telegram(f"🗺️ Patrol “{s['route']}” is due now. {facts}\nStart it? (skipped if no answer in {PATROL_CONFIRM_MINUTES} min)",
+                                  buttons=[[{"text": "✅ Start patrol", "callback_data": f"patrolgo:{s['id']}"[:64]},
+                                            {"text": "⏭ Skip", "callback_data": f"patrolskip:{s['id']}"[:64]}]])
+        except Exception as e:
+            print("Patrol scheduler error:", e)
+
+
+def patrols_text():
+    items = load_response_settings()["patrol_schedules"]
+    if not items:
+        return "No scheduled patrols yet (Drone page → Route → Schedule)."
+    lines = ["🗓 Scheduled patrols:"]
+    for s in items:
+        nxt = _next_run(s)
+        days = "every day" if len(s["days"]) == 7 else ", ".join(DAY_NAMES[d] for d in s["days"])
+        lines.append(f"• {s['route']} at {s['time']}, {days} · {'auto-start' if s['auto_start'] else 'asks first'}"
+                     + ("" if s["enabled"] else " · paused") + (f" · next {time.strftime('%a %H:%M', time.localtime(nxt))}" if nxt and s["enabled"] else ""))
+    return "\n".join(lines)
 
 
 @app.route("/api/response/settings", methods=["GET", "POST"])
