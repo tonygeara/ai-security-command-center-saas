@@ -6111,21 +6111,10 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div><kbd>Space</kbd> stop &amp; hover</div><div>🎮 Gamepad works too</div></div>
 <div id="cmdMsg" class="hud-msg"></div>
 </div></section>
-<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Auto-fly to point</div><div class="live" id="autoState"></div></div>
+<section class="panel"><div class="panel-head"><div class="panel-title">🗺️ Auto-fly route</div><div class="live" id="routeState"></div></div>
 <div class="panel-body">
-<div class="muted">Click the map to choose the destination. The drone takes off if needed, climbs to the height, flies there and then does what you choose below. STOP, any flying key or the controller cancels it.</div>
-<div class="muted" style="margin-top:8px">Target: <code id="autoTarget">none — click the map</code></div>
-<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 10px">
-<div><label for="autoAlt">Height (m)</label><input id="autoAlt" type="number" min="5" max="120" value="30"></div>
-<div><label for="autoSpeed">Speed (m/s)</label><input id="autoSpeed" type="number" min="1" max="8" value="5"></div>
-<div><label for="autoArrive">On arrival</label><select id="autoArrive"><option value="hover">Hover there</option><option value="land">Land there</option><option value="home">Return home</option></select></div>
-</div>
-<div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="autoStart()">Start auto-fly</button><button class="hud-btn danger" onclick="cmd('goto_cancel')">Cancel</button></div>
-</div></section>
-<section class="panel"><div class="panel-head"><div class="panel-title">🗺️ Route</div><div class="live" id="routeState"></div></div>
-<div class="panel-body">
-<div class="muted">Draw stops on the map; the drone flies to each in order. Every stop must be within <span id="routeMax">500</span> m of home.</div>
-<div class="actions" style="margin-top:10px"><button class="hud-btn" id="drawBtn" onclick="toggleDraw()">Draw route</button><button class="hud-btn" onclick="undoPoint()">Undo</button><button class="hud-btn" onclick="clearRoute()">Clear</button>
+<div class="muted">Click the map to add stops; the drone takes off if needed and flies through them in order (one stop = fly to a point). Every stop must be within <span id="routeMax">500</span> m of home. STOP, any flying key or the controller cancels it.</div>
+<div class="actions" style="margin-top:10px"><button class="hud-btn" onclick="undoPoint()">Undo</button><button class="hud-btn" onclick="clearRoute()">Clear</button>
 <select id="routeSel" onchange="loadRoute(this.value)" style="flex:1;min-width:140px"><option value="">Saved routes…</option></select></div>
 <div id="routeInfo" class="muted" style="margin-top:8px">No stops yet.</div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0 10px">
@@ -6134,7 +6123,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div><label for="rtPause">Pause (s)</label><input id="rtPause" type="number" min="0" max="120" value="5" oninput="routeInfo()"></div>
 <div><label for="rtEnd">At the end</label><select id="rtEnd"><option value="home">Return home</option><option value="hover">Hover at last stop</option><option value="land">Land at last stop</option></select></div>
 </div>
-<label style="margin-top:10px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="rtLoop" onchange="routeInfo()"> Keep patrolling: repeat the route until stopped</label>
+<label style="margin-top:10px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="rtLoop" onchange="routeInfo()"> <b>Repeat the route again and again</b> until you press Stop route</label>
 <label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtRelay"> Relay: at
 <input id="rtSwap" type="number" min="20" max="50" value="20" style="width:64px">% battery the drone returns home and the next ready drone takes off and continues the patrol</label>
 <div class="muted" style="margin-top:4px">A continuous patrol always sends the drone home at that battery level; without relay the patrol then ends. Each drone needs its own phone and controller (or use virtual drones).</div>
@@ -6252,19 +6241,9 @@ document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
-  map.on('click',e=>locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):drawing?addPoint(e.latlng.lat,e.latlng.lng):setTarget(e.latlng.lat,e.latlng.lng))}
-let target=null,tMark=null,tLine=null;
-function setTarget(lat,lon){target={lat,lon};$('autoTarget').textContent=lat.toFixed(6)+', '+lon.toFixed(6);
-  tMark=tMark||L.marker([lat,lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,22],html:'<div style="color:#ff5d6c;font-size:22px;line-height:22px;text-shadow:0 0 6px #000">⬇</div>'})}).addTo(map);
-  tMark.setLatLng([lat,lon]);render()}
+  map.on('click',e=>locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):addPoint(e.latlng.lat,e.latlng.lng))}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
-function autoStart(){const t=st.telemetry||{};if(!target){msg('Click the map to choose where to fly.',false);return}
-  if(!t.lat){msg('The drone has no GPS position yet.',false);return}
-  const d=Math.round(distM(t.lat,t.lon,target.lat,target.lon)),alt=+$('autoAlt').value,spd=+$('autoSpeed').value,arr=$('autoArrive').value;
-  const what=arr==='land'?'land there':arr==='home'?'fly back home':'hover there';
-  const head=t.simulator?'SIMULATOR auto-fly. ':'⚠ REAL AUTO-FLY: the motors WILL start if the drone is on the ground. ';
-  cmd('goto',{lat:target.lat,lon:target.lon,alt:alt,speed:spd,arrive:arr},head+'Fly '+d+' m at '+alt+' m height and '+spd+' m/s, then '+what+'. Keep the drone in sight. Continue?')}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
 function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.telemetry_fresh;
   $('linkState').innerHTML=!st.allowed?'<i class="dot bad"></i>NOT LICENSED':on?(t.drone_connected?'<i class="dot good"></i>DRONE LINKED':'<i class="dot warn"></i>PHONE CONNECTED · DRONE OFF'):'<i class="dot bad"></i>PHONE NOT CONNECTED';
@@ -6280,10 +6259,7 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
     trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon])}}
     $('coords').textContent=t.lat.toFixed(6)+', '+t.lon.toFixed(6)}
   $('mapState').textContent=typeof L==='undefined'?'MAP NEEDS INTERNET':'';
-  const m=t.mission;$('autoState').textContent=m?('AUTO: '+m.state+(m.distance>=0?' · '+Math.round(m.distance)+' m left':'')):'';
-  if(map&&t.lat){const goal=m?[m.lat,m.lon]:(target?[target.lat,target.lon]:null);
-    if(goal){tLine=tLine||L.polyline([],{color:'#ff5d6c',weight:2,dashArray:'6 6'}).addTo(map);tLine.setLatLngs([[t.lat,t.lon],goal])}
-    else if(tLine){tLine.setLatLngs([])}}
+  const m=t.mission;if(m)$('flyState').textContent='AUTO-FLY · '+m.state+(m.distance>=0?' · '+Math.round(m.distance)+' m to stop':'');
   vcamUpdate(t);
   $('events').innerHTML=(st.events||[]).slice().reverse().map(e=>`<div>${new Date(e.at*1000).toLocaleTimeString()} · ${esc(e.msg)}</div>`).join('')}
 const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];let scheds=[];
@@ -6301,9 +6277,8 @@ function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySel
 function toggleSched(i){scheds=scheds.map((s,j)=>j===i?{...s,enabled:!s.enabled}:s);saveScheds('Updated.')}
 function delSched(i){if(!confirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
 async function loadScheds(){try{const d=await fetch('/api/response/settings').then(r=>r.json());scheds=d.settings.patrol_schedules||[];renderScheds()}catch(e){}}
-let route=[],drawing=false,routes={},rLine=null,rMarks=[],rMax=500;
+let route=[],routes={},rLine=null,rMarks=[],rMax=500;
 function rtmsg(t,ok){const e=$('routeMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
-function toggleDraw(){drawing=!drawing;$('drawBtn').textContent=drawing?'Done drawing':'Draw route';$('drawBtn').classList.toggle('primary',drawing);if(drawing)rtmsg('Click the map to add stops.')}
 function addPoint(lat,lon){if(route.length>=25){rtmsg('25 stops maximum.',false);return}route.push({lat,lon});drawRoute()}
 function undoPoint(){route.pop();drawRoute()}
 function clearRoute(){route=[];drawRoute()}
@@ -6329,9 +6304,10 @@ function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed
 async function saveRoute(){if(!route.length){rtmsg('Draw at least one stop.',false);return}const d=await fetch('/api/routes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value})}).then(r=>r.json());
   rtmsg(d.ok?'Route “'+d.name+'” saved.':d.error,d.ok);await loadRoutes();if(d.ok)$('routeSel').value=d.name}
 async function deleteRoute(){const n=$('routeSel').value;if(!n||!confirm('Delete route “'+n+'”?'))return;await fetch('/api/routes',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})});rtmsg('Deleted.',true);loadRoutes()}
-async function flyRoute(){if(!route.length){rtmsg('Draw or choose a route first.',false);return}const sim=(st.telemetry||{}).simulator;
-  if(!confirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Fly '+route.length+' stops at '+$('rtAlt').value+' m? Keep the drone in sight.'))return;
-  if(drawing)toggleDraw();const d=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value||$('routeSel').value||'route'})}).then(r=>r.json());
+async function flyRoute(){if(!route.length){rtmsg('Click the map to add stops, or choose a saved route.',false);return}const sim=(st.telemetry||{}).simulator;
+  if(!confirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Fly '+route.length+' stop'+(route.length>1?'s':'')+' at '+$('rtAlt').value+' m'
+    +($('rtLoop').checked?', repeating the route until you press Stop route':'')+'? Keep the drone in sight.'))return;
+  const d=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value||$('routeSel').value||'route'})}).then(r=>r.json());
   rtmsg(d.message||d.error,d.ok);loadRoutes()}
 async function stopRoute(){await fetch('/api/routes/stop',{method:'POST'});rtmsg('Route stopped, drone hovering.',true);loadRoutes()}
 setInterval(loadRoutes,3000);
