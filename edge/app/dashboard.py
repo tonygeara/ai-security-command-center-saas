@@ -4064,6 +4064,7 @@ HUD_NAV_ITEMS = [
     ("people", "/#face-library", "◎", "People"),
     ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
     ("drone", "/drone-control", "✈", "Drone"),
+    ("virtual", "/virtual-drones", "◇", "Virtual drones"),
     ("devices", "/setup/add", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
     ("license", "/license", "⚿", "License"),
@@ -5166,12 +5167,14 @@ _slots_cache = {"at": 0.0, "slots": [DRONE_CAMERA_NAME]}
 def drone_slots():
     """Drone slots in order (first drone first); always at least the first one."""
     if time.time() - _slots_cache["at"] > 5:  # sticks call this 10x per second; the config rarely changes
-        names = {n for n in _frigate_camera_names() if _is_drone_name(n)} | {DRONE_CAMERA_NAME}
-        _slots_cache.update(at=time.time(), slots=sorted(names, key=lambda n: (n != DRONE_CAMERA_NAME, len(n), n)))
+        names = {n for n in _frigate_camera_names() if _is_drone_name(n)} | {DRONE_CAMERA_NAME} | set(virtual_drones)
+        _slots_cache.update(at=time.time(), slots=sorted(names, key=lambda n: (is_virtual(n), n != DRONE_CAMERA_NAME, len(n), n)))
     return list(_slots_cache["slots"])
 
 
 def drone_label(slot):
+    if str(slot).startswith("drone-v"):  # virtual drones (simulator)
+        return "Virtual " + slot[len("drone-v"):]
     return "Drone 1" if slot == DRONE_CAMERA_NAME else "Drone " + (slot[len(DRONE_CAMERA_NAME):] or "?")
 
 
@@ -5401,7 +5404,8 @@ def api_drone_links():
         t = link["telemetry"] if fresh else {}
         out.append({"drone": s, "label": drone_label(s), "phone_connected": link["conn"] is not None,
                     "drone_connected": bool(t.get("drone_connected")), "battery": t.get("battery"), "flying": t.get("flying"),
-                    "lat": t.get("lat"), "lon": t.get("lon"), "heading": t.get("heading"), "over_limit": s in over})
+                    "lat": t.get("lat"), "lon": t.get("lon"), "heading": t.get("heading"), "over_limit": s in over,
+                    "virtual": is_virtual(s)})
     allowed = api_cloud_can_add_source("drone").get_json()
     busy = {drone_response.get("drone"): "response"} if drone_response["active"] else {}
     if route_run["active"]:
@@ -5512,12 +5516,521 @@ def api_drone_add():
     return r
 
 
+# ---------- virtual drones (simulated Drone Link phones, for testing, training and demos) ----------
+# Each one connects to the drone link port with its own pairing code, exactly like the phone app,
+# so the Drone page, routes, patrols, responses and Telegram treat it as a real drone.
+VIRTUAL_PREFIX = "drone-v"
+VIRTUAL_MAX = 5
+VIRTUAL_FILE = os.path.join(BASE_FOLDER, "virtual_drones.json")
+VIRTUAL_DEFAULT_HOME = (33.8938, 35.5018)
+virtual_drones = {}  # slot -> VirtualDrone
+virtual_lock = threading.Lock()
+
+
+def is_virtual(slot):
+    return str(slot or "").startswith(VIRTUAL_PREFIX)
+
+
+def _load_virtual_config():
+    try:
+        with open(VIRTUAL_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_virtual_config():
+    with virtual_lock:
+        data = {"demo_auto": bool(_virtual_cfg.get("demo_auto")),
+                "drones": [{"slot": v.slot, "home_lat": v.home[0], "home_lon": v.home[1]} for v in virtual_drones.values()]}
+    tmp = VIRTUAL_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, VIRTUAL_FILE)
+
+
+_virtual_cfg = _load_virtual_config()
+
+
+def _wrap180(a):
+    return (a + 180.0) % 360.0 - 180.0
+
+
+def _bearing_deg(lat1, lon1, lat2, lon2):
+    p1, p2, dl = math.radians(lat1), math.radians(lat2), math.radians(lon2 - lon1)
+    return math.degrees(math.atan2(math.sin(dl) * math.cos(p2), math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)))
+
+
+class VirtualDrone:
+    """A simulated DJI Mini-class drone plus its phone: 10 Hz flight model, Drone Link protocol."""
+    RTH_ALT = 30.0
+
+    def __init__(self, slot, home):
+        self.slot, self.home = slot, (float(home[0]), float(home[1]))
+        self.lat, self.lon, self.alt, self.heading = self.home[0], self.home[1], 0.0, 0.0
+        self.v = [0.0, 0.0, 0.0]  # forward, right, up (m/s, body frame)
+        self.battery, self.powered, self.motors, self.flying = 100.0, True, False, False
+        self.mode, self.rth_phase = "GPS_NORMAL", ""
+        self.control_pc, self.speed_level, self.stick, self.stick_at = False, 0.3, (0.0, 0.0, 0.0, 0.0), 0.0
+        self.mission, self.gimbal, self.sats, self.recording = None, 0.0, 17, False
+        self.link_down_until, self.stop, self.sock, self.lock = 0.0, False, None, threading.Lock()
+
+    # ----- protocol (same messages as the Android app) -----
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _send(self, msg):
+        s = self.sock
+        if s is None:
+            return
+        try:
+            s.sendall((json.dumps(msg, separators=(",", ":")) + "\n").encode())
+        except OSError:
+            self._close()
+
+    def _close(self):
+        s, self.sock = self.sock, None
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
+
+    def event(self, text):
+        self._send({"t": "event", "msg": f"[virtual] {text}"})
+
+    def _run(self):
+        import hashlib, hmac
+        threading.Thread(target=self._physics, daemon=True).start()
+        while not self.stop:
+            if time.time() < self.link_down_until:
+                time.sleep(0.5)
+                continue
+            try:
+                s = socket.create_connection(("127.0.0.1", DRONE_LINK_PORT), timeout=5)
+                reader = s.makefile("r", encoding="utf-8", newline="\n")
+                nonce = json.loads(reader.readline() or "{}").get("nonce", "")
+                mac = hmac.new(drone_link_token(slot=self.slot).encode(), nonce.encode(), hashlib.sha256).hexdigest()
+                s.sendall((json.dumps({"t": "hello", "mac": mac, "device": "Virtual drone (simulator)", "app": "virtual"}) + "\n").encode())
+                s.settimeout(None)
+                self.sock = s
+                for line in reader:
+                    if self.stop or self.sock is None or time.time() < self.link_down_until:
+                        break
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if msg.get("t") == "denied":
+                        print(f"Virtual drone {self.slot}: {msg.get('error')}")
+                        time.sleep(30)
+                        break
+                    if msg.get("t") == "stick":
+                        self._set_sticks(msg)
+                    elif msg.get("t") == "cmd":
+                        with self.lock:
+                            ok, err = self._command(str(msg.get("cmd")), msg.get("args") or {})
+                        self._send({"t": "ack", "id": msg.get("id"), "ok": ok, "error": err})
+            except (OSError, ValueError):
+                pass
+            self._close()
+            time.sleep(2)
+
+    def _set_sticks(self, msg):
+        vals = tuple(max(-1.0, min(1.0, float(msg.get(k) or 0))) for k in "xyzr")
+        if self.mission and any(abs(v) > 0.05 for v in vals):
+            self._abort("manual control")
+        if self.control_pc:
+            self.stick, self.stick_at = vals, time.time()
+
+    def _abort(self, why):
+        if self.mission:
+            self.mission = None
+            self.event(f"Auto-fly stopped: {why}")
+
+    def _command(self, cmd, args):
+        if not self.powered:
+            return False, "The drone is switched off."
+        if cmd == "takeoff":
+            if self.flying:
+                return False, "Already flying."
+            if self.battery < 15:
+                return False, "Battery too low to take off."
+            self.motors, self.flying, self.mode = True, True, "AUTO_TAKE_OFF"
+            self.event("Take-off")
+        elif cmd == "land":
+            self._abort("land pressed")
+            if not self.flying:
+                return False, "Not flying."
+            self.mode, self.rth_phase = "AUTO_LANDING", ""
+        elif cmd == "cancel_land":
+            if self.mode == "AUTO_LANDING":
+                self.mode = "GPS_NORMAL"
+        elif cmd == "confirm_land":
+            pass
+        elif cmd == "go_home":
+            self._abort("return home pressed")
+            if not self.flying:
+                return False, "Not flying."
+            self.stick, self.mode, self.rth_phase = (0.0, 0.0, 0.0, 0.0), "GO_HOME", "climb"
+        elif cmd == "cancel_go_home":
+            if self.mode == "GO_HOME":
+                self.mode, self.rth_phase = "GPS_NORMAL", ""
+        elif cmd == "hover":
+            self._abort("STOP pressed")
+            self.stick = (0.0, 0.0, 0.0, 0.0)
+        elif cmd == "goto":
+            try:
+                lat, lon = float(args["lat"]), float(args["lon"])
+            except (KeyError, TypeError, ValueError):
+                return False, "No target."
+            if not self.flying and self.battery < 15:
+                return False, "Battery too low to take off."
+            self.mission = {"state": "ENABLING" if self.flying else "TAKING_OFF", "lat": lat, "lon": lon,
+                            "alt": max(5.0, min(120.0, float(args.get("alt") or 30))), "speed": max(1.0, min(8.0, float(args.get("speed") or 5))),
+                            "arrive": args.get("arrive") if args.get("arrive") in ("hover", "land", "home") else "hover", "distance": -1, "arrived_at": 0.0}
+            if not self.flying:
+                self.motors, self.flying, self.mode = True, True, "AUTO_TAKE_OFF"
+            elif self.mode in ("GO_HOME", "AUTO_LANDING"):
+                self.mode, self.rth_phase = "GPS_NORMAL", ""
+            self.event("Auto-fly started")
+        elif cmd == "goto_cancel":
+            self._abort("cancelled")
+        elif cmd == "control_on":
+            self.control_pc, self.speed_level, self.stick_at = True, max(0.1, min(0.5, float(args.get("speed") or 0.3))), time.time()
+        elif cmd == "control_off":
+            self.control_pc, self.stick = False, (0.0, 0.0, 0.0, 0.0)
+            self._abort("control handed back")
+        elif cmd == "gimbal":
+            self.gimbal = max(-90.0, min(30.0, float(args.get("pitch") or 0)))
+        elif cmd == "photo":
+            self.event("Photo taken (virtual)")
+        elif cmd in ("record_start", "record_stop"):
+            self.recording = cmd == "record_start"
+            self.event("Recording started" if self.recording else "Recording stopped")
+        elif cmd in ("sim_on", "sim_off", "stream_on", "stream_off"):
+            pass  # always simulated; the "video" is drawn on the Drone page
+        else:
+            return False, "Unknown command."
+        return True, ""
+
+    # ----- flight model -----
+    def distance_home(self):
+        return _distance_m(self.home[0], self.home[1], self.lat, self.lon)
+
+    def _fly_towards(self, lat, lon, alt, speed):
+        """Return (forward, up, yaw_rate) like the phone's auto-fly controller."""
+        dist = _distance_m(self.lat, self.lon, lat, lon)
+        hdg_err = _wrap180(_bearing_deg(self.lat, self.lon, lat, lon) - self.heading)
+        up = max(-2.0, min(2.0, 0.8 * (alt - self.alt)))
+        yaw = max(-60.0, min(60.0, 2.0 * hdg_err)) if dist > 3 else 0.0
+        fwd = min(speed, max(0.5, 0.4 * dist)) * math.cos(math.radians(hdg_err)) if abs(hdg_err) < 30 and dist >= 1.0 else 0.0
+        return fwd, up, yaw, dist
+
+    def _targets(self):
+        fwd = right = up = yaw = 0.0
+        m = self.mission
+        if self.mode == "AUTO_TAKE_OFF":
+            up = 1.5
+            if self.alt >= 1.2:
+                self.mode = "GPS_NORMAL"
+        elif self.mode == "AUTO_LANDING":
+            up = -1.2 if self.alt > 1 else -0.5
+        elif self.mode == "GO_HOME":
+            if self.rth_phase == "climb":
+                up = max(-2.0, min(3.0, (self.RTH_ALT - self.alt))) if self.alt < self.RTH_ALT - 0.5 else 0.0
+                if self.alt >= self.RTH_ALT - 0.5 or self.distance_home() < 20:
+                    self.rth_phase = "cruise"
+            else:
+                fwd, up, yaw, dist = self._fly_towards(self.home[0], self.home[1], max(self.alt, 0), 8.0)
+                up = 0.0
+                if dist < 1.5:
+                    self.mode, self.rth_phase = "AUTO_LANDING", ""
+        elif m:
+            if m["state"] == "TAKING_OFF" and self.mode != "AUTO_TAKE_OFF":
+                m["state"] = "ENABLING"
+            if m["state"] == "ENABLING":
+                self.control_pc, m["state"] = True, "CLIMB"
+            if m["state"] in ("CLIMB", "CRUISE"):
+                fwd, up, yaw, dist = self._fly_towards(m["lat"], m["lon"], m["alt"], m["speed"])
+                m["distance"] = dist
+                if m["state"] == "CLIMB":
+                    fwd = 0.0 if abs(m["alt"] - self.alt) >= 2.0 else fwd
+                    if abs(m["alt"] - self.alt) < 2.0:
+                        m["state"] = "CRUISE"
+                if m["state"] == "CRUISE" and dist < 2.0:
+                    m["state"], m["arrived_at"] = "ARRIVED", time.time()
+                    self.event("Auto-fly: arrived")
+            if m["state"] == "ARRIVED":
+                fwd = up = yaw = 0.0
+                if time.time() - m["arrived_at"] >= 2.0:
+                    self.mission = None
+                    if m["arrive"] == "land":
+                        self.mode = "AUTO_LANDING"
+                    elif m["arrive"] == "home":
+                        self.mode, self.rth_phase = "GO_HOME", "climb"
+                    else:
+                        self.event("Auto-fly: hovering over the target")
+        elif self.control_pc and self.flying:
+            if time.time() - self.stick_at > 0.5:
+                self.stick = (0.0, 0.0, 0.0, 0.0)
+            x, y, z, r = self.stick
+            if self.alt >= DRONE_LIMITS["max_altitude_m"] and z > 0:
+                z = 0.0
+            if self.distance_home() >= DRONE_LIMITS["max_distance_m"] and (x or y):
+                h = math.radians(self.heading)
+                north, east = y * math.cos(h) - x * math.sin(h), y * math.sin(h) + x * math.cos(h)
+                away_n, away_e = self.lat - self.home[0], (self.lon - self.home[1]) * math.cos(math.radians(self.lat))
+                if north * away_n + east * away_e > 0:
+                    x = y = 0.0
+            fwd, right, up, yaw = y * self.speed_level * 10, x * self.speed_level * 10, z * min(3.0, self.speed_level * 6), r * 120 * self.speed_level
+        return fwd, right, up, yaw
+
+    def _physics(self):
+        dt, last_tel = 0.1, 0.0
+        while not self.stop:
+            time.sleep(dt)
+            with self.lock:
+                if self.flying:
+                    tf, tr, tu, yaw = self._targets()
+                    for i, (t, a) in enumerate(((tf, 4.0), (tr, 4.0), (tu, 3.0))):
+                        self.v[i] += max(-a * dt, min(a * dt, t - self.v[i]))
+                    self.heading = _wrap180(self.heading + yaw * dt)
+                    h = math.radians(self.heading)
+                    north = self.v[0] * math.cos(h) - self.v[1] * math.sin(h)
+                    east = self.v[0] * math.sin(h) + self.v[1] * math.cos(h)
+                    self.lat += north * dt / 111320.0
+                    self.lon += east * dt / (111320.0 * math.cos(math.radians(self.lat)))
+                    self.alt = max(0.0, self.alt + self.v[2] * dt)
+                    self.battery = max(0.0, self.battery - dt * 100.0 / (24 * 60))  # ~24 min flight
+                    if self.mode == "AUTO_LANDING" and self.alt <= 0.05:
+                        self.flying = self.motors = False
+                        self.mode, self.v, self.alt = "GPS_NORMAL", [0.0, 0.0, 0.0], 0.0
+                        self.event("Landed, motors stopped")
+                    elif self.battery <= 5 and self.mode != "AUTO_LANDING":
+                        self._abort("critical battery")
+                        self.mode = "AUTO_LANDING"
+                        self.event("Critical battery: landing now")
+                    elif self.battery <= 15 and self.mode not in ("GO_HOME", "AUTO_LANDING"):
+                        self._abort("low battery")
+                        self.mode, self.rth_phase = "GO_HOME", "climb"
+                        self.event("Low battery: returning home")
+            if time.time() - last_tel >= 0.2:
+                last_tel = time.time()
+                self._send(self.telemetry())
+
+    def telemetry(self):
+        speed = math.hypot(self.v[0], self.v[1]) if self.flying else 0.0
+        t = {"t": "tel", "virtual": True, "sdk_registered": True, "drone_connected": self.powered,
+             "control": "PC" if self.control_pc else "PILOT", "simulator": True, "streaming": False}
+        if not self.powered:
+            return t
+        m = self.mission
+        if m:
+            t["mission"] = {k: m[k] for k in ("state", "lat", "lon", "alt", "speed", "arrive", "distance")}
+        t.update({"lat": round(self.lat, 7), "lon": round(self.lon, 7), "altitude": round(self.alt, 2), "heading": round(self.heading, 1),
+                  "speed": round(speed, 2), "vertical_speed": round(self.v[2] if self.flying else 0.0, 2), "battery": int(round(self.battery)),
+                  "gps_satellites": self.sats, "flying": self.flying, "motors_on": self.motors, "flight_mode": self.mode,
+                  "landing_confirm_needed": False, "signal": 100, "gimbal_pitch": self.gimbal, "recording": self.recording,
+                  "home_lat": self.home[0], "home_lon": self.home[1], "distance_home": round(self.distance_home(), 1)})
+        return t
+
+    def summary(self):
+        link = get_link(self.slot)
+        return {"drone": self.slot, "label": drone_label(self.slot), "powered": self.powered, "linked": link["conn"] is not None,
+                "link_down": time.time() < self.link_down_until, "flying": self.flying, "mode": self.mode,
+                "battery": int(round(self.battery)), "altitude": round(self.alt, 1), "lat": self.lat, "lon": self.lon,
+                "heading": self.heading, "home_lat": self.home[0], "home_lon": self.home[1], "gps_satellites": self.sats,
+                "mission": (self.mission or {}).get("state", "")}
+
+
+def start_virtual_drones():
+    for d in _virtual_cfg.get("drones") or []:
+        slot = str(d.get("slot") or "")
+        if is_virtual(slot) and slot not in virtual_drones:
+            v = VirtualDrone(slot, (d.get("home_lat") or VIRTUAL_DEFAULT_HOME[0], d.get("home_lon") or VIRTUAL_DEFAULT_HOME[1]))
+            virtual_drones[slot] = v
+            v.start()
+    _slots_cache["at"] = 0.0
+
+
+@app.route("/api/virtual-drones", methods=["GET", "POST"])
+def api_virtual_drones():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "demo_auto" in data:
+            _virtual_cfg["demo_auto"] = bool(data["demo_auto"])
+            _save_virtual_config()
+            return jsonify({"ok": True, "demo_auto": _virtual_cfg["demo_auto"]})
+        if len(virtual_drones) >= VIRTUAL_MAX:
+            return jsonify({"ok": False, "error": f"{VIRTUAL_MAX} virtual drones maximum."}), 409
+        try:
+            home = (float(data["lat"]), float(data["lon"]))
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Click the map to choose where the virtual drone starts."}), 400
+        n = next(i for i in range(1, VIRTUAL_MAX + 2) if f"{VIRTUAL_PREFIX}{i}" not in virtual_drones)
+        slot = f"{VIRTUAL_PREFIX}{n}"
+        drone_link_token(reset=True, slot=slot)
+        v = VirtualDrone(slot, home)
+        with virtual_lock:
+            virtual_drones[slot] = v
+        _slots_cache["at"] = 0.0
+        _save_virtual_config()
+        v.start()
+        return jsonify({"ok": True, "drone": slot, "label": drone_label(slot)})
+    return jsonify({"ok": True, "allowed": drone_control_allowed(), "max": VIRTUAL_MAX, "demo_auto": bool(_virtual_cfg.get("demo_auto")),
+                    "drones": [v.summary() for v in list(virtual_drones.values())]})
+
+
+@app.route("/api/virtual-drones/<slot>", methods=["POST", "DELETE"])
+def api_virtual_drone(slot):
+    v = virtual_drones.get(slot)
+    if v is None:
+        return jsonify({"ok": False, "error": "Unknown virtual drone."}), 404
+    if request.method == "DELETE":
+        v.stop = True
+        v._close()
+        with virtual_lock:
+            virtual_drones.pop(slot, None)
+        drone_links.pop(slot, None)
+        try:
+            os.remove(_token_file(slot))
+        except OSError:
+            pass
+        _slots_cache["at"] = 0.0
+        _save_virtual_config()
+        return jsonify({"ok": True})
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action") or "")
+    with v.lock:
+        if action == "power":
+            if v.flying:
+                return jsonify({"ok": False, "error": "Land it before switching it off."}), 409
+            v.powered = not v.powered
+        elif action == "recharge":
+            if v.flying:
+                return jsonify({"ok": False, "error": "Land it first."}), 409
+            v.battery = 100.0
+        elif action == "low_battery":
+            v.battery = min(v.battery, 20.0)
+        elif action == "weak_gps":
+            v.sats = 5 if v.sats > 5 else 17
+        elif action == "drop_link":
+            v.link_down_until = time.time() + 10
+            v._close()
+        elif action == "home":
+            if v.flying:
+                return jsonify({"ok": False, "error": "Land it before moving its home point."}), 409
+            try:
+                v.home = (float(data["lat"]), float(data["lon"]))
+            except (KeyError, TypeError, ValueError):
+                return jsonify({"ok": False, "error": "No position."}), 400
+            v.lat, v.lon = v.home
+        else:
+            return jsonify({"ok": False, "error": "Unknown action."}), 400
+    if action == "home":
+        _save_virtual_config()
+    return jsonify({"ok": True, "drone": v.summary()})
+
+
+@app.route("/virtual-drones")
+def virtual_drones_page():
+    return VIRTUAL_DRONES_PAGE
+
+
+VIRTUAL_DRONES_PAGE = hud_page("Virtual Drones", r"""
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+.vd-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(340px,1fr);gap:16px;align-items:start}
+#vdMap{height:460px;border:1px solid #155879;border-radius:5px;background:#020a10}
+.vd-card{border:1px solid #155879;border-radius:5px;background:#05131d;padding:12px;margin-bottom:10px}
+.vd-card h3{margin:0 0 6px;font-size:14px;color:#e9f8ff;letter-spacing:1px;display:flex;justify-content:space-between;align-items:center}
+.vd-tag{font-size:10px;color:#ffcf7a;border:1px solid #7a5a12;border-radius:3px;padding:2px 6px;letter-spacing:1px}
+.vd-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:8px 0}
+.vd-stats div{background:#020a10;border:1px solid #153c56;border-radius:4px;padding:6px 8px}
+.vd-stats small{display:block;color:#6d8b9d;font-size:9px;letter-spacing:1.5px;text-transform:uppercase}
+.vd-stats b{color:#e9f8ff;font-size:14px}
+.vd-card .actions{flex-wrap:wrap;gap:6px}
+.vd-card .hud-btn{min-height:32px;font-size:11px}
+@media(max-width:1000px){.vd-grid{grid-template-columns:1fr}}
+</style>
+<main class="hud-main">
+<div class="page-head"><div><div class="page-kicker">Testing &amp; demos</div><h1 class="page-title">Virtual Drones</h1>
+<div class="page-sub">Simulated drones that connect like a real Drone Link phone. Use them to test routes, patrols and alert responses, train operators, or demo the system with no drone on site. They never control a real aircraft.</div></div>
+<div class="actions"><span class="state" id="vdState"><i class="dot warn"></i>LOADING</span></div></div>
+<div class="vd-grid">
+<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="live" id="vdHint">CLICK THE MAP TO CHOOSE A START POINT</div></div>
+<div class="panel-body"><div id="vdMap"></div>
+<div class="actions" style="margin-top:10px;align-items:center"><button class="hud-btn primary" id="vdAdd" onclick="addVd()">+ Add virtual drone here</button>
+<span class="muted" id="vdPick">No start point chosen yet.</span></div>
+<label style="margin-top:12px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="vdAuto" onchange="setAuto(this.checked)">
+Demo mode: let automatic missions (alert response, patrols set to "any drone", Telegram) use virtual drones when no real drone is ready</label>
+<div id="vdMsg" class="hud-msg"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">◇ Virtual fleet</div><div class="live" id="vdCount"></div></div>
+<div class="panel-body"><div id="vdList"><p class="muted">Loading…</p></div>
+<div class="muted" style="margin-top:8px">Fly them from <b>Open controls</b> exactly like a real drone (take off, keyboard, click-to-fly, routes, patrols). Battery lasts about 24 minutes of flight; at 15% they return home and at 5% they land, like a real DJI drone.</div></div></section>
+</div>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+let map=null,pick=null,pickMark=null,marks={},trails={},homes={},data={drones:[]};
+function msg(t,ok){const e=$('vdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
+function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('vdMap').setView([lat,lon],17);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'}).addTo(map);
+  map.on('click',e=>{pick=[e.latlng.lat,e.latlng.lng];pickMark=pickMark||L.circleMarker(pick,{radius:8,color:'#ffd23f'}).addTo(map);pickMark.setLatLng(pick);
+    $('vdPick').textContent='Start point: '+pick[0].toFixed(5)+', '+pick[1].toFixed(5)})}
+const icon=h=>L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${h||0}deg);font-size:22px;line-height:26px;text-align:center;color:#ffcf7a;text-shadow:0 0 4px #000">➤</div>`});
+function draw(){if(!map)return;const seen=new Set();
+  data.drones.forEach(d=>{seen.add(d.drone);const p=[d.lat,d.lon];
+    marks[d.drone]=marks[d.drone]||L.marker(p).bindTooltip('',{permanent:true,direction:'right'}).addTo(map);
+    marks[d.drone].setLatLng(p).setIcon(icon(d.heading-90)).setTooltipContent(esc(d.label)+(d.flying?' · '+d.altitude+' m':''));
+    trails[d.drone]=trails[d.drone]||L.polyline([],{color:'#ffcf7a',weight:2,opacity:.7}).addTo(map);if(d.flying)trails[d.drone].addLatLng(p);
+    homes[d.drone]=homes[d.drone]||L.circleMarker([d.home_lat,d.home_lon],{radius:5,color:'#2aea88'}).addTo(map);homes[d.drone].setLatLng([d.home_lat,d.home_lon])});
+  Object.keys(marks).filter(k=>!seen.has(k)).forEach(k=>{[marks,trails,homes].forEach(o=>{o[k].remove();delete o[k]})})}
+function card(d){const st=!d.powered?'Switched off':d.link_down?'Link lost (reconnecting)':!d.linked?'Connecting…':d.mission?'Auto-fly: '+d.mission:d.flying?d.mode.replace(/_/g,' ').toLowerCase():'On the ground';
+  return `<div class="vd-card"><h3>${esc(d.label)} <span class="vd-tag">VIRTUAL</span></h3><div class="muted">${esc(st)}</div>
+  <div class="vd-stats"><div><small>Battery</small><b>${d.battery}%</b></div><div><small>Height</small><b>${d.altitude} m</b></div><div><small>GPS</small><b>${d.gps_satellites}</b></div></div>
+  <div class="actions"><a class="hud-btn primary" href="/drone-control?drone=${encodeURIComponent(d.drone)}" style="text-decoration:none">Open controls</a>
+  <button class="hud-btn" onclick="act('${d.drone}','power')">${d.powered?'Switch off':'Switch on'}</button>
+  <button class="hud-btn" onclick="act('${d.drone}','recharge')">Recharge</button>
+  <button class="hud-btn" onclick="moveHome('${d.drone}')">Move home here</button>
+  <button class="hud-btn warn" onclick="act('${d.drone}','low_battery')" title="Battery to 20%">Low battery</button>
+  <button class="hud-btn warn" onclick="act('${d.drone}','weak_gps')">${d.gps_satellites<8?'Restore GPS':'Weak GPS'}</button>
+  <button class="hud-btn warn" onclick="act('${d.drone}','drop_link')" title="Phone link drops for 10 seconds">Drop link 10 s</button>
+  <button class="hud-btn danger" onclick="removeVd('${d.drone}')">Remove</button></div></div>`}
+async function load(){try{data=await fetch('/api/virtual-drones',{cache:'no-store'}).then(r=>r.json())}catch(e){return}
+  $('vdState').innerHTML=data.allowed?'<i class="dot good"></i>SIMULATOR READY':'<i class="dot bad"></i>DRONE CONTROL NOT IN LICENCE';
+  $('vdCount').textContent=data.drones.length+' / '+data.max;$('vdAdd').disabled=data.drones.length>=data.max;$('vdAuto').checked=!!data.demo_auto;
+  $('vdList').innerHTML=data.drones.map(card).join('')||'<p class="muted">No virtual drones yet. Click the map, then <b>+ Add virtual drone here</b>.</p>';
+  if(!map){const d=data.drones[0];if(d)initMap(d.home_lat,d.home_lon);else navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>initMap(p.coords.latitude,p.coords.longitude),()=>initMap(33.8938,35.5018),{timeout:4000}):initMap(33.8938,35.5018)}
+  draw()}
+async function addVd(){if(!pick){msg('Click the map first to choose where it starts.',false);return}
+  const d=await fetch('/api/virtual-drones',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({lat:pick[0],lon:pick[1]})}).then(r=>r.json());
+  msg(d.ok?d.label+' added. Open controls to fly it.':d.error,d.ok);load()}
+async function act(slot,action,extra){const d=await fetch('/api/virtual-drones/'+encodeURIComponent(slot),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...(extra||{})})}).then(r=>r.json());
+  if(!d.ok)msg(d.error,false);load()}
+function moveHome(slot){if(!pick){msg('Click the map first to choose the new home point.',false);return}act(slot,'home',{lat:pick[0],lon:pick[1]})}
+async function removeVd(slot){if(!confirm('Remove this virtual drone?'))return;await fetch('/api/virtual-drones/'+encodeURIComponent(slot),{method:'DELETE'});load()}
+async function setAuto(on){await fetch('/api/virtual-drones',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({demo_auto:on})});
+  msg(on?'Demo mode on: automatic missions may use virtual drones.':'Demo mode off: automatic missions use real drones only.',true)}
+load();setInterval(load,1000);
+</script>""", active="virtual")
+
+
 @app.route("/drone-control")
 def drone_control_page():
     slot = request.args.get("drone") or DRONE_CAMERA_NAME
     if slot not in drone_slots():
         slot = DRONE_CAMERA_NAME
-    return (DRONE_CONTROL_PAGE.replace('data-live-camera="drone"', f'data-live-camera="{slot}"')
+    page = DRONE_CONTROL_PAGE
+    if is_virtual(slot):
+        page = page.replace('<div class="live-slot" data-live-camera="drone"></div>',
+                            '<div id="vcam" style="position:absolute;inset:0"></div><div class="vcam-x"></div>'
+                            '<div class="vcam-tag">VIRTUAL CAMERA · SIMULATED VIEW</div>')
+    return (page.replace('data-live-camera="drone"', f'data-live-camera="{slot}"')
             .replace("const DRONE='drone';", f"const DRONE={json.dumps(slot)};")
             .replace("<title>", f"<title>{drone_label(slot)} · ", 1)
             .replace('<h1 class="page-title">Drone Control</h1>', f'<h1 class="page-title">Drone Control · {drone_label(slot)}</h1>', 1))
@@ -5552,6 +6065,8 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 .dc-fleet i{width:8px;height:8px;border-radius:50%;background:#53636d;display:inline-block}
 .dc-fleet i.ok{background:#26ee89}.dc-fleet i.half{background:#ffb23c}
 .dc-fleet button:disabled{opacity:.5;cursor:not-allowed}
+.vcam-x{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;border:2px solid rgba(91,217,255,.85);border-radius:50%;z-index:500;pointer-events:none}
+.vcam-tag{position:absolute;right:10px;top:10px;z-index:500;background:rgba(3,16,26,.85);border:1px solid #7a5a12;color:#ffcf7a;padding:4px 8px;border-radius:3px;font:bold 10px Arial;letter-spacing:1px}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -5694,6 +6209,12 @@ async function addDroneSlot(){if(!confirm('Add another drone? It gets its own pa
   const d=await fetch('/api/drone/add',{method:'POST'}).then(r=>r.json());
   if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else alert(d.error||'Could not add a drone.')}
 let others=[],oMarks=[],droneNames={};
+let vcam=null;
+function vcamUpdate(t){if(!$('vcam')||typeof L==='undefined'||!t.lat)return;
+  const z=t.altitude>90?16:t.altitude>45?17:t.altitude>15?18:19;
+  if(!vcam){vcam=L.map('vcam',{zoomControl:false,attributionControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,boxZoom:false,keyboard:false,touchZoom:false});
+    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19}).addTo(vcam);vcam.setView([t.lat,t.lon],z)}
+  else vcam.setView([t.lat,t.lon],z,{animate:false})}
 function drawOthers(){if(!map||!window.L)return;oMarks.forEach(m=>m.remove());
   oMarks=others.map(x=>L.circleMarker([x.lat,x.lon],{radius:7,color:'#ffb23c',fillColor:'#ffb23c',fillOpacity:.8}).bindTooltip(x.label,{permanent:true,direction:'right',className:''}).addTo(map))}
 let st={},control=false,map=null,dMark=null,hMark=null,trail=null,keys=new Set(),lastStickZero=true;
@@ -5759,6 +6280,7 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   if(map&&t.lat){const goal=m?[m.lat,m.lon]:(target?[target.lat,target.lon]:null);
     if(goal){tLine=tLine||L.polyline([],{color:'#ff5d6c',weight:2,dashArray:'6 6'}).addTo(map);tLine.setLatLngs([[t.lat,t.lon],goal])}
     else if(tLine){tLine.setLatLngs([])}}
+  vcamUpdate(t);
   $('events').innerHTML=(st.events||[]).slice().reverse().map(e=>`<div>${new Date(e.at*1000).toLocaleTimeString()} · ${esc(e.msg)}</div>`).join('')}
 const DAYS=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];let scheds=[];
 function scmsg(t,ok){const e=$('schedMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
@@ -5964,7 +6486,9 @@ drone_response = {"active": False, "drone": DRONE_CAMERA_NAME, "camera": "", "ph
 
 def _pick_drone(check, drone=None):
     """First drone (or the one asked for) that passes check(slot) == ''. Returns (slot, problem)."""
-    slots = [drone] if drone else [d for d in drone_slots() if d not in _sources_over_limit()]
+    # Automatic choices use real drones; virtual ones only in demo mode (Virtual Drones tab).
+    slots = [drone] if drone else [d for d in drone_slots() if d not in _sources_over_limit()
+                                   and (not is_virtual(d) or _virtual_cfg.get("demo_auto"))]
     problems = []
     for d in slots:
         problem = check(d)
@@ -10139,6 +10663,7 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
                 : x.phone_connected ? "Phone connected · drone off" : "Phone not paired";
             return '<a href="/drone-control?drone=' + encodeURIComponent(x.drone) + '" title="Open the controls for ' + esc(x.label) + '">'
                 + '<span class="df-open">CONTROLS →</span><span class="df-dot ' + dot + '"></span><b>' + esc(x.label).toUpperCase() + '</b>'
+                + (x.virtual ? ' <span style="color:#ffcf7a;font-size:9px;border:1px solid #7a5a12;border-radius:3px;padding:1px 4px">VIRTUAL</span>' : '')
                 + '<div class="df-info">' + esc(info) + '</div></a>';
         }).join("");
     }
@@ -14181,6 +14706,7 @@ def main():
     launcher (which imports this module, also when it is compiled to native code)."""
     _start_v105_recovery()
     start_drone_link()
+    start_virtual_drones()
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     start_assistant()
     print()
