@@ -5442,6 +5442,52 @@ def api_drone_link_pair_reset():
     return jsonify({"ok": True})
 
 
+LAND_ASSIST_SECONDS = 120
+
+
+def start_land_assist(slot, why):
+    """See a landing through to motors off. DJI drones stop about 0.5 m above the ground and wait
+    for a landing confirmation (and never land from the sticks alone), so confirm or re-ask as needed."""
+    link = get_link(slot)
+    token = time.time()
+    link["land_assist"] = token
+    _drone_event(f"Landing ({why})", slot)
+
+    def run():
+        start, last_ask, low_since = time.time(), 0.0, 0.0
+        while link.get("land_assist") == token and time.time() - start < LAND_ASSIST_SECONDS:
+            time.sleep(0.3)
+            t = link["telemetry"]
+            if time.time() - link["tel_at"] > 3:
+                continue
+            if not t.get("flying") and not t.get("motors_on"):
+                _drone_event("Landed, motors off", slot)
+                break
+            now = time.time()
+            if t.get("landing_confirm_needed"):
+                if now - last_ask > 2:
+                    last_ask = now
+                    r = drone_command("confirm_land", timeout=5.0, slot=slot)
+                    _drone_event("Landing confirmed" if r["ok"] else f"Confirm landing failed: {r['error']}", slot)
+                continue
+            # Hovering just above the ground and not descending: the landing was paused, ask again.
+            low = (t.get("altitude") or 0) < 1.0 and (t.get("vertical_speed") or 0) > -0.15
+            low_since = (low_since or now) if low else 0.0
+            if low_since and now - low_since > 3 and now - last_ask > 4:
+                last_ask = now
+                r = drone_command("land", timeout=8.0, slot=slot)
+                if r["ok"]:
+                    drone_command("confirm_land", timeout=5.0, slot=slot)
+        if link.get("land_assist") == token:
+            link["land_assist"] = 0
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def stop_land_assist(slot):
+    get_link(slot)["land_assist"] = 0
+
+
 @app.route("/api/drone/command", methods=["POST"])
 def api_drone_command():
     if not drone_control_allowed():
@@ -5484,8 +5530,12 @@ def api_drone_command():
         link["sim_off_at"] = time.time()
     if cmd in ("hover", "control_off"):
         link["stick_active"] = False
+    if cmd in ("cancel_land", "takeoff", "goto", "go_home", "hover", "control_on"):
+        stop_land_assist(slot)
     result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0, slot=slot)
     _drone_event(f"{cmd}: {'OK' if result['ok'] else result['error']}", slot)
+    if cmd == "land" and result["ok"]:
+        start_land_assist(slot, "Land pressed")
     return jsonify(result), (200 if result["ok"] else 409)
 
 
@@ -5504,6 +5554,17 @@ def api_drone_stick():
              "z": clamp(data.get("z")), "r": clamp(data.get("r"))}
     link["stick_at"] = time.time()
     link["stick_active"] = any(stick[k] for k in "xyzr")
+    # Holding "down" close to the ground lands, like holding the throttle down on the DJI controller.
+    t = link["telemetry"]
+    near_ground = t.get("flying") and (t.get("altitude") if t.get("altitude") is not None else 99) < 1.2
+    if stick["z"] <= -0.6 and near_ground and not stick["x"] and not stick["y"]:
+        link["down_since"] = link.get("down_since") or time.time()
+        if time.time() - link["down_since"] >= 1.0 and not link.get("land_assist"):
+            link["down_since"] = 0
+            threading.Thread(target=lambda: drone_command("land", timeout=8.0, slot=slot)["ok"]
+                             and start_land_assist(slot, "down held near the ground"), daemon=True).start()
+    else:
+        link["down_since"] = 0
     return jsonify({"ok": _drone_send(stick, slot)})
 
 
@@ -5575,6 +5636,7 @@ class VirtualDrone:
         self.control_pc, self.speed_level, self.stick, self.stick_at = False, 0.3, (0.0, 0.0, 0.0, 0.0), 0.0
         self.mission, self.gimbal, self.sats, self.recording = None, 0.0, 17, False
         self.link_down_until, self.stop, self.sock, self.lock = 0.0, False, None, threading.Lock()
+        self.confirm_needed = self.land_confirmed = False  # like a Mini: landing pauses at 0.5 m for confirmation
 
     # ----- protocol (same messages as the Android app) -----
     def start(self):
@@ -5658,22 +5720,27 @@ class VirtualDrone:
             if self.battery < 15:
                 return False, "Battery too low to take off."
             self.motors, self.flying, self.mode = True, True, "AUTO_TAKE_OFF"
+            self.confirm_needed = self.land_confirmed = False
             self.event("Take-off")
         elif cmd == "land":
             self._abort("land pressed")
             if not self.flying:
                 return False, "Not flying."
+            self.control_pc, self.stick = False, (0.0, 0.0, 0.0, 0.0)  # the real app hands control back first
             self.mode, self.rth_phase = "AUTO_LANDING", ""
         elif cmd == "cancel_land":
             if self.mode == "AUTO_LANDING":
-                self.mode = "GPS_NORMAL"
+                self.mode, self.confirm_needed = "GPS_NORMAL", False
         elif cmd == "confirm_land":
-            pass
+            if not self.confirm_needed:
+                return False, "No landing confirmation is needed."
+            self.land_confirmed, self.confirm_needed = True, False
         elif cmd == "go_home":
             self._abort("return home pressed")
             if not self.flying:
                 return False, "Not flying."
             self.stick, self.mode, self.rth_phase = (0.0, 0.0, 0.0, 0.0), "GO_HOME", "climb"
+            self.control_pc = False
         elif cmd == "cancel_go_home":
             if self.mode == "GO_HOME":
                 self.mode, self.rth_phase = "GPS_NORMAL", ""
@@ -5736,7 +5803,10 @@ class VirtualDrone:
             if self.alt >= 1.2:
                 self.mode = "GPS_NORMAL"
         elif self.mode == "AUTO_LANDING":
-            up = -1.2 if self.alt > 1 else -0.5
+            if self.alt <= 0.5 and not self.land_confirmed:
+                self.confirm_needed = True  # waits just above the ground, like the real drone
+            else:
+                up = -1.2 if self.alt > 1 else -0.5
         elif self.mode == "GO_HOME":
             if self.rth_phase == "climb":
                 up = max(-2.0, min(3.0, (self.RTH_ALT - self.alt))) if self.alt < self.RTH_ALT - 0.5 else 0.0
@@ -5746,7 +5816,7 @@ class VirtualDrone:
                 fwd, up, yaw, dist = self._fly_towards(self.home[0], self.home[1], max(self.alt, 0), 8.0)
                 up = 0.0
                 if dist < 1.5:
-                    self.mode, self.rth_phase = "AUTO_LANDING", ""
+                    self.mode, self.rth_phase, self.land_confirmed = "AUTO_LANDING", "", True
         elif m:
             if m["state"] == "TAKING_OFF" and self.mode != "AUTO_TAKE_OFF":
                 m["state"] = "ENABLING"
@@ -5767,7 +5837,7 @@ class VirtualDrone:
                 if time.time() - m["arrived_at"] >= 2.0:
                     self.mission = None
                     if m["arrive"] == "land":
-                        self.mode = "AUTO_LANDING"
+                        self.mode, self.land_confirmed = "AUTO_LANDING", True
                     elif m["arrive"] == "home":
                         self.mode, self.rth_phase = "GO_HOME", "climb"
                     else:
@@ -5778,6 +5848,8 @@ class VirtualDrone:
             x, y, z, r = self.stick
             if self.alt >= DRONE_LIMITS["max_altitude_m"] and z > 0:
                 z = 0.0
+            if self.alt <= 0.5 and z < 0:
+                z = 0.0  # landing protection: sticks alone never put it on the ground
             if self.distance_home() >= DRONE_LIMITS["max_distance_m"] and (x or y):
                 h = math.radians(self.heading)
                 north, east = y * math.cos(h) - x * math.sin(h), y * math.sin(h) + x * math.cos(h)
@@ -5806,11 +5878,12 @@ class VirtualDrone:
                     self.battery = max(0.0, self.battery - dt * 100.0 / (24 * 60))  # ~24 min flight
                     if self.mode == "AUTO_LANDING" and self.alt <= 0.05:
                         self.flying = self.motors = False
+                        self.confirm_needed = self.land_confirmed = False
                         self.mode, self.v, self.alt = "GPS_NORMAL", [0.0, 0.0, 0.0], 0.0
                         self.event("Landed, motors stopped")
                     elif self.battery <= 5 and self.mode != "AUTO_LANDING":
                         self._abort("critical battery")
-                        self.mode = "AUTO_LANDING"
+                        self.mode, self.land_confirmed = "AUTO_LANDING", True
                         self.event("Critical battery: landing now")
                     elif self.battery <= 15 and self.mode not in ("GO_HOME", "AUTO_LANDING"):
                         self._abort("low battery")
@@ -5832,7 +5905,7 @@ class VirtualDrone:
         t.update({"lat": round(self.lat, 7), "lon": round(self.lon, 7), "altitude": round(self.alt, 2), "heading": round(self.heading, 1),
                   "speed": round(speed, 2), "vertical_speed": round(self.v[2] if self.flying else 0.0, 2), "battery": int(round(self.battery)),
                   "gps_satellites": self.sats, "flying": self.flying, "motors_on": self.motors, "flight_mode": self.mode,
-                  "landing_confirm_needed": False, "signal": 100, "gimbal_pitch": self.gimbal, "recording": self.recording,
+                  "landing_confirm_needed": self.confirm_needed, "signal": 100, "gimbal_pitch": self.gimbal, "recording": self.recording,
                   "home_lat": self.home[0], "home_lon": self.home[1], "distance_home": round(self.distance_home(), 1)})
         return t
 
@@ -6254,7 +6327,7 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   $('hBat').textContent=t.battery??'–';$('tBat').textContent=t.battery==null?'–':t.battery+'%';$('hGps').textContent=t.gps_satellites??'–';$('tGps').textContent=t.gps_satellites??'–';
   $('hSig').textContent=t.signal==null?'–':t.signal+'%';$('tHdg').textContent=t.heading==null?'–':Math.round((t.heading+360)%360)+'°';$('tMode').textContent=t.flight_mode||'–';
   $('tCtl').textContent=t.control||'–';$('confirmLand').style.display=t.landing_confirm_needed?'':'none';
-  if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg('The pilot took control on the remote controller.',false)}
+  if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg(/LANDING|GO_HOME/.test(t.flight_mode||'')?'Keyboard control ended: the drone is landing / returning home by itself.':'The pilot took control on the remote controller.',false)}
   if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));
     trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon])}}
     $('coords').textContent=t.lat.toFixed(6)+', '+t.lon.toFixed(6)}
