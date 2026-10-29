@@ -5409,8 +5409,11 @@ def api_drone_links():
                     "gps": t.get("gps_satellites"), "mode": t.get("flight_mode"), "distance_home": t.get("distance_home")})
     allowed = api_cloud_can_add_source("drone").get_json()
     busy = {drone_response.get("drone"): "response"} if drone_response["active"] else {}
-    if route_run["active"]:
-        busy[route_run.get("drone")] = "route"
+    for r in list(route_runs.values()):
+        if r["active"]:
+            busy[r["drone"]] = "route"
+            if r.get("backup"):
+                busy.setdefault(r["backup"], "backup")
     for d in out:
         d["mission"] = busy.get(d["drone"], "")
     return jsonify({"ok": True, "drones": out, "can_add": bool(allowed.get("allowed")), "limit": allowed.get("limit"),
@@ -6191,7 +6194,7 @@ function vcam(t,x){if(typeof L==='undefined'||!x.lat)return;const z=x.altitude>9
 function paint(t,x){const dot=x.drone_connected?'ok':x.phone_connected?'half':'';t.querySelector('.dg-name i').className=dot;
   const off=t.querySelector('.dg-off'),down=!x.phone_connected||!x.drone_connected;
   off.style.display=down?'flex':'none';off.textContent=x.over_limit?'OVER LICENCE LIMIT':!x.phone_connected?'PHONE NOT CONNECTED':!x.drone_connected?'DRONE OFF':'';
-  const state=x.mission?(x.mission==='route'?'ROUTE':'RESPONSE'):x.flying?'FLYING':'ON GROUND';
+  const state=x.mission?(x.mission==='route'?'ROUTE':x.mission==='backup'?'BACKUP (RESERVED)':'RESPONSE'):x.flying?'FLYING':'ON GROUND';
   t.querySelector('.dg-hud').innerHTML=down?'':`<span>${state}</span><span>ALT <b>${fmt(x.altitude)}</b> m</span><span>SPD <b>${fmt(x.speed)}</b> m/s</span>`
     +`<span>BAT <b>${x.battery??'–'}</b>%</span><span>GPS <b>${x.gps??'–'}</b></span><span>HOME <b>${fmt(x.distance_home,0)}</b> m</span>`;
   if(x.virtual)vcam(t,x)}
@@ -6318,7 +6321,11 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <input id="rtSwap" type="number" min="20" max="50" value="20" style="width:64px">% battery the drone returns home and the next ready drone takes off and continues the patrol</label>
 <div class="muted" style="margin-top:4px">A continuous patrol always sends the drone home at that battery level; without relay the patrol then ends. Each drone needs its own phone and controller (or use virtual drones).</div>
 <div class="actions" style="margin-top:12px"><input id="rtName" placeholder="Route name" style="flex:1;min-width:120px"><button class="hud-btn" onclick="saveRoute()">Save</button><button class="hud-btn danger" onclick="deleteRoute()">Delete</button></div>
-<div class="actions" style="margin-top:8px"><button class="hud-btn primary" onclick="flyRoute()">Fly route</button><button class="hud-btn danger" onclick="stopRoute()">Stop route</button></div>
+<label style="margin-top:8px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap">Backup drone
+<select id="rtBackup" style="flex:1;min-width:160px"><option value="">None</option></select></label>
+<div class="muted" style="margin-top:4px">At the battery level above, this drone flies home and the backup takes off and continues from the same stop (they then swap roles). A backup drone is reserved: it can't fly its own route meanwhile.</div>
+<div id="backupNote" class="hud-msg bad" style="display:none"></div>
+<div class="actions" style="margin-top:8px"><button class="hud-btn primary" id="flyRouteBtn" onclick="flyRoute()">Fly route</button><button class="hud-btn danger" onclick="stopRoute()">Stop route</button></div>
 <div id="routeMsg" class="hud-msg"></div>
 <div style="margin-top:16px;border-top:1px solid #123447;padding-top:12px"><b style="color:#5bd9ff;font-size:11px;letter-spacing:1.5px">🗓 SCHEDULED PATROLS</b>
 <div class="muted" style="margin-top:6px">Runs a saved route on chosen days. <b>Ask first</b> sends you a Telegram Start/Skip message; <b>auto-start</b> flies after the safety checks. The drone and controller must be on and connected at patrol time, and a pilot must be able to take over.</div>
@@ -6375,15 +6382,18 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <script>
 const DRONE='drone';
 {const f=window.fetch.bind(window);
- window.fetch=(u,o)=>f(typeof u==='string'&&/^\/api\/(drone\/|routes\/fly|response\/dispatch)/.test(u)?u+(u.includes('?')?'&':'?')+'drone='+encodeURIComponent(DRONE):u,o)}
+ window.fetch=(u,o)=>f(typeof u==='string'&&/^\/api\/(drone\/|routes|response\/dispatch)/.test(u)?u+(u.includes('?')?'&':'?')+'drone='+encodeURIComponent(DRONE):u,o)}
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const fmt=(v,d=1)=>v==null||isNaN(v)?'–':Number(v).toFixed(d);
 async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
   const many=d.drones.length>1;droneNames=Object.fromEntries(d.drones.map(x=>[x.drone,x.label]));
+  const bk=$('rtBackup');if(bk){const v=bk.value;bk.innerHTML='<option value="">None</option>'+d.drones.filter(x=>x.drone!==DRONE).map(x=>
+    `<option value="${esc(x.drone)}" ${x.mission==='route'||x.mission==='backup'?'disabled':''}>${esc(x.label)}${x.mission==='route'?' (flying a route)':x.mission==='backup'?' (backup for another route)':x.drone_connected?'':' (offline)'}</option>`).join('');
+    bk.value=[...bk.options].some(o=>o.value===v&&!o.disabled)?v:''}
   const sel=$('scDrone');if(sel&&sel.options.length!==d.drones.length+1){const v=sel.value;sel.innerHTML='<option value="">Any ready drone</option>'+d.drones.map(x=>`<option value="${esc(x.drone)}">${esc(x.label)}</option>`).join('');sel.value=v;sel.style.display=many?'':'none'}
   $('fleet').innerHTML=d.drones.map(x=>{const dot=x.drone_connected?'ok':x.phone_connected?'half':'';
-    const info=x.over_limit?'over licence':x.mission?(x.mission==='route'?'on route':'responding'):x.drone_connected?(x.flying?'flying':'ready')+(x.battery!=null?' · '+x.battery+'%':''):x.phone_connected?'drone off':'not paired';
+    const info=x.over_limit?'over licence':x.mission?(x.mission==='route'?'on route':x.mission==='backup'?'backup':'responding'):x.drone_connected?(x.flying?'flying':'ready')+(x.battery!=null?' · '+x.battery+'%':''):x.phone_connected?'drone off':'not paired';
     return `<a href="/drone-control?drone=${encodeURIComponent(x.drone)}" class="${x.drone===DRONE?'on':''}"><i class="${dot}"></i>${esc(x.label)} <small>${esc(info)}</small></a>`}).join('')
     +`<button onclick="addDroneSlot()" ${d.can_add?'':'disabled'} title="${esc(d.message||'')}">+ Add drone <small>${d.used??'?'} of ${d.limit??'∞'}</small></button>`
     +`<a href="/drone-grid">▦ Grid view</a>`;
@@ -6488,11 +6498,14 @@ function drawRoute(){routeInfo();if(!map||typeof L==='undefined')return;rMarks.f
     html:`<div style="width:22px;height:22px;border-radius:50%;background:#ffd23f;color:#111;font:bold 12px Arial;display:flex;align-items:center;justify-content:center;box-shadow:0 0 6px #000">${i+1}</div>`})}).addTo(map)))}
 async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||500;$('routeMax').textContent=rMax;
   const sel=$('routeSel'),cur=sel.value;sel.innerHTML='<option value="">Saved routes…</option>'+Object.keys(routes).map(n=>`<option>${esc(n)}</option>`).join('');sel.value=cur;
-  if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();const r=d.run||{};$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
+  if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();
+  const bf=d.backup_for;$('backupNote').style.display=bf?'':'none';$('flyRouteBtn').disabled=!!bf;
+  if(bf)$('backupNote').textContent='This drone is the backup for '+bf.label+' on route “'+bf.name+'”. It can\'t fly its own route until that route ends.';
+  const r=d.run||{};$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
 function loadRoute(n){const r=routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtName').value=n;drawRoute();
   if(map&&route.length)map.fitBounds(route.map(p=>[p.lat,p.lon]),{padding:[30,30]})}
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value,
-  loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20}}
+  loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,backup:$('rtBackup').value}}
 async function saveRoute(){if(!route.length){rtmsg('Draw at least one stop.',false);return}const d=await fetch('/api/routes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value})}).then(r=>r.json());
   rtmsg(d.ok?'Route “'+d.name+'” saved.':d.error,d.ok);await loadRoutes();if(d.ok)$('routeSel').value=d.name}
 async function deleteRoute(){const n=$('routeSel').value;if(!n||!confirm('Delete route “'+n+'”?'))return;await fetch('/api/routes',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})});rtmsg('Deleted.',true);loadRoutes()}
@@ -6501,7 +6514,7 @@ async function flyRoute(){if(!route.length){rtmsg('Click the map to add stops, o
     +($('rtLoop').checked?', repeating the route until you press Stop route':'')+'? Keep the drone in sight.'))return;
   const d=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value||$('routeSel').value||'route'})}).then(r=>r.json());
   rtmsg(d.message||d.error,d.ok);loadRoutes()}
-async function stopRoute(){await fetch('/api/routes/stop',{method:'POST'});rtmsg('Route stopped, drone hovering.',true);loadRoutes()}
+async function stopRoute(){const d=await fetch('/api/routes/stop',{method:'POST'}).then(r=>r.json());rtmsg(d.ok?'Route stopped, drone hovering.':d.error,d.ok);loadRoutes()}
 setInterval(loadRoutes,3000);
 let resp=null,locFor='',camMarks={};
 function rmsg(t,ok){const e=$('respMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
@@ -6676,7 +6689,7 @@ def _pick_drone(check, drone=None):
 
 def _drone_busy(slot):
     return ((drone_response["active"] and drone_response.get("drone") == slot)
-            or (route_run["active"] and route_run.get("drone") == slot))
+            or run_of(slot) is not None or backup_run_of(slot) is not None)
 
 
 def _drone_ready_problem(camera, slot=None):
@@ -6702,6 +6715,9 @@ def _drone_ready_problem(camera, slot=None):
         return "The drone has no GPS position yet."
     if _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
         return f"That camera is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."
+    b = backup_run_of(slot)
+    if b:
+        return f"It is the backup drone for {drone_label(b['drone'])} on route {b['name']}."
     if _drone_busy(slot):
         return "The drone is already on a mission."
     return ""
@@ -6929,7 +6945,8 @@ def _drone_status_line():
             state = "flying" if t.get("flying") else "on the ground"
             resp = (f" · responding to {drone_response['camera']} ({drone_response['phase']})"
                     if drone_response["active"] and drone_response["drone"] == slot else "")
-            route = f" · flying route {route_run['name']}" if route_run["active"] and route_run.get("drone") == slot else ""
+            r, b = run_of(slot), backup_run_of(slot)
+            route = (f" · flying route {r['name']}" if r else "") + (f" · backup for {drone_label(b['drone'])}" if b else "")
             lines.append(f"🚁 {name}: {state}, battery {t.get('battery')}%, GPS {t.get('gps_satellites')}{resp}{route}")
     return "\n".join(lines)
 
@@ -7145,7 +7162,17 @@ def start_assistant():
 # ---------- multi-stop routes (draw on the map, fly stop by stop) ----------
 ROUTES_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_routes.json")
 ROUTE_MAX_POINTS = 25
-route_run = {"active": False, "drone": DRONE_CAMERA_NAME, "name": "", "index": 0, "total": 0, "phase": "", "message": "", "stop": False}
+route_runs = {}  # run id -> state; each drone can fly its own route (a run moves to the backup drone on a handover)
+
+
+def run_of(slot):
+    """The active route this drone is flying, if any."""
+    return next((r for r in list(route_runs.values()) if r["active"] and r["drone"] == slot), None)
+
+
+def backup_run_of(slot):
+    """The active route this drone stands by for as the chosen backup, if any."""
+    return next((r for r in list(route_runs.values()) if r["active"] and r.get("backup") == slot and r["drone"] != slot), None)
 
 
 def load_routes():
@@ -7210,24 +7237,27 @@ def _route_problem(route, slot=None):
             return f"Stop {i} is {int(d)} m from home (limit {DRONE_LIMITS['max_distance_m']} m)."
     if (tel.get("battery") or 0) < load_response_settings()["min_battery"]:
         return f"Battery is {tel.get('battery')}%."
+    b = backup_run_of(slot)
+    if b:
+        return f"It is the backup drone for {drone_label(b['drone'])} on route {b['name']}."
     if _drone_busy(slot):
         return "The drone is already on a mission."
     return ""
 
 
-def _wait_arrival(p, started):
+def _wait_arrival(p, started, run):
     """Wait until the phone's auto-fly reaches p. Returns '' on arrival, else why it ended."""
     while True:
         time.sleep(0.5)
-        if route_run["stop"]:
+        if run["stop"]:
             return "stopped from the PC"
-        link = get_link(route_run["drone"])
+        link = get_link(run["drone"])
         if time.time() - link["tel_at"] > 5:
             if time.time() - started > 900:
                 return "lost contact with the drone"
             continue  # Wi-Fi hiccup: wait
         tel = link["telemetry"]
-        if route_run.get("swap_at") and tel.get("battery") is not None and tel["battery"] <= route_run["swap_at"]:
+        if run.get("swap_at") and tel.get("battery") is not None and tel["battery"] <= run["swap_at"]:
             return SWAP
         if tel.get("mission"):
             continue
@@ -7245,108 +7275,130 @@ class PatrolEnded(Exception):
     """The patrol ended with the drone already on its way home (don't tell it to hover)."""
 
 
-def _battery_low(slot):
+def _battery_low(slot, run):
     b = get_link(slot)["telemetry"].get("battery")
-    return bool(route_run.get("swap_at")) and b is not None and b <= route_run["swap_at"]
+    return bool(run.get("swap_at")) and b is not None and b <= run["swap_at"]
 
 
-def _hand_over(name, route, old, stop):
-    """Send the tired drone home and put the next ready drone on the patrol. Returns the new drone."""
+def _hand_over(name, route, old, stop, run):
+    """Send the tired drone home and put the backup (or the next ready drone) on the route. Returns the new drone."""
     bat = get_link(old)["telemetry"].get("battery")
     drone_command("go_home", timeout=10.0, slot=old)
     _drone_event(f"Battery {bat}%: returning home from route {name}", old)
-    over = _sources_over_limit()
+    backup, run["backup"] = run.get("backup"), None  # released, so it can take over
     nxt, problem = None, "no other drone"
-    if route["relay"]:
+    if backup:
+        problem = _route_problem(route, backup)
+        if problem:
+            problem = f"backup {drone_label(backup)} not ready ({problem})"
+        else:
+            nxt = backup
+    if not nxt and route["relay"]:
         # Same kind of drone takes over (real → real, virtual → virtual) unless demo mode mixes them.
-        candidates = [d for d in drone_slots() if d != old and d not in over
+        over = _sources_over_limit()
+        candidates = [d for d in drone_slots() if d not in (old, backup) and d not in over
                       and (is_virtual(d) == is_virtual(old) or _virtual_cfg.get("demo_auto"))]
         nxt = next((d for d in candidates if not _route_problem(route, d)), None)
-        problem = "no other drone is ready" if candidates else "no other drone"
+        if not nxt:
+            problem = (problem + "; " if backup else "") + ("no other drone is ready" if candidates else "no other drone")
     if not nxt:
-        msg = (f"🔋 {drone_label(old)} at {bat}% is returning home. Patrol “{name}” ended at stop {stop}"
-               + (f": {problem}." if route["relay"] else "."))
-        send_telegram(msg) if telegram_ready() else None
-        raise PatrolEnded(f"battery {bat}%, {drone_label(old)} returning home" + (f"; {problem}" if route["relay"] else ""))
-    route_run.update(drone=nxt, handovers=route_run.get("handovers", 0) + 1)
+        send_telegram(f"🔋 {drone_label(old)} at {bat}% is returning home. Patrol “{name}” ended at stop {stop}: {problem}.") \
+            if telegram_ready() else None
+        raise PatrolEnded(f"battery {bat}%, {drone_label(old)} returning home; {problem}")
+    # The tired drone becomes the backup, ready to take over again once its battery is swapped.
+    run.update(drone=nxt, backup=old if backup else None, handovers=run.get("handovers", 0) + 1)
     _drone_event(f"Taking over route {name} at stop {stop} from {drone_label(old)} ({bat}%)", nxt)
     send_telegram(f"🔁 {drone_label(old)} at {bat}% is returning home. {drone_label(nxt)} is taking off to continue patrol "
                   f"“{name}” from stop {stop}.") if telegram_ready() else None
     return nxt
 
 
-def _run_route(name, route, by, slot):
+def _run_route(name, route, by, slot, run):
     pts = route["points"]
-    route_run.update(swap_at=route["swap_at"] if (route["loop"] or route["relay"]) else 0, lap=1, handovers=0)
+    run.update(swap_at=route["swap_at"] if (route["loop"] or route["relay"] or run.get("backup")) else 0, lap=1, handovers=0)
     who = f" ({drone_label(slot)})" if len(drone_slots()) > 1 else ""
     kind = " · continuous patrol" if route["loop"] else ""
     kind += f" · relay at {route['swap_at']}%" if route["relay"] else ""
+    kind += f" · backup {drone_label(run['backup'])}" if run.get("backup") else ""
     _drone_event(f"Route {name} started ({len(pts)} stops, {by}{kind})", slot)
     send_telegram(f"🗺️ Route “{name}”{who} started: {len(pts)} stops at {int(route['alt'])} m{kind}.") if telegram_ready() else None
     i = 0
     try:
         while True:
             p = pts[i]
-            if _battery_low(slot):
-                slot = _hand_over(name, route, slot, i + 1)
-            lap = f" · lap {route_run['lap']}" if route["loop"] else ""
-            route_run.update(index=i + 1, phase="flying", message=f"{drone_label(slot)} flying to stop {i + 1} of {len(pts)}{lap}")
+            if _battery_low(slot, run):
+                slot = _hand_over(name, route, slot, i + 1, run)
+            lap = f" · lap {run['lap']}" if route["loop"] else ""
+            run.update(index=i + 1, phase="flying", message=f"{drone_label(slot)} flying to stop {i + 1} of {len(pts)}{lap}")
             r = drone_command("goto", {"lat": p["lat"], "lon": p["lon"], "alt": route["alt"], "speed": route["speed"], "arrive": "hover"},
                               timeout=15.0, slot=slot)
             if not r["ok"]:
                 raise RuntimeError(r["error"] or "the drone refused the next stop")
-            why = _wait_arrival(p, time.time())
+            why = _wait_arrival(p, time.time(), run)
             if why == SWAP:
-                slot = _hand_over(name, route, slot, i + 1)
+                slot = _hand_over(name, route, slot, i + 1, run)
                 continue  # the new drone flies to the same stop
             if why:
                 raise RuntimeError(why)
-            route_run.update(phase="pause", message=f"{drone_label(slot)} at stop {i + 1} of {len(pts)}{lap}")
+            run.update(phase="pause", message=f"{drone_label(slot)} at stop {i + 1} of {len(pts)}{lap}")
             end = time.time() + route["pause"]
-            while time.time() < end and not route_run["stop"]:
+            while time.time() < end and not run["stop"]:
                 time.sleep(0.5)
-            if route_run["stop"]:
+            if run["stop"]:
                 raise RuntimeError("stopped from the PC")
             i += 1
             if i >= len(pts):
                 if not route["loop"]:
                     break
                 i = 0
-                route_run["lap"] += 1
+                run["lap"] += 1
         action = {"home": "go_home", "land": "land"}.get(route["end"])
         if action:
             drone_command(action, timeout=10.0, slot=slot)
         done = {"home": "returning home", "land": "landing at the last stop", "hover": "hovering at the last stop"}[route["end"]]
-        route_run.update(phase="done", message=f"Route {name} complete, {done}")
+        run.update(phase="done", message=f"Route {name} complete, {done}")
         _drone_event(f"Route {name} complete ({done})", slot)
         send_telegram(f"✅ Route “{name}” complete, {done}.") if telegram_ready() else None
     except PatrolEnded as e:
-        route_run.update(phase="done", message=f"Patrol {name} ended: {e}")
+        run.update(phase="done", message=f"Patrol {name} ended: {e}")
         _drone_event(f"Route {name} ended: {e}", slot)
     except Exception as e:
         drone_command("hover", timeout=5.0, slot=slot)
-        route_run.update(phase="stopped", message=f"Route stopped at stop {route_run['index']}: {e}")
+        run.update(phase="stopped", message=f"Route stopped at stop {run['index']}: {e}")
         _drone_event(f"Route {name} stopped: {e}", slot)
-        send_telegram(f"⚠️ Route “{name}” stopped at stop {route_run['index']}: {e}. The drone is hovering.") if telegram_ready() else None
+        send_telegram(f"⚠️ Route “{name}” stopped at stop {run['index']}: {e}. The drone is hovering.") if telegram_ready() else None
     finally:
-        route_run.update(active=False, swap_at=0)
+        run.update(active=False, swap_at=0, backup=None, ended_at=time.time())
 
 
-def fly_route(name=None, route=None, by="dashboard", drone=None):
+route_lock = threading.Lock()
+
+
+def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None):
     if route is None:
         route = load_routes().get(name or "")
         if not route:
             return {"ok": False, "error": f"No saved route named “{name}”."}
-    if route_run["active"]:
-        return {"ok": False, "error": f"{drone_label(route_run['drone'])} is already flying route {route_run['name']}."}
     route = _clean_route(route)
-    slot, problem = _pick_drone(lambda d: _route_problem(route, d), drone)
-    if problem:
-        return {"ok": False, "error": problem}
-    # Claimed here (not in the thread) so a second request can't start another route meanwhile.
-    route_run.update(active=True, drone=slot, name=name or "unsaved route", index=0, total=len(route["points"]), phase="flying",
-                     stop=False, message=f"Route {name or 'unsaved route'} started")
-    threading.Thread(target=_run_route, args=(name or "unsaved route", route, by, slot), daemon=True).start()
+    with route_lock:
+        if drone and run_of(drone):
+            return {"ok": False, "error": f"{drone_label(drone)} is already flying route {run_of(drone)['name']}. Stop it first."}
+        if backup:
+            if backup not in drone_slots() or backup == drone:
+                return {"ok": False, "error": "Choose a different drone as the backup."}
+            taken = run_of(backup) or backup_run_of(backup)
+            if taken:
+                return {"ok": False, "error": f"{drone_label(backup)} is already busy with route {taken['name']}; choose another backup."}
+        slot, problem = _pick_drone(lambda d: "chosen as the backup" if d == backup else _route_problem(route, d), drone)
+        if problem:
+            return {"ok": False, "error": problem}
+        # Claimed under the lock (not in the thread) so a second request can't take the same drones meanwhile.
+        run = {"active": True, "drone": slot, "backup": backup, "name": name or "unsaved route", "index": 0,
+               "total": len(route["points"]), "phase": "flying", "stop": False, "message": f"Route {name or 'unsaved route'} started"}
+        route_runs[f"{slot}-{time.time():.3f}"] = run
+        for k in [k for k, r in route_runs.items() if not r["active"] and time.time() - r.get("ended_at", time.time()) > 3600]:
+            route_runs.pop(k, None)
+    threading.Thread(target=_run_route, args=(name or "unsaved route", route, by, slot, run), daemon=True).start()
     who = f"{drone_label(slot)}: " if len(drone_slots()) > 1 else ""
     return {"ok": True, "drone": slot, "message": f"{who}Route started: {len(route['points'])} stops."}
 
@@ -7363,7 +7415,11 @@ def api_routes():
             return jsonify({"ok": True})
     except (TypeError, ValueError, KeyError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True, "routes": load_routes(), "run": route_run, "max_distance_m": DRONE_LIMITS["max_distance_m"]})
+    slot = request.args.get("drone") or DRONE_CAMERA_NAME
+    run = run_of(slot) or next((r for r in reversed(list(route_runs.values())) if r["drone"] == slot), None) or {}
+    b = backup_run_of(slot)
+    return jsonify({"ok": True, "routes": load_routes(), "run": run, "max_distance_m": DRONE_LIMITS["max_distance_m"],
+                    "backup_for": {"drone": b["drone"], "label": drone_label(b["drone"]), "name": b["name"]} if b else None})
 
 
 @app.route("/api/routes/fly", methods=["POST"])
@@ -7371,8 +7427,9 @@ def api_routes_fly():
     data = request.get_json(silent=True) or {}
     try:
         drone = data.get("drone") or request.args.get("drone")
+        backup = data.get("backup") if data.get("backup") in drone_slots() else None
         r = fly_route(data.get("name"), data if data.get("points") else None, by="dashboard",
-                      drone=drone if drone in drone_slots() else None)
+                      drone=drone if drone in drone_slots() else None, backup=backup)
     except (TypeError, ValueError, KeyError) as e:
         r = {"ok": False, "error": f"Invalid route: {e}"}
     return jsonify(r), (200 if r["ok"] else 409)
@@ -7380,8 +7437,12 @@ def api_routes_fly():
 
 @app.route("/api/routes/stop", methods=["POST"])
 def api_routes_stop():
-    route_run["stop"] = True
-    drone_command("hover", timeout=5.0, slot=route_run["drone"])
+    slot = request.args.get("drone") or DRONE_CAMERA_NAME
+    run = run_of(slot)
+    if run is None:
+        return jsonify({"ok": False, "error": "This drone is not flying a route."}), 409
+    run["stop"] = True
+    drone_command("hover", timeout=5.0, slot=slot)
     return jsonify({"ok": True})
 
 
@@ -10899,7 +10960,7 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
         box.innerHTML = d.drones.map(x => {
             const dot = x.drone_connected ? "ok" : x.phone_connected ? "half" : "";
             const info = x.over_limit ? "Over licence limit"
-                : x.mission ? (x.mission === "route" ? "Flying a route" : "On a drone response")
+                : x.mission ? (x.mission === "route" ? "Flying a route" : x.mission === "backup" ? "Standing by as backup" : "On a drone response")
                 : x.drone_connected ? (x.flying ? "Flying" : "Ready on the ground") + (x.battery != null ? " · battery " + x.battery + "%" : "")
                 : x.phone_connected ? "Phone connected · drone off" : "Phone not paired";
             return '<a href="/drone-control?drone=' + encodeURIComponent(x.drone) + '" title="Open the controls for ' + esc(x.label) + '">'
