@@ -6479,7 +6479,7 @@ function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySel
 function toggleSched(i){scheds=scheds.map((s,j)=>j===i?{...s,enabled:!s.enabled}:s);saveScheds('Updated.')}
 function delSched(i){if(!confirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
 async function loadScheds(){try{const d=await fetch('/api/response/settings').then(r=>r.json());scheds=d.settings.patrol_schedules||[];renderScheds()}catch(e){}}
-let route=[],routes={},rLine=null,rMarks=[],rMax=500;
+let route=[],routes={},rLine=null,rMarks=[],rMax=500,filledRun='';
 function rtmsg(t,ok){const e=$('routeMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function addPoint(lat,lon){if(route.length>=25){rtmsg('25 stops maximum.',false);return}route.push({lat,lon});drawRoute()}
 function undoPoint(){route.pop();drawRoute()}
@@ -6500,9 +6500,12 @@ async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.jso
   const sel=$('routeSel'),cur=sel.value;sel.innerHTML='<option value="">Saved routes…</option>'+Object.keys(routes).map(n=>`<option>${esc(n)}</option>`).join('');sel.value=cur;
   if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();
   const bf=d.backup_for;$('backupNote').style.display=bf?'':'none';$('flyRouteBtn').disabled=!!bf;
-  if(bf)$('backupNote').textContent='This drone is the backup for '+bf.label+' on route “'+bf.name+'”. It can\'t fly its own route until that route ends.';
-  const r=d.run||{};$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
-function loadRoute(n){const r=routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtName').value=n;drawRoute();
+  if(bf)$('backupNote').textContent='This drone is the backup for '+bf.label+' on route “'+bf.name+'”. It can\'t fly its own route until that route ends. Its route is shown on the map.';
+  const r=d.run||{};
+  // A backup (or a drone that took over) shows the route it covers, filled once per run so later edits stay.
+  const cover=bf&&bf.route?bf:(r.active&&r.route?r:null);
+  if(cover&&cover.id&&cover.id!==filledRun){filledRun=cover.id;loadRoute(cover.name,cover.route)}$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
+function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtName').value=n;drawRoute();
   if(map&&route.length)map.fitBounds(route.map(p=>[p.lat,p.lon]),{padding:[30,30]})}
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value,
   loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,backup:$('rtBackup').value}}
@@ -7393,9 +7396,10 @@ def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None):
         if problem:
             return {"ok": False, "error": problem}
         # Claimed under the lock (not in the thread) so a second request can't take the same drones meanwhile.
-        run = {"active": True, "drone": slot, "backup": backup, "name": name or "unsaved route", "index": 0,
+        run = {"active": True, "id": f"{slot}-{time.time():.3f}", "route": route,
+               "drone": slot, "backup": backup, "name": name or "unsaved route", "index": 0,
                "total": len(route["points"]), "phase": "flying", "stop": False, "message": f"Route {name or 'unsaved route'} started"}
-        route_runs[f"{slot}-{time.time():.3f}"] = run
+        route_runs[run["id"]] = run
         for k in [k for k, r in route_runs.items() if not r["active"] and time.time() - r.get("ended_at", time.time()) > 3600]:
             route_runs.pop(k, None)
     threading.Thread(target=_run_route, args=(name or "unsaved route", route, by, slot, run), daemon=True).start()
@@ -7419,7 +7423,8 @@ def api_routes():
     run = run_of(slot) or next((r for r in reversed(list(route_runs.values())) if r["drone"] == slot), None) or {}
     b = backup_run_of(slot)
     return jsonify({"ok": True, "routes": load_routes(), "run": run, "max_distance_m": DRONE_LIMITS["max_distance_m"],
-                    "backup_for": {"drone": b["drone"], "label": drone_label(b["drone"]), "name": b["name"]} if b else None})
+                    "backup_for": {"drone": b["drone"], "label": drone_label(b["drone"]), "name": b["name"],
+                                   "id": b.get("id"), "route": b.get("route")} if b else None})
 
 
 @app.route("/api/routes/fly", methods=["POST"])
