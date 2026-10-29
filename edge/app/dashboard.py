@@ -6134,6 +6134,7 @@ DRONE_GRID_PAGE = hud_page("Drone Grid", r"""
 .dg-hud span{background:rgba(3,16,26,.85);border:1px solid #155879;color:#9edfff;padding:3px 7px;border-radius:3px;font:bold 10px Arial}
 .dg-hud b{color:#fff}
 .dg-off{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#6d8b9d;font:bold 12px Arial;letter-spacing:1px;text-align:center;padding:20px}
+.dg-tile .live-mode{top:auto!important;bottom:38px!important;right:10px!important}
 .dg-x{position:absolute;left:50%;top:50%;width:40px;height:40px;margin:-20px 0 0 -20px;border:2px solid rgba(91,217,255,.8);border-radius:50%;z-index:500;pointer-events:none}
 .dg-grid:fullscreen{background:#000;padding:8px;align-content:center;overflow:auto}
 .dg-grid:fullscreen .dg-tile{aspect-ratio:auto;height:calc((100vh - 16px - (var(--rows,1) - 1) * 10px) / var(--rows,1))}
