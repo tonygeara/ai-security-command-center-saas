@@ -7652,6 +7652,12 @@ AI Security Command Center
     box-sizing: border-box;
 }
 
+.confirm-armed {
+    background: #7a1020 !important;
+    border-color: #ff4d6a !important;
+    color: #fff !important;
+}
+
 html,
 body {
     margin: 0;
@@ -13324,14 +13330,28 @@ eventHistoryOverlay.addEventListener("click", event => {
     if (event.target === eventHistoryOverlay) closeEventHistory();
 });
 
-document.getElementById("clearAllEvents").addEventListener("click", async () => {
-    const confirmed = confirm(
-        "CLEAR ALL SECURITY EVENTS?\n\nThis permanently removes every event-history row and all snapshots saved by the dashboard."
-    );
-    if (!confirmed) return;
+// Delete buttons ask on the page itself (click again to confirm): the browser's own confirm box
+// can be switched off ("don't let this page create more dialogs"), which made deleting do nothing.
+function armedForDelete(button, question) {
+    if (button.dataset.armed === "1") return true;
+    button.dataset.armed = "1";
+    button.dataset.label = button.innerText;
+    button.innerText = question;
+    button.classList.add("confirm-armed");
+    clearTimeout(button._disarm);
+    button._disarm = setTimeout(() => {
+        button.dataset.armed = "";
+        button.innerText = button.dataset.label;
+        button.classList.remove("confirm-armed");
+    }, 4000);
+    return false;
+}
 
+document.getElementById("clearAllEvents").addEventListener("click", async () => {
     const button = document.getElementById("clearAllEvents");
-    const oldText = button.innerText;
+    if (!armedForDelete(button, "CLICK AGAIN TO CLEAR ALL EVENTS")) return;
+    clearTimeout(button._disarm);
+    const oldText = button.dataset.label;
     button.disabled = true;
     button.innerText = "CLEARING...";
 
@@ -13357,12 +13377,9 @@ document.addEventListener("click", async event => {
     if (!button) return;
 
     const eventIndex = Number(button.dataset.eventIndex);
-    const confirmed = confirm(
-        "Delete this security event?\n\nThe event and its snapshot will be permanently removed."
-    );
-    if (!confirmed) return;
-
-    const oldText = button.innerText;
+    if (!armedForDelete(button, "CLICK AGAIN TO DELETE")) return;
+    clearTimeout(button._disarm);
+    const oldText = button.dataset.label;
     button.disabled = true;
     button.innerText = "DELETING...";
 
