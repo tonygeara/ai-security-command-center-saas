@@ -5565,6 +5565,20 @@ def api_drone_stick():
                              and start_land_assist(slot, "down held near the ground"), daemon=True).start()
     else:
         link["down_since"] = 0
+    # Holding "up" on the ground (keyboard control on) takes off, no confirmation box.
+    on_ground = t.get("drone_connected") and not t.get("flying") and not t.get("motors_on") and time.time() - link["tel_at"] < 2
+    if stick["z"] >= 0.6 and on_ground:
+        link["up_since"] = link.get("up_since") or time.time()
+        if time.time() - link["up_since"] >= 0.7 and time.time() - link.get("auto_takeoff_at", 0) > 8:
+            link["up_since"], link["auto_takeoff_at"] = 0, time.time()
+            stop_land_assist(slot)
+
+            def go():
+                r = drone_command("takeoff", timeout=15.0, slot=slot)
+                _drone_event("Take-off (up key held)" if r["ok"] else f"Take-off failed: {r['error']}", slot)
+            threading.Thread(target=go, daemon=True).start()
+    else:
+        link["up_since"] = 0
     return jsonify({"ok": _drone_send(stick, slot)})
 
 
@@ -6180,7 +6194,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <input id="speed" type="range" min="0.1" max="0.5" step="0.05" value="0.3" style="width:100%" oninput="speedVal.textContent=Math.round(this.value*100)+'%'">
 <div class="dc-keys" style="margin-top:12px">
 <div><kbd>W</kbd><kbd>S</kbd> forward / back</div><div><kbd>A</kbd><kbd>D</kbd> left / right</div>
-<div><kbd>↑</kbd><kbd>↓</kbd> up / down</div><div><kbd>←</kbd><kbd>→</kbd> turn</div>
+<div><kbd>↑</kbd><kbd>↓</kbd> up / down (hold ↑ on the ground: take off · hold ↓ near the ground: land)</div><div><kbd>←</kbd><kbd>→</kbd> turn</div>
 <div><kbd>Space</kbd> stop &amp; hover</div><div>🎮 Gamepad works too</div></div>
 <div id="cmdMsg" class="hud-msg"></div>
 </div></section>
