@@ -10933,49 +10933,155 @@ FRONT CAMERA • FACE AI • LPR AI
 </div>
 </div>
 <div class="camera-box" style="min-height:280px;">
-<div id="droneCameraFeed" class="camera live-slot" data-live-camera="drone" data-live-deferred
-style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
+<!-- Every drone shares this one feed: the tiles split the space and follow drones being added or removed. -->
+<div class="dfg" id="droneFeedGrid">
+<div class="dfg-tile" data-drone="drone">
+<div id="droneCameraFeed" class="camera live-slot" data-live-camera="drone" data-live-deferred></div>
+</div>
+</div>
 <div class="corner tl"></div><div class="corner tr"></div>
 <div class="corner bl"></div><div class="corner br"></div>
 </div>
 <div class="camera-footer">
-<div class="cam-name">DRONE 01</div>
+<div class="cam-name" id="droneFeedCount">DRONE 01</div>
 <div id="droneTrackingReadout">TRACKING ASSIST • WAITING</div>
 </div>
 <style>
-.drone-fleet{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px;padding:9px;border-top:1px solid #123447}
-.drone-fleet a{display:block;padding:9px 11px;border:1px solid #164b67;border-radius:4px;background:rgba(2,15,24,.72);color:#d8f4ff;text-decoration:none;font-size:11px}
-.drone-fleet a:hover{border-color:#35caff;background:rgba(53,202,255,.10)}
-.drone-fleet b{color:#35caff;letter-spacing:1px}
-.drone-fleet .df-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#53636d;margin-right:6px}
-.drone-fleet .df-dot.ok{background:#26ee89}.drone-fleet .df-dot.half{background:#ffb23c}
-.drone-fleet .df-info{margin-top:5px;color:#8ba9b8;font-size:10px;letter-spacing:.5px}
-.drone-fleet .df-open{float:right;color:#5bd9ff;font-size:10px}
+.dfg{display:grid;gap:4px;height:420px;grid-template-columns:repeat(var(--c,1),minmax(0,1fr));grid-template-rows:repeat(var(--r,1),minmax(0,1fr))}
+.dfg-tile{position:relative;background:#000;overflow:hidden;min-height:0;border:1px solid #0f2f42}
+.dfg-tile.gone{display:none}
+.dfg-tile .live-slot,.dfg-tile .dfg-vcam{position:absolute;inset:0;width:100%;height:100%;min-height:0}
+.dfg-tile .live-slot video{width:100%;height:100%;object-fit:contain}
+.dfg-tile:fullscreen{border:0}
+.dfg-head{position:absolute;left:0;right:0;top:0;z-index:600;display:flex;justify-content:space-between;align-items:center;gap:6px;padding:5px 7px;background:linear-gradient(rgba(2,10,16,.85),rgba(2,10,16,0));font-size:10px}
+.dfg-head b{color:#e9f8ff;letter-spacing:1px}
+.dfg-head i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#53636d;margin-right:5px}
+.dfg-head i.ok{background:#26ee89}.dfg-head i.half{background:#ffb23c}
+.dfg-tag{font-size:8px;color:#ffcf7a;border:1px solid #7a5a12;border-radius:3px;padding:0 3px;margin-left:5px}
+.dfg-btns{display:flex;gap:4px}
+.dfg-btns a,.dfg-btns button{background:rgba(3,16,26,.85);border:1px solid #155879;color:#9edfff;border-radius:3px;padding:2px 6px;font:bold 9px Arial;letter-spacing:.5px;text-decoration:none;cursor:pointer}
+.dfg-btns button.confirm-armed{background:#7a1020;border-color:#ff4d6a;color:#fff}
+.dfg-hud{position:absolute;left:6px;right:6px;bottom:6px;z-index:600;display:flex;gap:4px;flex-wrap:wrap;pointer-events:none}
+.dfg-hud span{background:rgba(3,16,26,.85);border:1px solid #155879;color:#9edfff;padding:1px 5px;border-radius:3px;font:bold 9px Arial}
+.dfg-off{position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:#6d8b9d;font:bold 11px Arial;letter-spacing:1px;text-align:center;padding:12px;z-index:550;pointer-events:none}
+.dfg-tile .live-mode{top:auto!important;bottom:28px!important}
 </style>
-<div class="drone-fleet" id="droneFleet"></div>
-<div style="padding:0 9px 9px"><a href="/drone-grid" style="color:#5bd9ff;font-size:10px;letter-spacing:1px;text-decoration:none">▦ ALL DRONES GRID VIEW / FULL SCREEN →</a></div>
+<div style="padding:6px 9px 9px"><a href="/drone-grid" style="color:#5bd9ff;font-size:10px;letter-spacing:1px;text-decoration:none">▦ ALL DRONES GRID VIEW / FULL SCREEN →</a></div>
 <script>
 (function () {
-    const box = document.getElementById("droneFleet");
+    const grid = document.getElementById("droneFeedGrid");
     const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+    const fmt = (v, d) => v == null || isNaN(v) ? "–" : Number(v).toFixed(d);
+    const whenPlayer = fn => window.attachLiveCamera ? fn() : window.addEventListener("live-player-ready", fn, {once: true});
+    const primary = grid.querySelector('[data-drone="drone"]');
+    const tiles = {drone: primary};
+    let leaflet = null;
+
+    // Virtual drones have no video: show the satellite view under them instead (Leaflet loads only when needed).
+    function needLeaflet() {
+        if (window.L) return Promise.resolve();
+        if (!leaflet) leaflet = new Promise(ok => {
+            const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+            const js = document.createElement("script"); js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"; js.onload = ok;
+            document.head.append(css, js);
+        });
+        return leaflet;
+    }
+    function vcam(t, x) {
+        if (!x.lat) return;
+        needLeaflet().then(() => {
+            if (!t.isConnected) return;
+            const z = x.altitude > 90 ? 16 : x.altitude > 45 ? 17 : x.altitude > 15 ? 18 : 19;
+            if (!t._map) {
+                t._map = L.map(t.querySelector(".dfg-vcam"), {zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false,
+                    doubleClickZoom: false, boxZoom: false, keyboard: false, touchZoom: false});
+                L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {maxZoom: 19}).addTo(t._map);
+                t._map.setView([x.lat, x.lon], z);
+            } else t._map.setView([x.lat, x.lon], z, {animate: false});
+        });
+    }
+
+    function addParts(t, x) {
+        t.insertAdjacentHTML("beforeend", '<div class="dfg-off"></div><div class="dfg-head"><span><i></i><b></b></span><span class="dfg-btns">'
+            + '<a href="/drone-control?drone=' + encodeURIComponent(x.drone) + '">CONTROLS</a>'
+            + '<button type="button" data-act="full" title="Full screen this drone">⛶</button>'
+            + (!x.virtual && x.drone !== "drone" ? '<button type="button" data-act="remove" title="Remove this drone">✕</button>' : '')
+            + '</span></div><div class="dfg-hud"></div>');
+        const full = () => document.fullscreenElement ? document.exitFullscreen() : t.requestFullscreen?.();
+        t.querySelector('[data-act="full"]').addEventListener("click", full);
+        t.addEventListener("dblclick", full);
+        t.querySelector('[data-act="remove"]')?.addEventListener("click", async e => {
+            const btn = e.currentTarget;
+            const reset = () => { btn.dataset.armed = ""; btn.textContent = "✕"; btn.classList.remove("confirm-armed"); btn.disabled = false; };
+            if (btn.dataset.armed !== "1") {  // click again within 4 s to confirm
+                btn.dataset.armed = "1"; btn.textContent = "REMOVE?"; btn.classList.add("confirm-armed");
+                clearTimeout(btn._t); btn._t = setTimeout(reset, 4000);
+                return;
+            }
+            clearTimeout(btn._t); btn.disabled = true; btn.textContent = "REMOVING…";
+            try {
+                const r = await fetch("/api/sources/" + encodeURIComponent(x.drone), {method: "DELETE"});
+                const d = await r.json();
+                if (!r.ok || !d.ok) throw new Error(d.error || "Could not remove");
+                drop(x.drone);
+            } catch (err) { alert(err.message); reset(); }
+        });
+    }
+    function tileFor(x) {
+        const t = document.createElement("div");
+        t.className = "dfg-tile"; t.dataset.drone = x.drone;
+        t.innerHTML = x.virtual ? '<div class="dfg-vcam"></div>' : '<div class="live-slot" data-live-camera="' + esc(x.drone) + '"></div>';
+        if (!x.virtual && window.droneFeedOn !== false) whenPlayer(() => window.attachLiveCamera(t.querySelector(".live-slot")));
+        return t;
+    }
+    function drop(name) {
+        const t = tiles[name];
+        if (!t || name === "drone") return;
+        const s = t.querySelector(".live-slot");
+        if (s) window.detachLiveCamera?.(s);
+        t._map?.remove();
+        t.remove(); delete tiles[name];
+        layout();
+    }
+    function paint(t, x) {
+        if (!t._parts) { addParts(t, x); t._parts = true; }
+        t.querySelector(".dfg-head i").className = x.drone_connected ? "ok" : x.phone_connected ? "half" : "";
+        t.querySelector(".dfg-head b").innerHTML = esc(x.label).toUpperCase() + (x.virtual ? '<span class="dfg-tag">VIRTUAL</span>' : '');
+        const down = !x.phone_connected || !x.drone_connected, off = t.querySelector(".dfg-off");
+        // Real drones may still send video with the phone link down, so only virtual tiles are blanked.
+        off.style.display = x.virtual && down ? "flex" : "none";
+        off.textContent = x.over_limit ? "OVER LICENCE LIMIT" : !x.phone_connected ? "NOT CONNECTED" : "DRONE OFF";
+        const state = x.mission ? (x.mission === "route" ? "ROUTE" : x.mission === "backup" ? "BACKUP" : "RESPONSE") : x.flying ? "FLYING" : "ON GROUND";
+        t.querySelector(".dfg-hud").innerHTML = x.over_limit ? "<span>OVER LICENCE LIMIT</span>" : !x.drone_connected ? ""
+            : "<span>" + state + "</span><span>BAT " + (x.battery ?? "–") + "%</span><span>ALT " + fmt(x.altitude, 1) + " m</span>";
+        if (x.virtual) vcam(t, x);
+    }
+    // 1 drone fills the feed, 2 side by side, 3-4 in a 2×2, then 3 per row; the feed grows a little with many drones.
+    function layout() {
+        const n = Object.values(tiles).filter(t => !t.classList.contains("gone")).length || 1;
+        const c = n <= 1 ? 1 : n <= 4 ? 2 : 3, r = Math.ceil(n / c);
+        grid.style.setProperty("--c", c); grid.style.setProperty("--r", r);
+        grid.style.height = (r <= 1 ? 420 : r === 2 ? 480 : 600) + "px";
+        document.getElementById("droneFeedCount").textContent = n > 1 ? n + " DRONES" : "DRONE 01";
+        Object.values(tiles).forEach(t => t._map?.invalidateSize());
+    }
     async function refresh() {
         let d;
         try { d = await fetch("/api/drone/links", {cache: "no-store"}).then(r => r.json()); } catch (e) { return; }
         if (!d.ok) return;
-        box.innerHTML = d.drones.map(x => {
-            const dot = x.drone_connected ? "ok" : x.phone_connected ? "half" : "";
-            const info = x.over_limit ? "Over licence limit"
-                : x.mission ? (x.mission === "route" ? "Flying a route" : x.mission === "backup" ? "Standing by as backup" : "On a drone response")
-                : x.drone_connected ? (x.flying ? "Flying" : "Ready on the ground") + (x.battery != null ? " · battery " + x.battery + "%" : "")
-                : x.phone_connected ? "Phone connected · drone off" : "Phone not paired";
-            return '<a href="/drone-control?drone=' + encodeURIComponent(x.drone) + '" title="Open the controls for ' + esc(x.label) + '">'
-                + '<span class="df-open">CONTROLS →</span><span class="df-dot ' + dot + '"></span><b>' + esc(x.label).toUpperCase() + '</b>'
-                + (x.virtual ? ' <span style="color:#ffcf7a;font-size:9px;border:1px solid #7a5a12;border-radius:3px;padding:1px 4px">VIRTUAL</span>' : '')
-                + '<div class="df-info">' + esc(info) + '</div></a>';
-        }).join("");
+        const seen = new Set(d.drones.map(x => x.drone));
+        // The first drone keeps its fixed tile; it is only hidden when other drones exist without it.
+        primary.classList.toggle("gone", !seen.has("drone") && d.drones.length > 0);
+        for (const x of d.drones) {
+            if (!tiles[x.drone]) { tiles[x.drone] = tileFor(x); grid.appendChild(tiles[x.drone]); }
+            paint(tiles[x.drone], x);
+        }
+        Object.keys(tiles).filter(k => !seen.has(k)).forEach(drop);
+        layout();
     }
+    document.addEventListener("fullscreenchange", () => setTimeout(layout, 100));
     refresh();
-    setInterval(refresh, 4000);
+    setInterval(refresh, 3000);
 })();
 </script>
 </div>
@@ -11030,7 +11136,7 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
     const count = document.getElementById("multiGridCount");
     const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
     const tiles = {};
-    let names = {main: null, drone: null};
+    let names = {main: null, drone: null}, droneSources = [];
 
     const whenPlayerReady = fn => window.attachLiveCamera ? fn()
         : window.addEventListener("live-player-ready", fn, {once: true});
@@ -11062,14 +11168,21 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
         }
         setSwitch(btn, visible);
         panel.classList.toggle("feed-off", !visible);
-        showFeed(slot, visible);
+        if (key === "drone") {
+            window.droneFeedOn = visible;
+            document.querySelectorAll("#droneFeedGrid .live-slot").forEach(s => showFeed(s, visible));
+        } else showFeed(slot, visible);
     }
     document.querySelectorAll("[data-feed-switch]").forEach(btn => btn.addEventListener("click", async () => {
         const key = btn.dataset.feedSwitch, name = names[key];
         if (!name) return;
         const on = btn.getAttribute("aria-pressed") !== "true";
         btn.disabled = true;
-        try { await post("/api/sources/" + encodeURIComponent(name) + "/feed", {visible: on}); syncPrimary(key, on); }
+        try {
+            for (const n of key === "drone" && droneSources.length ? droneSources : [name])
+                await post("/api/sources/" + encodeURIComponent(n) + "/feed", {visible: on});
+            syncPrimary(key, on);
+        }
         catch (e) { alert(e.message); }
         finally { btn.disabled = false; }
     }));
@@ -11144,12 +11257,13 @@ style="width:100%;height:420px;min-height:280px;max-height:520px;"></div>
                 btn.dataset.synced = "1";
             }
         }
-        // The main camera and first drone have their own panels above; the grid shows the rest.
-        const extra = all.filter(c => !c.primary);
+        droneSources = all.filter(c => c.kind === "drone").map(c => c.name);
+        // The main camera has its own panel and every drone is in the drone feed; the grid shows the other cameras.
+        const extra = all.filter(c => !c.primary && c.kind !== "drone");
         count.textContent = all.filter(c => c.online).length + " / " + all.length + " ONLINE";
         if (!extra.length) {
-            grid.innerHTML = '<div class="grid-empty">No additional cameras or drones yet. Use <b>+ ADD CAMERA</b> or <b>+ ADD DRONE</b> below; '
-                + 'each one appears here live.</div>';
+            grid.innerHTML = '<div class="grid-empty">No additional cameras yet. Use <b>+ ADD CAMERA</b> below and it appears here live. '
+                + 'Drones added with <b>+ ADD DRONE</b> appear in the drone live feed.</div>';
             for (const k in tiles) delete tiles[k];
             return;
         }
