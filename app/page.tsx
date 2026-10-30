@@ -60,6 +60,7 @@ export default function Home() {
         </a>
         <nav aria-label="Main">
           <a href="#features">Features</a>
+          <a href="/drones">Drone patrols</a>
           <a href="#how">How it works</a>
           <a href="#faq">FAQ</a>
         </nav>
@@ -115,6 +116,17 @@ export default function Home() {
             </article>
           ))}
         </div>
+      </section>
+
+      <section className="hSection">
+        <a href="/drones" className="dTeaser">
+          <div>
+            <p className="eyebrow">NEW · DRONE PATROLS</p>
+            <h2>Add eyes in the sky.</h2>
+            <p>Schedule autopilot drone patrols, send a drone to any alarm in one tap, and recognize faces from the air.</p>
+          </div>
+          <span className="btn">Explore drone patrols →</span>
+        </a>
       </section>
 
       <section id="how" className="hSection hHow">
@@ -174,6 +186,7 @@ export default function Home() {
         </div>
         <nav aria-label="Footer">
           <a href="#features">Features</a>
+          <a href="/drones">Drone patrols</a>
           <a href="#how">How it works</a>
           <a href="#faq">FAQ</a>
           <a href="/login">Sign in</a>

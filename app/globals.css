@@ -65,3 +65,41 @@ html{scroll-behavior:smooth}body{background:#050b12}.landing{overflow:hidden}.la
 .login-card a{color:#8fe6ff}
 .formMsg{min-height:1.2em}
 @media(max-width:520px){.login-card{margin:24px auto;padding:22px}.shell{padding:16px}}
+
+/* ===== Drone page ===== */
+.hNav nav a[aria-current=page]{color:#fff;box-shadow:inset 0 -2px 0 #37d4ff;padding-bottom:4px}
+.dPanel{background:#091824;border:1px solid #2b6687;border-radius:20px;padding:12px;box-shadow:0 40px 100px #007bc52c}
+.dMap{position:relative;border-radius:12px;overflow:hidden;background:#071520;height:260px}.dMap svg{width:100%;height:100%;display:block}
+.dRoute{animation:dDash 1.6s linear infinite}@keyframes dDash{to{stroke-dashoffset:-26}}
+.dDrone{animation:dPulse 2s ease-in-out infinite;transform-origin:300px 45px}@keyframes dPulse{50%{opacity:.6}}
+@media(prefers-reduced-motion:reduce){.dRoute,.dDrone{animation:none}}
+.dHud{position:absolute;left:10px;bottom:10px;display:flex;gap:8px}.dHud span{background:#061019cc;border:1px solid #24546d;border-radius:6px;padding:4px 8px;font-size:10px;color:#9fe9ff;letter-spacing:.06em}
+.dFeedRow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.dFeed{height:160px;border-radius:10px;padding:13px;position:relative;overflow:hidden;background:radial-gradient(circle at 50% 60%,#2a3f3a,#0a1820 70%)}.dFeed strong{font-size:10px;color:#86a9ba}
+.dFace{position:absolute;left:50%;top:30px;width:58px;height:70px;transform:translateX(-50%);border:2px solid #ffbd66;border-radius:6px}
+.dFeed .box{background:#4a3410;color:#ffcf7a}
+.dStrip span{white-space:nowrap}
+.dSplit{display:grid;grid-template-columns:1.1fr .9fr;gap:48px;align-items:center}.dSplit h2{font-size:40px;line-height:1.15;letter-spacing:-.03em;margin:10px 0 18px}
+.dBody{color:#9fb5c3;line-height:1.7;font-size:17px}
+.dList,.dSafety{list-style:none;padding:0;margin:20px 0 0;display:grid;gap:12px}.dList li,.dSafety li{color:#c9d9e4;padding-left:28px;position:relative;line-height:1.5}
+.dList li:before,.dSafety li:before{content:"✓";position:absolute;left:0;color:#54ef9c;font-weight:900}
+.dSafety{grid-template-columns:1fr 1fr;gap:12px 28px}
+.dIdCard{background:#0a151f;border:1px solid #24546d;border-radius:18px;padding:18px;box-shadow:0 30px 80px #007bc522}
+.dIdRow{display:flex;align-items:center;gap:14px;padding:14px;border-radius:12px;background:#0d1d2a;margin-bottom:10px}
+.dIdRow i{width:42px;height:42px;border-radius:50%;background:#16384c;flex:none}.dIdRow div{flex:1}.dIdRow small{display:block;color:#7f9aab;margin-top:3px}
+.dIdRow em{font-style:normal;font-size:10px;font-weight:800;letter-spacing:.1em;padding:5px 8px;border-radius:6px;background:#12293a;color:#9fe9ff}
+.dIdRow.known i{background:#0d503b}.dIdRow.known em{background:#0d503b;color:#75ffc0}
+.dIdRow.unknown{border:1px solid #7a5a12}.dIdRow.unknown i{background:#4a3410}.dIdRow.unknown em{background:#4a3410;color:#ffcf7a}
+.dIdCard p{color:#7f9aab;font-size:13px;margin:8px 4px 0}
+.dScenarios{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-top:40px}
+.dScenarios article{background:#0a151f;border:1px solid #18374a;border-top:3px solid #37d4ff;border-radius:16px;padding:24px}.dScenarios h3{margin:0 0 10px;font-size:17px}.dScenarios p{color:#9fb5c3;line-height:1.6;margin:0}
+.dSteps{grid-template-columns:repeat(4,1fr)}
+.dTeaser{display:flex;align-items:center;justify-content:space-between;gap:28px;padding:40px;border-radius:20px;text-decoration:none;border:1px solid #2b6687;background:radial-gradient(circle at 85% 30%,#0a3d5c,#08141e 60%)}
+.dTeaser h2{font-size:34px;margin:8px 0 10px;letter-spacing:-.02em}.dTeaser p{color:#9fb5c3;max-width:560px;line-height:1.6;margin:0}.dTeaser .btn{white-space:nowrap}
+.dTeaser:hover{border-color:#37d4ff}
+@media(max-width:900px){
+ .dSplit{grid-template-columns:1fr;gap:28px}.dSplit h2{font-size:30px}
+ .dScenarios,.dSteps,.dSafety{grid-template-columns:1fr}
+ .dMap{height:200px}.dFeedRow{grid-template-columns:1fr}
+ .dTeaser{flex-direction:column;align-items:flex-start;padding:26px}.dTeaser h2{font-size:28px}.dTeaser .btn{width:100%;text-align:center;white-space:normal}
+}
