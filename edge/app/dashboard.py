@@ -6319,6 +6319,8 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <label style="margin-top:10px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="rtLoop" onchange="routeInfo()"> <b>Repeat the route again and again</b> until you press Stop route</label>
 <label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtRelay"> Relay: at
 <input id="rtSwap" type="number" min="20" max="50" value="20" style="width:64px">% battery the drone returns home and the next ready drone takes off and continues the patrol</label>
+<label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtNoBat" onchange="noBatUi()"> <b>Keep patrolling whatever the battery level</b> (no return home or swap by the PC)</label>
+<div id="noBatNote" class="hud-msg bad" style="display:none">The PC will not bring the drone home for battery. The drone's own low-battery protection still takes over (DJI: return home, then forced landing when critical) and the patrol stops there. Watch the battery yourself.</div>
 <div class="muted" style="margin-top:4px">A continuous patrol always sends the drone home at that battery level; without relay the patrol then ends. Each drone needs its own phone and controller (or use virtual drones).</div>
 <div class="actions" style="margin-top:12px"><input id="rtName" placeholder="Route name" style="flex:1;min-width:120px"><button class="hud-btn" onclick="saveRoute()">Save</button><button class="hud-btn danger" onclick="deleteRoute()">Delete</button></div>
 <label style="margin-top:8px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap">Backup drone
@@ -6505,10 +6507,12 @@ async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.jso
   // A backup (or a drone that took over) shows the route it covers, filled once per run so later edits stay.
   const cover=bf&&bf.route?bf:(r.active&&r.route?r:null);
   if(cover&&cover.id&&cover.id!==filledRun){filledRun=cover.id;loadRoute(cover.name,cover.route)}$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
-function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtName').value=n;drawRoute();
+function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtNoBat').checked=!!r.ignore_battery;noBatUi();$('rtName').value=n;drawRoute();
   if(map&&route.length)map.fitBounds(route.map(p=>[p.lat,p.lon]),{padding:[30,30]})}
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value,
-  loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,backup:$('rtBackup').value}}
+  loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,ignore_battery:$('rtNoBat').checked,backup:$('rtNoBat').checked?'':$('rtBackup').value}}
+// Ignoring the battery means no swap, so relay and backup are switched off while it is ticked.
+function noBatUi(){const on=$('rtNoBat').checked;['rtRelay','rtSwap','rtBackup'].forEach(id=>$(id).disabled=on);$('noBatNote').style.display=on?'':'none'}
 async function saveRoute(){if(!route.length){rtmsg('Draw at least one stop.',false);return}const d=await fetch('/api/routes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value})}).then(r=>r.json());
   rtmsg(d.ok?'Route “'+d.name+'” saved.':d.error,d.ok);await loadRoutes();if(d.ok)$('routeSel').value=d.name}
 async function deleteRoute(){const n=$('routeSel').value;if(!n||!confirm('Delete route “'+n+'”?'))return;await fetch('/api/routes',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})});rtmsg('Deleted.',true);loadRoutes()}
@@ -7193,7 +7197,7 @@ def _clean_route(r):
     return {"points": pts, "alt": max(10.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(r.get("alt") or 30))),
             "speed": max(1.0, min(8.0, float(r.get("speed") or 5))), "pause": max(0.0, min(120.0, float(r.get("pause") or 0))),
             "end": r.get("end") if r.get("end") in ("hover", "home", "land") else "home",
-            "loop": bool(r.get("loop")), "relay": bool(r.get("relay")),
+            "loop": bool(r.get("loop")), "relay": bool(r.get("relay")), "ignore_battery": bool(r.get("ignore_battery")),
             "swap_at": max(20, min(50, int(float(r.get("swap_at") or 20))))}
 
 
@@ -7318,11 +7322,14 @@ def _hand_over(name, route, old, stop, run):
 
 def _run_route(name, route, by, slot, run):
     pts = route["points"]
-    run.update(swap_at=route["swap_at"] if (route["loop"] or route["relay"] or run.get("backup")) else 0, lap=1, handovers=0)
+    # "Ignore battery": the PC never sends the drone home or swaps it; only the drone's own low-battery protection acts.
+    nobat = route.get("ignore_battery")
+    run.update(swap_at=route["swap_at"] if not nobat and (route["loop"] or route["relay"] or run.get("backup")) else 0, lap=1, handovers=0)
     who = f" ({drone_label(slot)})" if len(drone_slots()) > 1 else ""
     kind = " · continuous patrol" if route["loop"] else ""
-    kind += f" · relay at {route['swap_at']}%" if route["relay"] else ""
-    kind += f" · backup {drone_label(run['backup'])}" if run.get("backup") else ""
+    kind += " · ignoring battery level" if nobat else ""
+    kind += f" · relay at {route['swap_at']}%" if route["relay"] and not nobat else ""
+    kind += f" · backup {drone_label(run['backup'])}" if run.get("backup") and not nobat else ""
     _drone_event(f"Route {name} started ({len(pts)} stops, {by}{kind})", slot)
     send_telegram(f"🗺️ Route “{name}”{who} started: {len(pts)} stops at {int(route['alt'])} m{kind}.") if telegram_ready() else None
     i = 0
@@ -7433,6 +7440,8 @@ def api_routes_fly():
     try:
         drone = data.get("drone") or request.args.get("drone")
         backup = data.get("backup") if data.get("backup") in drone_slots() else None
+        if data.get("ignore_battery"):
+            backup = None  # nothing is swapped, so no drone is held back as backup
         r = fly_route(data.get("name"), data if data.get("points") else None, by="dashboard",
                       drone=drone if drone in drone_slots() else None, backup=backup)
     except (TypeError, ValueError, KeyError) as e:
