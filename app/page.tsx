@@ -1,138 +1,165 @@
-import type {ReactNode} from "react";
+import type {Metadata} from "next";
+import {DronePanel} from "./components/DronePanel";
+import {FinalCta, JsonLd, SITE_NAME, SITE_URL, SiteFooter, SiteNav, faqJsonLd, icon} from "./components/Site";
 
-const icon = (d: ReactNode) => (
-  <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{d}</svg>
-);
+export const metadata: Metadata = {
+  title: {absolute: "AI Drone Security & Autonomous Drone Patrols | AI Security Command Center"},
+  description:
+    "Autonomous security drones that patrol your property on a schedule, respond to alarms in one tap and recognize faces and vehicles with AI. Book a free demo.",
+  alternates: {canonical: "/"},
+};
 
-const features = [
+const capabilities = [
   {
-    title: "Person & vehicle alerts",
-    text: "Your cameras spot people and vehicles in real time, so you get a useful alert instead of a notification for every shadow or swaying tree.",
-    icon: icon(<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>),
+    title: "Autonomous drone patrols",
+    text: "Draw a route on a map once. The drone takes off, flies every checkpoint and comes home on its own.",
+    icon: icon(<><circle cx="5" cy="18" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="19" cy="15" r="2"/><path d="M6.5 16.5L10.8 7.8M13.6 7.3l4.2 6.2"/></>),
   },
   {
-    title: "Know who's at the door",
-    text: "Add the people who belong — family, staff, regular visitors — and get flagged when someone you don't know shows up.",
-    icon: icon(<><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></>),
+    title: "Patrols on a schedule",
+    text: "Night rounds at 2 a.m., weekend sweeps, shift changes — patrols launch automatically on the days and times you set.",
+    icon: icon(<><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/><path d="M12 14v3l2 1"/></>),
   },
   {
-    title: "License plate reading",
-    text: "Read plates as vehicles arrive and recognize the ones you've saved, from your own car to delivery vans.",
-    icon: icon(<><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 12h2M11 12h2M16 12h2"/></>),
+    title: "Instant alarm response",
+    text: "When an alarm or camera detects something, a drone flies straight to the spot and shows you live video in seconds.",
+    icon: icon(<><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></>),
   },
   {
-    title: "Live drone view",
-    text: "Stream a drone's camera into the same screen as your fixed cameras for a bird's-eye look at larger properties.",
-    icon: icon(<><circle cx="5" cy="5" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M7 7l3 3M17 7l-3 3M7 17l3-3M17 17l-3-3"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/></>),
+    title: "AI face recognition from the air",
+    text: "The drone's camera recognizes your enrolled people and flags strangers, people and vehicles automatically.",
+    icon: icon(<><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="12" cy="10" r="2.5"/><path d="M8 17c.8-2 2.3-3 4-3s3.2 1 4 3"/></>),
   },
   {
-    title: "Video stays on your property",
-    text: "The AI runs on a Windows PC at your location. Your camera footage is analysed there, not uploaded to someone else's servers.",
-    icon: icon(<><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z"/><path d="M9 21v-6h6v6"/></>),
+    title: "24/7 coverage with drone relay",
+    text: "When one drone's battery runs low it returns home and the next drone takes off to continue the patrol.",
+    icon: icon(<><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></>),
   },
   {
-    title: "Manage it from anywhere",
-    text: "Sign in to your online portal to check your system's status, add devices and manage your account from any browser.",
-    icon: icon(<><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></>),
+    title: "Alerts and control on your phone",
+    text: "Get alerts with snapshots, approve a scheduled patrol or send the drone out with one tap from anywhere.",
+    icon: icon(<><rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/></>),
   },
+];
+
+const scenarios = [
+  ["Farms & rural land", "Patrol fence lines, barns and long driveways that fixed cameras can't cover."],
+  ["Construction sites & yards", "Run night patrols over equipment and materials after the crew leaves."],
+  ["Estates & large homes", "Sweep the whole perimeter in minutes and see who's on the property."],
+  ["Commercial & industrial", "Support your guards with aerial patrols and a fast first look at every alarm."],
 ];
 
 const steps = [
-  ["Create your account", "Sign up online in a minute. No hardware to buy from us."],
-  ["Install on a Windows PC", "Download the Command Center app onto a PC at your property and connect your IP cameras."],
-  ["Pair and you're protected", "Link the PC to your account with a pairing code. Alerts and controls are ready right away."],
+  ["Book a demo", "Tell us about your property. We'll show you how drone patrols would work for your site."],
+  ["Connect your drone", "Install the Command Center on a Windows PC and pair a supported DJI drone with our Drone Link app."],
+  ["Plan routes & schedules", "Tap checkpoints on a map, set patrol times, and choose auto-start or approve-first."],
+  ["Get protected from above", "Watch live aerial video with AI detections and get alerts the moment something's found."],
 ];
 
-const faqs = [
-  ["What do I need to get started?", "A Windows PC that can stay on at your property, and one or more IP security cameras on the same network. The app sets up everything else for you."],
-  ["Will my existing cameras work?", "Most IP cameras that provide a standard video stream (RTSP) will work. If you're unsure about a specific model, create an account and we'll help you check."],
-  ["Is my video sent to the cloud?", "No. Video is processed on the PC at your location by default. The online portal is used to manage your account and devices."],
-  ["How much does it cost?", "Plans depend on how many cameras and which features you need. After you create an account you'll see the options available in your portal, and you can change plans at any time."],
-  ["Do you support larger sites?", "Yes. For businesses, multi-site operations and government, we can set up custom limits, deployment and features. Create an account to start the conversation."],
+const faqs: [string, string][] = [
+  ["What is an autonomous security drone?", "It's a drone that flies security patrols by itself. You plan the route and schedule once; the drone takes off, flies each checkpoint while AI watches the video, and returns home — with a pilot able to take over at any time."],
+  ["Which drones are supported?", "We work with DJI drones through our Drone Link Android app, tested with the DJI Mini 3 Pro and RC-N1 controller. Other DJI models may work but haven't been tested yet."],
+  ["Do I need security cameras too?", "No. Drones work on their own. If you have IP cameras, the system can use them too, so a camera alert can send a drone straight to the spot."],
+  ["Can drones patrol at night or around the clock?", "Patrols can be scheduled at any time and repeated continuously. With more than one drone, the relay feature swaps drones automatically when batteries run low."],
+  ["Is it legal to fly security drones?", "Drone rules depend on your country and site. You must follow your local aviation rules, which may require a licensed pilot and keeping the drone in sight. Ask us and we'll help you plan a compliant setup."],
+  ["Is my video sent to the cloud?", "No. Drone and camera video is analysed on a PC at your property. The online portal only manages your account and devices."],
 ];
+
+const orgJsonLd = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {"@type": "Organization", "@id": `${SITE_URL}/#org`, name: SITE_NAME, url: SITE_URL, logo: `${SITE_URL}/icon.svg`,
+     contactPoint: {"@type": "ContactPoint", contactType: "sales", url: `${SITE_URL}/contact`}},
+    {"@type": "WebSite", "@id": `${SITE_URL}/#website`, url: SITE_URL, name: SITE_NAME, publisher: {"@id": `${SITE_URL}/#org`}},
+    {"@type": "SoftwareApplication", name: SITE_NAME, applicationCategory: "SecurityApplication", operatingSystem: "Windows, Android",
+     description: "Autonomous drone patrols, scheduled drone security, alarm response and AI face recognition for properties and businesses.",
+     publisher: {"@id": `${SITE_URL}/#org`}},
+  ],
+};
 
 export default function Home() {
   return (
     <main className="home">
-      <header className="hNav">
-        <a href="/" className="hBrand" aria-label="AI Security Command Center home">
-          AI SECURITY <span>COMMAND CENTER</span>
-        </a>
-        <nav aria-label="Main">
-          <a href="#features">Features</a>
-          <a href="/drones">Drone patrols</a>
-          <a href="#how">How it works</a>
-          <a href="#faq">FAQ</a>
-        </nav>
-        <div className="hNavActions">
-          <a href="/login" className="hSignIn">Sign in</a>
-          <a className="btn small" href="/signup">Get started</a>
-        </div>
-      </header>
+      <JsonLd data={orgJsonLd}/>
+      <JsonLd data={faqJsonLd(faqs)}/>
+      <SiteNav/>
 
       <section className="hHero">
         <div>
-          <p className="eyebrow">AI SECURITY FOR HOMES &amp; BUSINESSES</p>
-          <h1>Smarter alerts from the cameras <em>you already have.</em></h1>
+          <p className="eyebrow">AI DRONE SECURITY</p>
+          <h1>Autonomous security drones that <em>patrol for you.</em></h1>
           <p className="lead">
-            Turn your security cameras into a system that recognizes people, vehicles and license plates —
-            with video kept on your own property.
+            Schedule drone patrols that fly themselves, send a drone to any alarm in seconds, and let AI recognize
+            faces and vehicles from the air. One command center for your whole property.
           </p>
           <div className="hActions">
-            <a className="btn" href="/signup">Get started</a>
-            <a className="ghost" href="#how">See how it works</a>
+            <a className="btn" href="/contact">Book a free demo</a>
+            <a className="ghost" href="/drones">See drone patrols</a>
           </div>
           <ul className="hChecks">
-            <li>Works with most IP cameras</li>
-            <li>Video stays on-site</li>
-            <li>Set up in minutes</li>
+            <li>Autopilot routes</li>
+            <li>Scheduled patrols</li>
+            <li>AI face recognition</li>
           </ul>
         </div>
-        <div className="heroPanel" aria-hidden="true">
-          <div className="screenTop"><i/> SYSTEM ONLINE <span>LIVE AI</span></div>
-          <div className="feedGrid">
-            <div className="feed"><strong>FRONT DOOR</strong><span className="box">PERSON DETECTED</span></div>
-            <div className="feed car"><strong>DRIVEWAY</strong><span className="box">VEHICLE · PLATE READ</span></div>
-            <div className="feed drone"><strong>DRONE</strong><span className="box">LIVE FEED</span></div>
-            <div className="feed events">
-              <strong>RECENT EVENTS</strong>
-              <p>Person at front door <small>now</small></p>
-              <p>Known vehicle arrived <small>2m</small></p>
-              <p>Camera back online <small>5m</small></p>
-            </div>
-          </div>
-        </div>
+        <DronePanel/>
+      </section>
+
+      <section className="strip dStrip">
+        <span>AUTONOMOUS PATROLS</span><span>SCHEDULED FLIGHTS</span><span>ALARM RESPONSE</span><span>FACE AI</span><span>DRONE RELAY</span>
       </section>
 
       <section id="features" className="hSection">
-        <p className="eyebrow">WHAT YOU GET</p>
-        <h2>Everything you need to see what's happening — and nothing you don't.</h2>
+        <p className="eyebrow">DRONE SECURITY, DONE FOR YOU</p>
+        <h2>A security patrol that flies itself.</h2>
         <div className="hFeatures">
-          {features.map(f => (
-            <article key={f.title}>
-              <div className="hIcon">{f.icon}</div>
-              <h3>{f.title}</h3>
-              <p>{f.text}</p>
+          {capabilities.map(c => (
+            <article key={c.title}>
+              <div className="hIcon">{c.icon}</div>
+              <h3>{c.title}</h3>
+              <p>{c.text}</p>
             </article>
           ))}
+        </div>
+        <div className="hCenter"><a className="ghost" href="/drones">Explore all drone patrol features →</a></div>
+      </section>
+
+      <section className="hSection dSplit">
+        <div>
+          <p className="eyebrow">FACE AI IN THE AIR</p>
+          <h2>Know who is on your property — not just that someone is.</h2>
+          <p className="dBody">
+            Enroll the people who belong: family, staff, contractors. On every patrol, the drone's camera feeds the AI in
+            real time. Known people are matched by name. Anyone unknown is flagged and saved with a snapshot so you can act fast.
+          </p>
+          <ul className="dList">
+            <li>Recognizes enrolled faces and flags strangers</li>
+            <li>Detects people and vehicles from above</li>
+            <li>Every sighting logged with time and location</li>
+          </ul>
+        </div>
+        <div className="dIdCard" aria-hidden="true">
+          <div className="dIdRow known"><i/><div><b>Known · Staff</b><small>Checkpoint 1 · Main gate</small></div><em>MATCH</em></div>
+          <div className="dIdRow unknown"><i/><div><b>Unknown person</b><small>Checkpoint 2 · North fence</small></div><em>ALERT</em></div>
+          <div className="dIdRow"><i/><div><b>Vehicle detected</b><small>Checkpoint 4 · Yard entrance</small></div><em>LOGGED</em></div>
+          <p>Alert sent to your phone with snapshot · Recall or continue patrol</p>
         </div>
       </section>
 
       <section className="hSection">
-        <a href="/drones" className="dTeaser">
-          <div>
-            <p className="eyebrow">NEW · DRONE PATROLS</p>
-            <h2>Add eyes in the sky.</h2>
-            <p>Schedule autopilot drone patrols, send a drone to any alarm in one tap, and recognize faces from the air.</p>
-          </div>
-          <span className="btn">Explore drone patrols →</span>
-        </a>
+        <p className="eyebrow">WHO IT'S FOR</p>
+        <h2>Built for properties too big for cameras alone.</h2>
+        <div className="dScenarios">
+          {scenarios.map(([t, d]) => (
+            <article key={t}><h3>{t}</h3><p>{d}</p></article>
+          ))}
+        </div>
       </section>
 
       <section id="how" className="hSection hHow">
         <p className="eyebrow">HOW IT WORKS</p>
-        <h2>Up and running in three steps.</h2>
-        <ol className="hSteps">
+        <h2>From first call to first patrol.</h2>
+        <ol className="hSteps dSteps">
           {steps.map(([title, text], i) => (
             <li key={title}>
               <span className="hStepNum">{i + 1}</span>
@@ -141,19 +168,18 @@ export default function Home() {
             </li>
           ))}
         </ol>
-        <div className="hCenter"><a className="btn" href="/signup">Create your account</a></div>
       </section>
 
-      <section className="hSection">
+      <section id="cameras" className="hSection">
         <div className="hPrivacy">
-          <div className="hIcon big">{icon(<><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></>)}</div>
+          <div className="hIcon big">{icon(<><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></>)}</div>
           <div>
-            <p className="eyebrow">PRIVACY FIRST</p>
-            <h2>Your footage, your property.</h2>
+            <p className="eyebrow">WORKS WITH YOUR CAMERAS TOO</p>
+            <h2>Cameras watch. Drones respond.</h2>
             <p>
-              Most cloud cameras send every second of video to a remote server. Command Center does the AI work on a
-              PC at your location, so your recordings stay with you. The online portal only handles your account,
-              devices and settings.
+              Already have IP security cameras? Connect them to the same command center for person, vehicle and license
+              plate alerts. When a camera spots something, a drone can be on its way to that exact spot in one tap.
+              All video is processed on your own property, not in someone else's cloud.
             </p>
           </div>
         </div>
@@ -161,7 +187,7 @@ export default function Home() {
 
       <section id="faq" className="hSection hFaq">
         <p className="eyebrow">QUESTIONS</p>
-        <h2>Frequently asked questions</h2>
+        <h2>Drone security FAQ</h2>
         <div className="hFaqList">
           {faqs.map(([q, a]) => (
             <details key={q}>
@@ -172,28 +198,8 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="final">
-        <p className="eyebrow">READY WHEN YOU ARE</p>
-        <h2>Make your cameras work smarter.</h2>
-        <a className="btn" href="/signup">Get started</a>
-        <p className="hFinalLogin">Already a customer? <a href="/login">Sign in</a></p>
-      </section>
-
-      <footer className="hFooter">
-        <div>
-          <b>AI SECURITY COMMAND CENTER</b>
-          <p>AI-powered security with video processed on your own property.</p>
-        </div>
-        <nav aria-label="Footer">
-          <a href="#features">Features</a>
-          <a href="/drones">Drone patrols</a>
-          <a href="#how">How it works</a>
-          <a href="#faq">FAQ</a>
-          <a href="/login">Sign in</a>
-          <a href="/signup">Create account</a>
-        </nav>
-        <span>© 2026 AI Security Command Center</span>
-      </footer>
+      <FinalCta eyebrow="SEE IT FLY" title="Get a free demo of autonomous drone patrols."/>
+      <SiteFooter/>
     </main>
   );
 }

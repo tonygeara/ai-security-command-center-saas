@@ -4,7 +4,7 @@ import {usePathname} from "next/navigation";
 import SignOut from "../SignOut";
 
 const ITEMS: [string, string, string][] = [["/admin", "◉", "Overview"], ["/admin/clients", "▤", "Clients"], ["/admin/licenses", "⚿", "Licences"],
-  ["/admin/devices", "▣", "Devices"], ["/admin/users", "☺", "Users"]];
+  ["/admin/devices", "▣", "Devices"], ["/admin/users", "☺", "Users"], ["/admin/leads", "✉", "Enquiries"]];
 
 export default function AdminNav({email, alerts}: {email: string; alerts: number}){
   const path = usePathname();

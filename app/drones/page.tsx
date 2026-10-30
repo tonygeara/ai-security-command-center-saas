@@ -1,15 +1,13 @@
 import type {Metadata} from "next";
-import type {ReactNode} from "react";
+import {DronePanel} from "../components/DronePanel";
+import {FinalCta, JsonLd, SITE_URL, SiteFooter, SiteNav, faqJsonLd, icon} from "../components/Site";
 
 export const metadata: Metadata = {
-  title: "Drone Patrols & Aerial Security | AI Security Command Center",
+  title: "Drone Patrol Software: Autopilot Routes & Scheduled Security Patrols",
   description:
-    "Autopilot drone patrols on a schedule, instant alarm response and AI face, person and vehicle recognition from the air — all controlled from your AI Security Command Center.",
+    "Plan autopilot drone patrol routes on a map, schedule security patrols by day and time, relay between drones for 24/7 coverage and respond to alarms in one tap.",
+  alternates: {canonical: "/drones"},
 };
-
-const icon = (d: ReactNode) => (
-  <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{d}</svg>
-);
 
 const capabilities = [
   {
@@ -44,13 +42,6 @@ const capabilities = [
   },
 ];
 
-const scenarios = [
-  ["Farms & rural properties", "Cover fence lines, barns and long driveways that fixed cameras can't reach."],
-  ["Construction & storage yards", "Run scheduled night patrols over equipment and materials after the crew leaves."],
-  ["Estates & large homes", "Check the perimeter in minutes and see who is on the property, from above."],
-  ["Commercial & industrial sites", "Back up your guards with aerial patrols and a fast first look at every alarm."],
-];
-
 const steps = [
   ["Connect your drone", "Pair a supported DJI drone with the Command Center using our Drone Link app on an Android phone."],
   ["Draw your patrol", "Tap the stops on a map, set height, speed and what happens at the end, and save the route."],
@@ -67,7 +58,7 @@ const safety = [
   "A simulator mode lets you practise routes with no real flight",
 ];
 
-const faqs = [
+const faqs: [string, string][] = [
   ["Which drones are supported?", "The system works with DJI drones through our Drone Link Android app. It is tested with the DJI Mini 3 Pro and RC-N1 controller. Other DJI models may work but have not been tested yet."],
   ["What else do I need?", "A Windows PC running the Command Center app, an Android phone connected to the drone's controller, and Wi-Fi linking the phone and PC."],
   ["Can it really fly on its own?", "Yes. Saved routes and scheduled patrols fly on autopilot after safety checks. A pilot must still be able to take over, and you must follow your local aviation rules, which may require keeping the drone in sight."],
@@ -75,35 +66,32 @@ const faqs = [
   ["Is drone footage sent to the cloud?", "No. Like your fixed cameras, the drone's video is analysed on the PC at your property."],
 ];
 
+const breadcrumbs = {
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  itemListElement: [
+    {"@type": "ListItem", position: 1, name: "Home", item: SITE_URL},
+    {"@type": "ListItem", position: 2, name: "Drone patrols", item: `${SITE_URL}/drones`},
+  ],
+};
+
 export default function Drones() {
   return (
     <main className="home">
-      <header className="hNav">
-        <a href="/" className="hBrand" aria-label="AI Security Command Center home">
-          AI SECURITY <span>COMMAND CENTER</span>
-        </a>
-        <nav aria-label="Main">
-          <a href="/#features">Features</a>
-          <a href="/drones" aria-current="page">Drone patrols</a>
-          <a href="/#how">How it works</a>
-          <a href="/#faq">FAQ</a>
-        </nav>
-        <div className="hNavActions">
-          <a href="/login" className="hSignIn">Sign in</a>
-          <a className="btn small" href="/signup">Get started</a>
-        </div>
-      </header>
+      <JsonLd data={faqJsonLd(faqs)}/>
+      <JsonLd data={breadcrumbs}/>
+      <SiteNav current="/drones"/>
 
       <section className="hHero">
         <div>
-          <p className="eyebrow">DRONE PATROLS · AUTOPILOT · FACE AI</p>
-          <h1>Your security guard <em>now flies.</em></h1>
+          <p className="eyebrow">DRONE PATROL SOFTWARE</p>
+          <h1>Drone security patrols, <em>on autopilot.</em></h1>
           <p className="lead">
-            Schedule autopilot drone patrols, send a drone to any alarm in one tap, and let AI recognize faces,
-            people and vehicles from the air — all from the same command center as your cameras.
+            Plan a patrol route on a map, put it on a schedule and let the drone fly it — day or night. Add more
+            drones for non-stop coverage, and send one to any alarm in a single tap.
           </p>
           <div className="hActions">
-            <a className="btn" href="/signup">Get started</a>
+            <a className="btn" href="/contact">Book a free demo</a>
             <a className="ghost" href="#capabilities">See what it can do</a>
           </div>
           <ul className="hChecks">
@@ -113,47 +101,7 @@ export default function Drones() {
           </ul>
         </div>
 
-        <div className="dPanel" aria-hidden="true">
-          <div className="screenTop"><i/> PATROL ACTIVE <span>NIGHT ROUTE · 02:00</span></div>
-          <div className="dMap">
-            <svg viewBox="0 0 400 260" preserveAspectRatio="none">
-              <defs>
-                <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse">
-                  <path d="M26 0H0V26" fill="none" stroke="#14303f" strokeWidth="1"/>
-                </pattern>
-              </defs>
-              <rect width="400" height="260" fill="url(#grid)"/>
-              <rect x="150" y="95" width="90" height="60" rx="4" fill="#0f2534" stroke="#244a5e"/>
-              <path d="M40 220 L95 60 L300 45 L355 190 L190 230 Z" fill="none" stroke="#37d4ff" strokeWidth="2.5" strokeDasharray="7 6" className="dRoute"/>
-              {[[40,220,"H"],[95,60,"1"],[300,45,"2"],[355,190,"3"],[190,230,"4"]].map(([x,y,l]) => (
-                <g key={String(l)}>
-                  <circle cx={Number(x)} cy={Number(y)} r="11" fill={l==="H"?"#54ef9c":"#0b6fa8"} stroke="#9fe9ff" strokeWidth="1.5"/>
-                  <text x={Number(x)} y={Number(y)+4} textAnchor="middle" fontSize="11" fontWeight="700" fill="#061019">{l}</text>
-                </g>
-              ))}
-              <g className="dDrone">
-                <circle cx="300" cy="45" r="18" fill="#37d4ff22" stroke="#37d4ff"/>
-                <path d="M292 37l16 16M308 37l-16 16" stroke="#eaf6ff" strokeWidth="2.5" strokeLinecap="round"/>
-              </g>
-            </svg>
-            <div className="dHud">
-              <span>ALT 30 m</span><span>SPD 6 m/s</span><span>BATT 74%</span>
-            </div>
-          </div>
-          <div className="dFeedRow">
-            <div className="dFeed">
-              <strong>DRONE CAM · STOP 2</strong>
-              <div className="dFace"/>
-              <span className="box">UNKNOWN PERSON</span>
-            </div>
-            <div className="feed events">
-              <strong>PATROL LOG</strong>
-              <p>Unknown face at stop 2 <small>now</small></p>
-              <p>Vehicle at gate <small>3m</small></p>
-              <p>Patrol started <small>6m</small></p>
-            </div>
-          </div>
-        </div>
+        <DronePanel/>
       </section>
 
       <section className="strip dStrip">
@@ -170,40 +118,6 @@ export default function Drones() {
               <h3>{c.title}</h3>
               <p>{c.text}</p>
             </article>
-          ))}
-        </div>
-      </section>
-
-      <section className="hSection dSplit">
-        <div>
-          <p className="eyebrow">FACE AI IN THE AIR</p>
-          <h2>Know who is on your property, not just that someone is.</h2>
-          <p className="dBody">
-            Enroll the people who belong — family, staff, contractors. During a patrol or alarm response, the drone's
-            camera feeds the AI in real time. Recognized people are labelled by name; anyone unknown is flagged and
-            saved with a snapshot, so you can act fast.
-          </p>
-          <ul className="dList">
-            <li>Recognizes enrolled faces and flags strangers</li>
-            <li>Detects people and vehicles from above</li>
-            <li>Tracking assist keeps the subject in view on your screen</li>
-            <li>Every sighting is logged with time and location</li>
-          </ul>
-        </div>
-        <div className="dIdCard" aria-hidden="true">
-          <div className="dIdRow known"><i/><div><b>Known · Staff</b><small>Stop 1 · Main gate</small></div><em>MATCH</em></div>
-          <div className="dIdRow unknown"><i/><div><b>Unknown person</b><small>Stop 2 · North fence</small></div><em>ALERT</em></div>
-          <div className="dIdRow"><i/><div><b>Vehicle detected</b><small>Stop 4 · Yard entrance</small></div><em>LOGGED</em></div>
-          <p>Alert sent to your phone with snapshot · Start / Recall buttons</p>
-        </div>
-      </section>
-
-      <section className="hSection">
-        <p className="eyebrow">BUILT FOR LARGER PROPERTIES</p>
-        <h2>Where drones make the biggest difference.</h2>
-        <div className="dScenarios">
-          {scenarios.map(([t, d]) => (
-            <article key={t}><h3>{t}</h3><p>{d}</p></article>
           ))}
         </div>
       </section>
@@ -248,27 +162,8 @@ export default function Drones() {
         </div>
       </section>
 
-      <section className="final">
-        <p className="eyebrow">TAKE YOUR SECURITY TO THE SKY</p>
-        <h2>Start your first drone patrol.</h2>
-        <a className="btn" href="/signup">Get started</a>
-        <p className="hFinalLogin">Already a customer? <a href="/login">Sign in</a></p>
-      </section>
-
-      <footer className="hFooter">
-        <div>
-          <b>AI SECURITY COMMAND CENTER</b>
-          <p>AI-powered security with video processed on your own property.</p>
-        </div>
-        <nav aria-label="Footer">
-          <a href="/#features">Features</a>
-          <a href="/drones">Drone patrols</a>
-          <a href="/#faq">FAQ</a>
-          <a href="/login">Sign in</a>
-          <a href="/signup">Create account</a>
-        </nav>
-        <span>© 2026 AI Security Command Center</span>
-      </footer>
+      <FinalCta eyebrow="TAKE YOUR SECURITY TO THE SKY" title="See a drone patrol plan for your property."/>
+      <SiteFooter/>
     </main>
   );
 }
