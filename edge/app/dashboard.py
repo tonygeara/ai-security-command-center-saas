@@ -6863,7 +6863,10 @@ def dispatch_drone(camera, by="dashboard", drone=None):
         return result
     who = drone_label(slot) if len(drone_slots()) > 1 else "Drone"
     drone_response.update(active=True, drone=slot, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
-                          message=f"{who} on its way to {camera}", routing=bool(via))
+                          message=f"{who} on its way to {camera}", routing=bool(via),
+                          began=time.time(), log_pending=True, cam_snap=None, drone_snap=None)
+    # The camera's view when the drone was sent, for the event record (fetched in the background).
+    threading.Thread(target=lambda: drone_response.update(cam_snap=_camera_snapshot(camera)), daemon=True).start()
     if via:
         def round_zones():
             # The response worker waits while the drone flies round the zones, then watches the last leg as usual.
@@ -6923,6 +6926,72 @@ def auto_dispatch_check(camera, label, object_id="", stationary=False):
         return None
 
 
+CLIP_DELAY_S = 20  # Frigate writes recordings in short segments; wait for the last one before asking for the clip
+
+
+def _fetch_clip(slot, start, end):
+    """The drone camera's recording between start and end (Frigate), or None. Virtual drones have no video."""
+    if is_virtual(slot) or end - start > 1800:
+        return None
+    try:
+        r = requests.get(f"{FRIGATE_API_URL}/api/{slot}/start/{int(start)}/end/{int(end) + 1}/clip.mp4", timeout=90)
+        if r.ok and len(r.content) > 2000 and b"ftyp" in r.content[:64]:
+            return r.content
+    except Exception as e:
+        print("Drone clip error:", e)
+    return None
+
+
+def _append_event_row(row):
+    with event_log_lock:
+        os.makedirs(os.path.dirname(EVENT_LOG), exist_ok=True)
+        fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
+        exists = os.path.exists(EVENT_LOG) and os.path.getsize(EVENT_LOG) > 0
+        if exists:
+            with open(EVENT_LOG, "r", encoding="utf-8") as f:
+                fieldnames = csv.DictReader(f).fieldnames or fieldnames
+        with open(EVENT_LOG, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+            if not exists:
+                w.writeheader()
+            w.writerow({k: row.get(k, "") for k in fieldnames})
+
+
+def save_response_event(resp, ended):
+    """One event-history record per drone response: the camera's snapshot plus the drone's view and video.
+    The drone files sit next to the snapshot as <name>_drone.jpg / <name>_drone.mp4."""
+    try:
+        time.sleep(CLIP_DELAY_S)
+        slot, camera, began = resp.get("drone"), resp.get("camera"), resp.get("began") or resp.get("started") or ended
+        stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(began))
+        safe = re.sub(r"[^\w-]", "", str(slot))
+        base = os.path.join(EVENT_FOLDER, f"drone_response_{stamp}_{safe}")
+        os.makedirs(EVENT_FOLDER, exist_ok=True)
+        cam_snap, drone_snap = resp.get("cam_snap"), resp.get("drone_snap")
+        clip = _fetch_clip(slot, began, ended)
+        snapshot = ""
+        if cam_snap or drone_snap:
+            snapshot = base + ".jpg"
+            with open(snapshot, "wb") as f:
+                f.write(cam_snap or drone_snap)
+        if drone_snap and cam_snap:
+            with open(base + "_drone.jpg", "wb") as f:
+                f.write(drone_snap)
+        if clip:
+            if not snapshot:  # the row needs a snapshot name for the drone files to hang off
+                snapshot = base + ".jpg"
+                with open(snapshot, "wb") as f:
+                    f.write(_drone_snapshot(slot) or b"")
+            with open(base + "_drone.mp4", "wb") as f:
+                f.write(clip)
+        t = time.localtime(began)
+        _append_event_row({"Date": time.strftime("%Y-%m-%d", t), "Time": time.strftime("%H:%M:%S", t), "Type": "DRONE RESPONSE",
+                           "Name": f"{drone_label(slot)} → {camera}", "Identifier": f"{resp.get('by') or ''} · {resp.get('message') or ''}"[:120],
+                           "Camera": camera, "Snapshot": snapshot})
+    except Exception as e:
+        print("Drone response event error:", e)
+
+
 def recall_drone(reason="recalled"):
     if not drone_response["active"]:
         return {"ok": False, "error": "No drone response in progress."}
@@ -6946,6 +7015,9 @@ def _drone_snapshot(slot=None):
 def _drone_response_worker():
     while True:
         time.sleep(1)
+        if drone_response.get("log_pending") and not drone_response["active"]:
+            drone_response["log_pending"] = False
+            threading.Thread(target=save_response_event, args=(dict(drone_response), time.time()), daemon=True).start()
         if not drone_response["active"]:
             continue
         try:
@@ -6965,9 +7037,10 @@ def _drone_response_worker():
                     if near:
                         drone_response.update(phase="hovering", arrived=time.time(), stay_until=time.time() + cfg["hover_seconds"],
                                               message=f"Hovering over {cam}")
+                        drone_response["drone_snap"] = snap = _drone_snapshot()
                         send_telegram(f"🚁 {drone_label(drone_response['drone'])} is over {cam} at {int(tel.get('altitude') or 0)} m. Battery {tel.get('battery')}%.\n"
                                       f"{'Returning home in ' + str(int(cfg['hover_seconds'])) + ' s.' if cfg['auto_return'] else 'Staying until you send it home.'}",
-                                      _drone_snapshot(), [[{"text": "🏠 Return now", "callback_data": "home"}, {"text": "⏱ Stay 2 min", "callback_data": "stay"}],
+                                      snap, [[{"text": "🏠 Return now", "callback_data": "home"}, {"text": "⏱ Stay 2 min", "callback_data": "stay"}],
                                                           [{"text": "📷 New snapshot", "callback_data": "dsnap"}]])
                     else:
                         drone_response.update(active=False, phase="stopped", message="Stopped before arriving")
@@ -8050,11 +8123,12 @@ def delete_history_event(event_index, key=""):
     if snapshot:
         snapshot_name = os.path.basename(snapshot.replace("\\", "/"))
         snapshot_path = os.path.join(EVENT_FOLDER, snapshot_name)
-        try:
-            if os.path.exists(snapshot_path):
-                os.remove(snapshot_path)
-        except Exception as e:
-            print("Could not delete snapshot:", e)
+        for path in (snapshot_path, os.path.splitext(snapshot_path)[0] + "_drone.jpg", os.path.splitext(snapshot_path)[0] + "_drone.mp4"):
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as e:
+                print("Could not delete snapshot:", e)
 
     return event_to_delete
 
@@ -8095,6 +8169,11 @@ def clear_all_history_events():
             continue
         snapshot_name = os.path.basename(snapshot.replace("\\", "/"))
         snapshot_path = os.path.join(EVENT_FOLDER, snapshot_name)
+        for extra in ("_drone.jpg", "_drone.mp4"):
+            try:
+                os.remove(os.path.splitext(snapshot_path)[0] + extra)
+            except OSError:
+                pass
         try:
             if os.path.exists(snapshot_path):
                 os.remove(snapshot_path)
@@ -8150,6 +8229,30 @@ AI Security Command Center
 
 * {
     box-sizing: border-box;
+}
+
+.event .event-drone {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 6px 0;
+}
+
+.event .event-drone img {
+    width: 96px !important;
+    height: auto !important;
+    border: 1px solid #155879;
+    border-radius: 3px;
+}
+
+.event .event-clip {
+    color: #5bd9ff;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-decoration: none;
+    border: 1px solid #155879;
+    border-radius: 3px;
+    padding: 3px 7px;
 }
 
 .confirm-armed {
@@ -11773,6 +11876,7 @@ UNKNOWN FACE / VEHICLE CAPTURES
 <div class="event-name">
 {{ event.Name }}
 </div>
+{% if event.drone_image or event.drone_clip %}<div class="event-drone">{% if event.drone_image %}<a href="/events/{{ event.drone_image }}" target="_blank" title="The drone's view"><img src="/events/{{ event.drone_image }}" alt="Drone view"></a>{% endif %}{% if event.drone_clip %}<a class="event-clip" href="/events/{{ event.drone_clip }}" target="_blank">▶ DRONE CLIP</a>{% endif %}</div>{% endif %}
 
 {% if 'UNKNOWN' in (event.Type|upper) or 'UNKNOWN' in (event.Name|upper) %}
 <div class="unknown-event-badge">UNKNOWN DETECTION</div>
@@ -11852,6 +11956,7 @@ DELETE EVENT
 <div class="event-body">
 <div class="event-type">{{ event.Type }}</div>
 <div class="event-name">{{ event.Name }}</div>
+{% if event.drone_image or event.drone_clip %}<div class="event-drone">{% if event.drone_image %}<a href="/events/{{ event.drone_image }}" target="_blank" title="The drone's view"><img src="/events/{{ event.drone_image }}" alt="Drone view"></a>{% endif %}{% if event.drone_clip %}<a class="event-clip" href="/events/{{ event.drone_clip }}" target="_blank">▶ DRONE CLIP</a>{% endif %}</div>{% endif %}
 
 {% if 'UNKNOWN' in (event.Type|upper) or 'UNKNOWN' in (event.Name|upper) %}
 <div class="unknown-event-badge">UNKNOWN DETECTION</div>
@@ -14951,6 +15056,10 @@ def _dashboard_context():
                 event["image_file"] = os.path.basename(snapshot)
             else:
                 event["image_file"] = ""
+            # A drone response keeps the drone's own view and video beside the camera snapshot.
+            stem = os.path.splitext(event["image_file"])[0]
+            for key, ext in (("drone_image", "_drone.jpg"), ("drone_clip", "_drone.mp4")):
+                event[key] = stem + ext if stem and os.path.exists(os.path.join(EVENT_FOLDER, stem + ext)) else ""
     decorate_event_images(events)
     decorate_event_images(history_events)
     for event in events + history_events:

@@ -54,6 +54,10 @@ def d(tmp_path_factory):
     dashboard.sent = []
     dashboard.send_telegram = lambda text, *a, **k: dashboard.sent.append(text) or {"ok": True}
     dashboard.start_drone_link()
+    # Only the background workers the drone tests need (not the Telegram poller).
+    import threading
+    for worker in (dashboard._drone_response_worker, dashboard._nofly_watch_worker):
+        threading.Thread(target=worker, daemon=True).start()
     time.sleep(0.3)
     return dashboard
 
