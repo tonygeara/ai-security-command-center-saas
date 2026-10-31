@@ -1855,6 +1855,12 @@ def on_message(
                         identity_label=drone_label,
                     )
             return
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update"):
+            after_auto = data.get("after") if isinstance(data.get("after"), dict) else {}
+            if after_auto.get("false_positive") is False:
+                threading.Thread(target=auto_dispatch_check, daemon=True,
+                                 args=(camera, str(after_auto.get("label") or "").lower(), str(after_auto.get("id") or ""),
+                                       bool(after_auto.get("stationary")))).start()
         if camera and camera != CAMERA_NAME:
             return
 
@@ -6385,7 +6391,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🚨 Drone response &amp; Telegram</div><div class="live" id="respState"></div></div>
 <div class="panel-body">
-<div class="muted">When a camera sees an unknown person or vehicle, the Telegram alert gets a <b>Send drone</b> button. Set each camera's place on the map so the drone knows where to fly.</div>
+<div class="muted">When a camera sees an unknown person or vehicle, the Telegram alert gets a <b>Send drone</b> button, which sends the nearest ready drone. Set each camera's place on the map so the drone knows where to fly.</div>
 <div id="respCams" style="margin-top:10px"></div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 10px">
 <div><label for="rAlt">Height (m)</label><input id="rAlt" type="number" min="10" max="120"></div>
@@ -6397,6 +6403,14 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rReturn"> Auto return home</label>
 <label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rBriefOn"> Send briefing</label></div>
 </div>
+<div id="respAutoBox" style="margin-top:12px;border:1px solid #155879;border-radius:4px;padding:8px 10px;background:rgba(14,88,128,.08)">
+<label style="margin:0;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rAuto" onchange="autoWarn(this)">
+<b>Auto-send the nearest drone</b> when a camera sees a
+<span style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" id="rAutoP"> person</span>
+<span style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" id="rAutoV"> vehicle</span>
+between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" type="time" style="width:110px"></label>
+<div class="muted" style="margin-top:4px">It picks the closest drone that is ready (connected, enough battery, not on a route or held as a backup), flies round no-fly zones and sends you a Telegram alert with a Recall button. Each camera triggers it at most once every
+<input id="rCool" type="number" min="1" max="120" style="width:60px"> min. Only cameras with a map location count. Same start and end time = all day.</div></div>
 <div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="saveResp()">Save</button><button class="hud-btn danger" onclick="recallResp()">Recall drone</button>
 <button class="hud-btn" onclick="briefNow()">Send briefing now</button></div>
 <div id="respMsg" class="hud-msg"></div>
@@ -6600,7 +6614,10 @@ let resp=null,locFor='',camMarks={};
 function rmsg(t,ok){const e=$('respMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function loadResp(){try{const d=await fetch('/api/response/settings').then(r=>r.json());resp=d;const c=d.settings;
   $('rAlt').value=c.altitude_m;$('rSpeed').value=c.speed_ms;$('rHover').value=c.hover_seconds;$('rBatt').value=c.min_battery;$('rBrief').value=c.briefing_time;
-  $('rReturn').checked=!!c.auto_return;$('rBriefOn').checked=!!c.briefing_enabled;renderResp()}catch(e){}}
+  $('rReturn').checked=!!c.auto_return;$('rBriefOn').checked=!!c.briefing_enabled;
+  if(document.activeElement?.closest?.('#respAutoBox')==null){$('rAuto').checked=!!c.auto_dispatch;$('rAutoP').checked=!!c.auto_person;$('rAutoV').checked=!!c.auto_vehicle;
+    $('rFrom').value=c.auto_from;$('rTo').value=c.auto_to;$('rCool').value=c.auto_cooldown_min}renderResp()}catch(e){}}
+function autoWarn(el){if(el.checked&&!confirm('Auto-send flies a drone with no confirmation when a camera sees someone in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
 function renderResp(){if(!resp)return;const locs=resp.settings.camera_locations||{},r=resp.response||{};
   $('respState').textContent=r.active?('RESPONDING: '+r.camera+' · '+r.phase):(resp.telegram?'TELEGRAM READY':'TELEGRAM NOT SET UP');
   $('respCams').innerHTML=(resp.cameras||[]).filter(n=>!/^drone/i.test(n)).map(n=>{const l=locs[n];return `<div class="hud-row"><div><b>${esc(n)}</b><div class="muted">${l?('📍 '+l.lat.toFixed(5)+', '+l.lon.toFixed(5)):'No location yet'}</div></div>
@@ -6611,7 +6628,8 @@ async function saveCamLoc(lat,lon){const n=locFor;locFor='';const locs={...(resp
   const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({camera_locations:locs})}).then(r=>r.json());
   if(d.ok){resp.settings=d.settings;rmsg('Location of '+n+' saved.',true)}else rmsg(d.error,false);renderResp()}
 async function saveResp(){const body={altitude_m:+$('rAlt').value,speed_ms:+$('rSpeed').value,hover_seconds:+$('rHover').value,min_battery:+$('rBatt').value,
-  briefing_time:$('rBrief').value,auto_return:$('rReturn').checked,briefing_enabled:$('rBriefOn').checked};
+  briefing_time:$('rBrief').value,auto_return:$('rReturn').checked,briefing_enabled:$('rBriefOn').checked,
+  auto_dispatch:$('rAuto').checked,auto_person:$('rAutoP').checked,auto_vehicle:$('rAutoV').checked,auto_from:$('rFrom').value,auto_to:$('rTo').value,auto_cooldown_min:+$('rCool').value||10};
   const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(d.ok){resp.settings=d.settings;rmsg('Saved.',true);loadResp()}else rmsg(d.error,false)}
 async function sendTo(n){const sim=(st.telemetry||{}).simulator;
@@ -6641,7 +6659,10 @@ DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_C
 SIGHTINGS_FILE = os.path.join(BASE_FOLDER, "sightings.jsonl")
 RESPONSE_SETTINGS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "response_settings.json")
 RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "hover_seconds": 60, "auto_return": True,
-                     "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": []}
+                     "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": [],
+                     # Auto-send the nearest drone when a camera sees someone at night (off until the owner turns it on).
+                     "auto_dispatch": False, "auto_person": True, "auto_vehicle": True, "auto_from": "19:00", "auto_to": "06:00",
+                     "auto_cooldown_min": 10}
 sightings_lock = threading.Lock()
 _sighting_last = {}
 
@@ -6728,11 +6749,14 @@ def save_response_settings(data):
         if k == "camera_locations" and isinstance(v, dict):
             v = {str(cam): {"lat": float(p["lat"]), "lon": float(p["lon"])} for cam, p in v.items()
                  if isinstance(p, dict) and -90 <= float(p.get("lat", 999)) <= 90 and -180 <= float(p.get("lon", 999)) <= 180}
-        elif k in ("altitude_m", "speed_ms", "hover_seconds", "min_battery"):
-            lo, hi = {"altitude_m": (10, DRONE_LIMITS["max_altitude_m"]), "speed_ms": (1, 8), "hover_seconds": (10, 600), "min_battery": (20, 90)}[k]
+        elif k in ("altitude_m", "speed_ms", "hover_seconds", "min_battery", "auto_cooldown_min"):
+            lo, hi = {"altitude_m": (10, DRONE_LIMITS["max_altitude_m"]), "speed_ms": (1, 8), "hover_seconds": (10, 600), "min_battery": (20, 90),
+                      "auto_cooldown_min": (1, 120)}[k]
             v = max(lo, min(hi, float(v)))
-        elif k in ("auto_return", "briefing_enabled"):
+        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle"):
             v = bool(v)
+        elif k in ("auto_from", "auto_to"):
+            v = str(v) if re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(v)) else RESPONSE_DEFAULTS[k]
         elif k == "patrol_schedules":
             v = _clean_schedules(v)
         elif k == "briefing_time":
@@ -6803,10 +6827,25 @@ def _drone_ready_problem(camera, slot=None):
     return ""
 
 
+def _nearest_ready(camera):
+    """The ready drone closest to the camera, judged by where each drone is right now. Returns (slot, problem)."""
+    slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d))
+    loc = load_response_settings()["camera_locations"].get(camera)
+    if not slot or not loc:
+        return slot, problem
+    ready = [d for d in drone_slots() if d not in _sources_over_limit() and (not is_virtual(d) or _virtual_cfg.get("demo_auto"))
+             and not _drone_ready_problem(camera, d)]
+
+    def far(d):
+        tel = get_link(d)["telemetry"]
+        return _distance_m(tel["lat"], tel["lon"], loc["lat"], loc["lon"]) if tel.get("lat") else math.inf
+    return min(ready, key=far), ""
+
+
 def dispatch_drone(camera, by="dashboard", drone=None):
     if drone_response["active"]:
         return {"ok": False, "error": f"{drone_label(drone_response['drone'])} is already responding to {drone_response['camera']}."}
-    slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d), drone)
+    slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d), drone) if drone else _nearest_ready(camera)
     if problem:
         return {"ok": False, "error": problem}
     cfg = load_response_settings()
@@ -6838,6 +6877,50 @@ def dispatch_drone(camera, by="dashboard", drone=None):
         _drone_event(f"Flying round the no-fly zones to {camera} ({len(via)} turn{'s' if len(via) > 1 else ''})", slot)
     _drone_event(f"Drone response to {camera} started ({by})", slot)
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
+
+
+def _in_window(start, end, now=None):
+    """Is the time now (HH:MM) inside start..end? The window may cross midnight; start == end means all day."""
+    now = now or time.strftime("%H:%M")
+    if start == end:
+        return True
+    return start <= now < end if start < end else (now >= start or now < end)
+
+
+_auto_seen, _auto_last = set(), {}
+
+
+def auto_dispatch_check(camera, label, object_id="", stationary=False):
+    """A camera saw something: send the nearest ready drone if auto-dispatch is on and it is inside the night window."""
+    try:
+        cfg = load_response_settings()
+        if not cfg["auto_dispatch"] or not drone_control_allowed() or stationary:
+            return None
+        vehicle = label in ("car", "motorcycle", "truck", "bus")
+        if not ((label == "person" and cfg["auto_person"]) or (vehicle and cfg["auto_vehicle"])):
+            return None
+        if not _in_window(cfg["auto_from"], cfg["auto_to"]) or camera not in cfg["camera_locations"] or drone_response["active"]:
+            return None
+        if object_id and object_id in _auto_seen:
+            return None
+        if time.time() - _auto_last.get(camera, 0) < cfg["auto_cooldown_min"] * 60:
+            return None
+        _auto_last[camera] = time.time()
+        if object_id:
+            _auto_seen.add(object_id)
+        what = "Person" if label == "person" else "Vehicle"
+        r = dispatch_drone(camera, by=f"auto: {what.lower()} seen")
+        if r["ok"]:
+            tel, loc = get_link(r["drone"])["telemetry"], cfg["camera_locations"][camera]
+            far = f", {int(_distance_m(tel['lat'], tel['lon'], loc['lat'], loc['lon']))} m away" if tel.get("lat") else ""
+            send_telegram(f"🚨 {what} seen by {camera}. {drone_label(r['drone'])} (nearest ready drone{far}) is flying there now.",
+                          _camera_snapshot(camera), [[{"text": "🏠 Recall drone", "callback_data": "home"}]])
+        else:
+            send_telegram(f"🚨 {what} seen by {camera}, but no drone could be sent: {r['error']}")
+        return r
+    except Exception as e:
+        print("Auto-dispatch error:", e)
+        return None
 
 
 def recall_drone(reason="recalled"):
