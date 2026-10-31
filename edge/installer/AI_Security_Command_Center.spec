@@ -11,8 +11,9 @@ a = Analysis(
     [os.path.join(APP, 'launcher.pyw')],
     pathex=[APP],
     # cv2/data holds the Haar face detector used by face enrollment.
-    datas=collect_data_files('cv2', includes=['data/*.xml']),
-    hiddenimports=['dashboard', 'paho.mqtt.client', 'yaml', 'requests', 'cv2']
+    # static/leaflet: the map library, bundled so maps work without internet.
+    datas=collect_data_files('cv2', includes=['data/*.xml']) + [(os.path.join(APP, 'static'), 'static')],
+    hiddenimports=['dashboard', 'nofly', 'users', 'paho.mqtt.client', 'yaml', 'requests', 'cv2']
                   + collect_submodules('pyttsx3.drivers') + ['comtypes', 'win32com.client'],
     excludes=['matplotlib', 'tkinter.test'],
     noarchive=False,

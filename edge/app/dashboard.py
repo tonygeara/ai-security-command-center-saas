@@ -6076,7 +6076,7 @@ def virtual_drones_page():
 
 
 VIRTUAL_DRONES_PAGE = hud_page("Virtual Drones", r"""
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <style>
 .vd-grid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(340px,1fr);gap:16px;align-items:start}
 #vdMap{height:460px;border:1px solid #155879;border-radius:5px;background:#020a10}
@@ -6108,14 +6108,14 @@ Demo mode: let automatic missions (alert response, patrols set to "any drone", T
 <div class="muted" style="margin-top:8px">Fly them from <b>Open controls</b> exactly like a real drone (take off, keyboard, click-to-fly, routes, patrols). Battery lasts about 24 minutes of flight; at 15% they return home and at 5% they land, like a real DJI drone.</div></div></section>
 </div>
 </main>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 let map=null,pick=null,pickMark=null,marks={},trails={},homes={},data={drones:[]};
 function msg(t,ok){const e=$('vdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('vdMap').setView([lat,lon],17);
-  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'}).addTo(map);
+  L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:19,attribution:'Esri'}).addTo(map);
   fetch('/api/nofly').then(r=>r.json()).then(d=>(d.zones||[]).forEach(z=>L.polygon(z.points.map(p=>[p.lat,p.lon]),{color:'#ff4d6a',weight:2,fillOpacity:.25,interactive:false}).addTo(map))).catch(()=>{});
   map.on('click',e=>{pick=[e.latlng.lat,e.latlng.lng];pickMark=pickMark||L.circleMarker(pick,{radius:8,color:'#ffd23f'}).addTo(map);pickMark.setLatLng(pick);
     $('vdPick').textContent='Start point: '+pick[0].toFixed(5)+', '+pick[1].toFixed(5)})}
@@ -6163,7 +6163,7 @@ def drone_grid_page():
 
 
 DRONE_GRID_PAGE = hud_page("Drone Grid", r"""
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <style>
 .dg-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .dg-bar select{width:auto}
@@ -6206,7 +6206,7 @@ DRONE_GRID_PAGE = hud_page("Drone Grid", r"""
 <div class="dg-grid" id="dgGrid"></div>
 <p class="muted" id="dgEmpty" style="display:none">No drones yet. Add one on the Drone page, or add a virtual drone on the Virtual drones tab.</p>
 </main>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
@@ -6235,7 +6235,7 @@ function layout(){const n=solo?1:Object.keys(tiles).length||1,pick=+$('dgCols').
   Object.values(tiles).forEach(t=>t._map&&t._map.invalidateSize())}
 function vcam(t,x){if(typeof L==='undefined'||!x.lat)return;const z=x.altitude>90?16:x.altitude>45?17:x.altitude>15?18:19;
   if(!t._map){t._map=L.map(t.querySelector('.dg-vcam'),{zoomControl:false,attributionControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,boxZoom:false,keyboard:false,touchZoom:false});
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19}).addTo(t._map);t._map.setView([x.lat,x.lon],z)}
+    L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:19}).addTo(t._map);t._map.setView([x.lat,x.lon],z)}
   else t._map.setView([x.lat,x.lon],z,{animate:false})}
 function paint(t,x){const dot=x.drone_connected?'ok':x.phone_connected?'half':'';t.querySelector('.dg-name i').className=dot;
   const off=t.querySelector('.dg-off'),down=!x.phone_connected||!x.drone_connected;
@@ -6276,7 +6276,7 @@ def drone_control_page():
 
 
 DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <style>
 .dc-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(330px,1fr);gap:16px;align-items:start}
 .dc-video{aspect-ratio:16/9;position:relative;background:#000}
@@ -6363,7 +6363,8 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div class="actions" style="margin-top:6px"><button class="hud-btn" id="nfDrawBtn" onclick="nfDraw()">＋ Draw a zone</button>
 <input id="nfName" placeholder="Zone name, e.g. Neighbour" style="flex:1;min-width:120px;display:none"><button class="hud-btn primary" id="nfSaveBtn" style="display:none" onclick="nfSave()">Save zone</button>
 <button class="hud-btn" id="nfUndoBtn" style="display:none" onclick="nfUndo()">Undo corner</button><button class="hud-btn" id="nfCancelBtn" style="display:none" onclick="nfCancel()">Cancel</button></div>
-<div id="nfList" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div><div id="nfMsg" class="hud-msg"></div></div>
+<div id="nfList" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div><div id="nfMsg" class="hud-msg"></div>
+<div id="mapCache" class="muted" style="margin-top:6px;font-size:11px"></div></div>
 <div id="routeInfo" class="muted" style="margin-top:8px">No stops yet.</div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0 10px">
 <div><label for="rtAlt">Height (m)</label><input id="rtAlt" type="number" min="10" max="120" value="30" oninput="routeInfo()"></div>
@@ -6447,7 +6448,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div id="events" class="muted" style="margin-top:12px;max-height:150px;overflow:auto"></div></div></section>
 </div></div>
 </main>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script>
 <script>
 const DRONE='drone';
 {const f=window.fetch.bind(window);
@@ -6477,7 +6478,7 @@ let vcam=null;
 function vcamUpdate(t){if(!$('vcam')||typeof L==='undefined'||!t.lat)return;
   const z=t.altitude>90?16:t.altitude>45?17:t.altitude>15?18:19;
   if(!vcam){vcam=L.map('vcam',{zoomControl:false,attributionControl:false,dragging:false,scrollWheelZoom:false,doubleClickZoom:false,boxZoom:false,keyboard:false,touchZoom:false});
-    L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19}).addTo(vcam);vcam.setView([t.lat,t.lon],z)}
+    L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:19}).addTo(vcam);vcam.setView([t.lat,t.lon],z)}
   else vcam.setView([t.lat,t.lon],z,{animate:false})}
 function drawOthers(){if(!map||!window.L)return;oMarks.forEach(m=>m.remove());
   oMarks=others.map(x=>L.circleMarker([x.lat,x.lon],{radius:7,color:'#ffb23c',fillColor:'#ffb23c',fillOpacity:.8}).bindTooltip(x.label,{permanent:true,direction:'right',className:''}).addTo(map))}
@@ -6510,7 +6511,7 @@ document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.
     if(control)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
 document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
+  L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
   map.on('click',e=>nfPts?nfAdd(e.latlng.lat,e.latlng.lng):locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):addPoint(e.latlng.lat,e.latlng.lng));drawNofly()}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
@@ -6557,6 +6558,7 @@ function nfmsg(t,ok){const e=$('nfMsg');e.className='hud-msg '+(ok===true?'ok':o
 function nfButtons(){const on=!!nfPts;$('nfDrawBtn').style.display=on?'none':'';['nfName','nfSaveBtn','nfUndoBtn','nfCancelBtn'].forEach(id=>$(id).style.display=on?'':'none')}
 async function loadNofly(){try{const d=await fetch('/api/nofly?drone='+encodeURIComponent(DRONE)).then(r=>r.json());nfZones=d.zones||[];
   if(d.max_distance_m)document.querySelectorAll('.nf-range').forEach(e=>e.textContent=d.max_distance_m);
+  if(d.map_cache)$('mapCache').textContent='Offline map: '+d.map_cache.tiles+' tiles saved ('+d.map_cache.mb+' MB). Pan and zoom round the site once while online to save it for use without internet.';
   if(!map&&d.centre)initMap(d.centre[0],d.centre[1]);drawNofly()}catch(e){}}
 function drawNofly(){
   $('nfList').innerHTML=nfZones.length?nfZones.map(z=>`<span class="nf-chip">⛔ ${esc(z.name)}<button type="button" class="${nfArm===z.id?'armed':''}" title="Delete this zone" onclick="nfDel('${esc(z.id)}')">${nfArm===z.id?'Delete?':'✕'}</button></span>`).join(''):'<span class="muted">No zones yet.</span>';
@@ -7909,7 +7911,8 @@ def api_nofly():
         centre = [locs[0]["lat"], locs[0]["lon"]]
     if not centre and zones:
         centre = [zones[0]["points"][0]["lat"], zones[0]["points"][0]["lon"]]
-    return jsonify({"ok": True, "zones": zones, "centre": centre, "max_distance_m": DRONE_LIMITS["max_distance_m"]})
+    return jsonify({"ok": True, "zones": zones, "centre": centre, "max_distance_m": DRONE_LIMITS["max_distance_m"],
+                    "map_cache": map_cache_stats()})
 
 
 @app.route("/api/routes/fly", methods=["POST"])
@@ -11498,8 +11501,8 @@ FRONT CAMERA • FACE AI • LPR AI
     function needLeaflet() {
         if (window.L) return Promise.resolve();
         if (!leaflet) leaflet = new Promise(ok => {
-            const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
-            const js = document.createElement("script"); js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"; js.onload = ok;
+            const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "/vendor/leaflet/leaflet.css";
+            const js = document.createElement("script"); js.src = "/vendor/leaflet/leaflet.js"; js.onload = ok;
             document.head.append(css, js);
         });
         return leaflet;
@@ -11512,7 +11515,7 @@ FRONT CAMERA • FACE AI • LPR AI
             if (!t._map) {
                 t._map = L.map(t.querySelector(".dfg-vcam"), {zoomControl: false, attributionControl: false, dragging: false, scrollWheelZoom: false,
                     doubleClickZoom: false, boxZoom: false, keyboard: false, touchZoom: false});
-                L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {maxZoom: 19}).addTo(t._map);
+                L.tileLayer("/tiles/sat/{z}/{x}/{y}", {maxZoom: 19}).addTo(t._map);
                 t._map.setView([x.lat, x.lon], z);
             } else t._map.setView([x.lat, x.lon], z, {animate: false});
         });
@@ -15126,6 +15129,60 @@ def gps_dispatch_request():
     if not bridge:return jsonify({"ok":False,"state":"bridge_required","message":"Compatible flight-control bridge required. No aircraft command sent."}),409
     return jsonify({"ok":False,"state":"bridge_not_integrated","message":"Bridge configured; flight command integration is not enabled in this release."}),501
 
+
+
+# ============================================================
+# MAPS THAT WORK OFFLINE
+# Leaflet ships with the app, and every map tile the dashboard shows is kept on disk, so a site that
+# looked at its map once while online still has it without internet.
+# ============================================================
+import sys as _sys
+VENDOR_DIR = os.path.join(getattr(_sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))), "static")
+TILE_DIR = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "map_tiles")
+TILE_SOURCES = {"osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "png", "image/png"),
+                "sat": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", "jpg", "image/jpeg")}
+TILE_REFRESH_DAYS = 30
+_tile_stats = {"at": 0.0, "tiles": 0, "mb": 0.0}
+
+
+@app.route("/vendor/leaflet/<path:filename>")
+def vendor_leaflet(filename):
+    return send_from_directory(os.path.join(VENDOR_DIR, "leaflet"), filename, max_age=7 * 86400)
+
+
+@app.route("/tiles/<layer>/<int:z>/<int:x>/<int:y>")
+def map_tile(layer, z, x, y):
+    """A map tile from the local cache, fetched (and kept) when online. Old tiles are refreshed when possible."""
+    src = TILE_SOURCES.get(layer)
+    if not src or not (0 <= z <= 20 and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
+        return Response(status=404)
+    path = os.path.join(TILE_DIR, layer, str(z), str(x), f"{y}.{src[1]}")
+    if not os.path.exists(path) or time.time() - os.path.getmtime(path) > TILE_REFRESH_DAYS * 86400:
+        try:
+            r = requests.get(src[0].format(z=z, x=x, y=y), timeout=6,
+                             headers={"User-Agent": f"AI-Security-Command-Center/{APP_VERSION}"})
+            if r.ok and len(r.content) > 50:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path + ".tmp", "wb") as f:
+                    f.write(r.content)
+                os.replace(path + ".tmp", path)
+        except Exception:
+            pass  # offline: use the saved tile if there is one
+    if not os.path.exists(path):
+        return Response(status=404)
+    return send_from_directory(os.path.dirname(path), os.path.basename(path), mimetype=src[2], max_age=86400)
+
+
+def map_cache_stats():
+    if time.time() - _tile_stats["at"] > 60:
+        n = size = 0
+        for root, _, files in os.walk(TILE_DIR):
+            for f in files:
+                if not f.endswith(".tmp"):
+                    n += 1
+                    size += os.path.getsize(os.path.join(root, f))
+        _tile_stats.update(at=time.time(), tiles=n, mb=round(size / 1e6, 1))
+    return {"tiles": _tile_stats["tiles"], "mb": _tile_stats["mb"]}
 
 # ============================================================
 # SIGN-IN AND ROLES (off until the first admin is created on the Users page)
