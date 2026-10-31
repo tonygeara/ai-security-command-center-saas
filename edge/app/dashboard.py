@@ -6319,7 +6319,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <label style="margin-top:10px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0"><input type="checkbox" id="rtLoop" onchange="routeInfo()"> <b>Repeat the route again and again</b> until you press Stop route</label>
 <label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtRelay"> Relay: at
 <input id="rtSwap" type="number" min="20" max="50" value="20" style="width:64px">% battery the drone returns home and the next ready drone takes off and continues the patrol</label>
-<label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtNoBat" onchange="noBatUi()"> <b>Keep patrolling whatever the battery level</b> (no return home or swap by the PC)</label>
+<label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtNoBat" onchange="noBatUi()"> <b>Keep patrolling whatever the battery level</b>: repeats the route non-stop, no return home or swap by the PC</label>
 <div id="noBatNote" class="hud-msg bad" style="display:none">The PC will not bring the drone home for battery. The drone's own low-battery protection still takes over (DJI: return home, then forced landing when critical) and the patrol stops there. Watch the battery yourself.</div>
 <div class="muted" style="margin-top:4px">A continuous patrol always sends the drone home at that battery level; without relay the patrol then ends. Each drone needs its own phone and controller (or use virtual drones).</div>
 <div class="actions" style="margin-top:12px"><input id="rtName" placeholder="Route name" style="flex:1;min-width:120px"><button class="hud-btn" onclick="saveRoute()">Save</button><button class="hud-btn danger" onclick="deleteRoute()">Delete</button></div>
@@ -6512,7 +6512,8 @@ function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value,
   loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,ignore_battery:$('rtNoBat').checked,backup:$('rtNoBat').checked?'':$('rtBackup').value}}
 // Ignoring the battery means no swap, so relay and backup are switched off while it is ticked.
-function noBatUi(){const on=$('rtNoBat').checked;['rtRelay','rtSwap','rtBackup'].forEach(id=>$(id).disabled=on);$('noBatNote').style.display=on?'':'none'}
+function noBatUi(){const on=$('rtNoBat').checked;['rtRelay','rtSwap','rtBackup'].forEach(id=>$(id).disabled=on);$('noBatNote').style.display=on?'':'none';
+  if(on)$('rtLoop').checked=true;$('rtLoop').disabled=on;routeInfo()}
 async function saveRoute(){if(!route.length){rtmsg('Draw at least one stop.',false);return}const d=await fetch('/api/routes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value})}).then(r=>r.json());
   rtmsg(d.ok?'Route “'+d.name+'” saved.':d.error,d.ok);await loadRoutes();if(d.ok)$('routeSel').value=d.name}
 async function deleteRoute(){const n=$('routeSel').value;if(!n||!confirm('Delete route “'+n+'”?'))return;await fetch('/api/routes',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})});rtmsg('Deleted.',true);loadRoutes()}
@@ -7197,7 +7198,8 @@ def _clean_route(r):
     return {"points": pts, "alt": max(10.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(r.get("alt") or 30))),
             "speed": max(1.0, min(8.0, float(r.get("speed") or 5))), "pause": max(0.0, min(120.0, float(r.get("pause") or 0))),
             "end": r.get("end") if r.get("end") in ("hover", "home", "land") else "home",
-            "loop": bool(r.get("loop")), "relay": bool(r.get("relay")), "ignore_battery": bool(r.get("ignore_battery")),
+            "loop": bool(r.get("loop") or r.get("ignore_battery")), "relay": bool(r.get("relay")),
+            "ignore_battery": bool(r.get("ignore_battery")),
             "swap_at": max(20, min(50, int(float(r.get("swap_at") or 20))))}
 
 
@@ -7272,6 +7274,10 @@ def _wait_arrival(p, started, run):
             continue  # the mission may not have started yet
         if tel.get("lat") and _distance_m(tel["lat"], tel["lon"], p["lat"], p["lon"]) < 8:
             return ""
+        b = tel.get("battery")
+        if b is not None and b <= 20 and str(tel.get("flight_mode") or "").upper() in ("GO_HOME", "AUTO_LANDING", "LANDING"):
+            mode = str(tel.get('flight_mode')).replace('_', ' ').lower()
+            return f"the drone's own low-battery protection took over at {b}% ({mode})"
         return "STOP pressed, the pilot took control or the link dropped"
 
 
@@ -7349,7 +7355,8 @@ def _run_route(name, route, by, slot, run):
                 slot = _hand_over(name, route, slot, i + 1, run)
                 continue  # the new drone flies to the same stop
             if why:
-                raise RuntimeError(why)
+                # The drone is already flying home or landing on its own: end the patrol without telling it to hover.
+                raise (PatrolEnded if "low-battery protection" in why else RuntimeError)(why)
             run.update(phase="pause", message=f"{drone_label(slot)} at stop {i + 1} of {len(pts)}{lap}")
             end = time.time() + route["pause"]
             while time.time() < end and not run["stop"]:
@@ -7372,6 +7379,8 @@ def _run_route(name, route, by, slot, run):
     except PatrolEnded as e:
         run.update(phase="done", message=f"Patrol {name} ended: {e}")
         _drone_event(f"Route {name} ended: {e}", slot)
+        if "low-battery protection" in str(e) and telegram_ready():
+            send_telegram(f"🔋 Patrol “{name}” ({drone_label(slot)}) ended: {e}.")
     except Exception as e:
         drone_command("hover", timeout=5.0, slot=slot)
         run.update(phase="stopped", message=f"Route stopped at stop {run['index']}: {e}")
