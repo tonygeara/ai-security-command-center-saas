@@ -1781,6 +1781,10 @@ def on_message(
         global recent_person_object_id, recent_vehicle_object_id
 
         camera = payload_camera(data)
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and _is_drone_name(camera) and data.get("type") in ("new", "update"):
+            after_seen = data.get("after") if isinstance(data.get("after"), dict) else {}
+            if after_seen.get("false_positive") is False:
+                note_drone_detection(camera, str(after_seen.get("label") or "").lower(), str(after_seen.get("id") or ""))
         if camera == DRONE_CAMERA_NAME:
             if msg.topic == MQTT_EVENTS_TOPIC:
                 after_obj = data.get("after") if isinstance(data.get("after"), dict) else {}
@@ -6379,6 +6383,7 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div id="backupNote" class="hud-msg bad" style="display:none"></div>
 <div class="actions" style="margin-top:8px"><button class="hud-btn primary" id="flyRouteBtn" onclick="flyRoute()">Fly route</button><button class="hud-btn danger" onclick="stopRoute()">Stop route</button></div>
 <div id="routeMsg" class="hud-msg"></div>
+<div id="patrolReport" class="hud-msg" style="display:none;white-space:pre-line;border-left:3px solid #36cfff;padding-left:8px"></div>
 <div style="margin-top:16px;border-top:1px solid #123447;padding-top:12px"><b style="color:#5bd9ff;font-size:11px;letter-spacing:1.5px">🗓 SCHEDULED PATROLS</b>
 <div class="muted" style="margin-top:6px">Runs a saved route on chosen days. <b>Ask first</b> sends you a Telegram Start/Skip message; <b>auto-start</b> flies after the safety checks. The drone and controller must be on and connected at patrol time, and a pilot must be able to take over.</div>
 <div id="schedList" style="margin-top:8px"></div>
@@ -6592,7 +6597,8 @@ async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.jso
   const r=d.run||{};
   // A backup (or a drone that took over) shows the route it covers, filled once per run so later edits stay.
   const cover=bf&&bf.route?bf:(r.active&&r.route?r:null);
-  if(cover&&cover.id&&cover.id!==filledRun){filledRun=cover.id;loadRoute(cover.name,cover.route)}$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
+  if(cover&&cover.id&&cover.id!==filledRun){filledRun=cover.id;loadRoute(cover.name,cover.route)}
+  $('patrolReport').style.display=!r.active&&r.report?'':'none';if(r.report)$('patrolReport').textContent=r.report;$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
 function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtNoBat').checked=!!r.ignore_battery;noBatUi();$('rtLostOn').checked=r.lost_link_on!==false;$('rtLost').value=r.lost_link||'home';$('rtLost').disabled=!$('rtLostOn').checked;$('rtName').value=n;drawRoute();
   if(map&&route.length)map.fitBounds(route.map(p=>[p.lat,p.lon]),{padding:[30,30]})}
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value,
@@ -7617,6 +7623,69 @@ def _wait_arrival(p, started, run):
 
 
 SWAP = "__battery_swap__"
+REPORT_LABELS = {"person": "person", "car": "vehicle", "motorcycle": "vehicle", "truck": "vehicle", "bus": "vehicle"}
+drone_detections = []  # (time, drone, "person"/"vehicle", object id), last 2000
+
+
+def note_drone_detection(slot, label, object_id=""):
+    """A drone camera saw a person or vehicle. Kept for patrol reports; a patrol also grabs a photo of it."""
+    kind = REPORT_LABELS.get(label)
+    if not kind or any(o == object_id and d == slot for _, d, _, o in drone_detections[-200:] if object_id):
+        return
+    drone_detections.append((time.time(), slot, kind, object_id))
+    del drone_detections[:-2000]
+    run = run_of(slot)
+    if run is not None and len(run.get("photos", [])) < 8:
+        _patrol_photo(run, slot, f"{kind} seen")
+
+
+def _patrol_photo(run, slot, why):
+    def grab():
+        snap = _drone_snapshot(slot)
+        if snap and len(run["photos"]) < 9:
+            run["photos"].append((snap, f"{drone_label(slot)}: {why}"))
+    threading.Thread(target=grab, daemon=True).start()
+
+
+def send_telegram_album(photos, caption=""):
+    """Up to 10 photos in one Telegram message (photos: list of jpg bytes)."""
+    photos = photos[:10]
+    if not photos:
+        return None
+    if len(photos) == 1:
+        return send_telegram(caption, photos[0])
+    chat = str(load_telegram_config().get("chat_id") or "").strip()
+    media = [{"type": "photo", "media": f"attach://p{i}", **({"caption": caption[:1000]} if i == 0 and caption else {})} for i in range(len(photos))]
+    return _tg("sendMediaGroup", chat_id=chat, media=json.dumps(media),
+               files={f"p{i}": (f"p{i}.jpg", b, "image/jpeg") for i, b in enumerate(photos)})
+
+
+def patrol_report(name, run, ended_how):
+    """Short summary after a patrol: time, laps, battery used per drone, what the drones saw, photos."""
+    end = time.time()
+    began = run.get("began") or end
+    mins = max(0, int(round((end - began) / 60)))
+    lines = [f"📋 Patrol report: “{name}”", ended_how,
+             f"⏱ {mins} min · {run.get('lap', 1)} lap{'s' if run.get('lap', 1) != 1 else ''} · {run.get('total', 0)} stops"]
+    for slot, start in run.get("battery", {}).items():
+        now_b = get_link(slot)["telemetry"].get("battery")
+        last = run.get("battery_end", {}).get(slot, now_b)
+        used = f" ({start - last}% used)" if isinstance(start, (int, float)) and isinstance(last, (int, float)) else ""
+        lines.append(f"🚁 {drone_label(slot)}: {start if start is not None else '?'}% → {last if last is not None else '?'}%{used}")
+    if run.get("handovers"):
+        lines.append(f"🔁 {run['handovers']} handover{'s' if run['handovers'] > 1 else ''} between drones")
+    seen = [k for t, dr, k, _ in drone_detections if began <= t <= end + 5 and dr in run.get("battery", {})]
+    people, vehicles = seen.count("person"), seen.count("vehicle")
+    lines.append(f"👁 Seen: {people} {'person' if people == 1 else 'people'}, {vehicles} vehicle{'s' if vehicles != 1 else ''}"
+                 if seen else "👁 Nothing seen by the drone cameras")
+    text = "\n".join(lines)
+    run["report"] = text
+    if telegram_ready():
+        send_telegram(text)
+        photos = [b for b, _ in run.get("photos", [])]
+        if photos:
+            send_telegram_album(photos, f"Patrol “{name}”: " + ", ".join(w for _, w in run["photos"][:3]))
+    return text
 
 
 class PatrolEnded(Exception):
@@ -7672,6 +7741,8 @@ def _hand_over(name, route, old, stop, run):
         raise PatrolEnded(f"battery {bat}%, {drone_label(old)} returning home; {problem}")
     # The tired drone becomes the backup, ready to take over again once its battery is swapped.
     run.update(drone=nxt, backup=old if backup else None, handovers=run.get("handovers", 0) + 1)
+    run.setdefault("battery_end", {})[old] = bat
+    run.setdefault("battery", {}).setdefault(nxt, get_link(nxt)["telemetry"].get("battery"))
     _drone_event(f"Taking over route {name} at stop {stop} from {drone_label(old)} ({bat}%)", nxt)
     send_telegram(f"🔁 {drone_label(old)} at {bat}% is returning home. {drone_label(nxt)} is taking off to continue patrol "
                   f"“{name}” from stop {stop}.") if telegram_ready() else None
@@ -7682,7 +7753,8 @@ def _run_route(name, route, by, slot, run):
     pts = route["points"]
     # "Ignore battery": the PC never sends the drone home or swaps it; only the drone's own low-battery protection acts.
     nobat = route.get("ignore_battery")
-    run.update(swap_at=route["swap_at"] if not nobat and (route["loop"] or route["relay"] or run.get("backup")) else 0, lap=1, handovers=0)
+    run.update(swap_at=route["swap_at"] if not nobat and (route["loop"] or route["relay"] or run.get("backup")) else 0, lap=1, handovers=0,
+               began=time.time(), battery={slot: get_link(slot)["telemetry"].get("battery")}, battery_end={}, photos=[])
     who = f" ({drone_label(slot)})" if len(drone_slots()) > 1 else ""
     kind = " · continuous patrol" if route["loop"] else ""
     kind += " · ignoring battery level" if nobat else ""
@@ -7706,6 +7778,8 @@ def _run_route(name, route, by, slot, run):
                 # The drone is already flying home or landing on its own: end the patrol without telling it to hover.
                 raise (PatrolEnded if "took over" in why else RuntimeError)(why)
             run.update(phase="pause", message=f"{drone_label(slot)} at stop {i + 1} of {len(pts)}{lap}")
+            if run["lap"] == 1 and i < 4:
+                _patrol_photo(run, slot, f"stop {i + 1}")
             end = time.time() + route["pause"]
             while time.time() < end and not run["stop"]:
                 time.sleep(0.5)
@@ -7724,19 +7798,25 @@ def _run_route(name, route, by, slot, run):
         done = {"home": "returning home", "land": "landing at the last stop", "hover": "hovering at the last stop"}[route["end"]]
         run.update(phase="done", message=f"Route {name} complete, {done}")
         _drone_event(f"Route {name} complete ({done})", slot)
-        send_telegram(f"✅ Route “{name}” complete, {done}.") if telegram_ready() else None
+        how = f"✅ Complete, {done}."
     except PatrolEnded as e:
         run.update(phase="done", message=f"Patrol {name} ended: {e}")
         _drone_event(f"Route {name} ended: {e}", slot)
-        if "took over" in str(e) and telegram_ready():
-            send_telegram(f"🔋 Patrol “{name}” ({drone_label(slot)}) ended: {e}.")
+        how = f"🔋 Ended: {e}."
     except Exception as e:
         drone_command("hover", timeout=5.0, slot=slot)
         run.update(phase="stopped", message=f"Route stopped at stop {run['index']}: {e}")
         _drone_event(f"Route {name} stopped: {e}", slot)
-        send_telegram(f"⚠️ Route “{name}” stopped at stop {run['index']}: {e}. The drone is hovering.") if telegram_ready() else None
+        how = f"⚠️ Stopped at stop {run['index']}: {e}. The drone is hovering." if "stopped from the PC" not in str(e) else \
+            f"⏹ Stopped from the PC at stop {run['index']}; the drone is hovering."
     finally:
         run.update(active=False, swap_at=0, backup=None, ended_at=time.time())
+    run.setdefault("battery_end", {})[slot] = get_link(slot)["telemetry"].get("battery")
+    try:
+        time.sleep(1.5)  # let the last photo arrive
+        patrol_report(name, run, how)
+    except Exception as e:
+        print("Patrol report error:", e)
 
 
 route_lock = threading.Lock()
@@ -7786,6 +7866,7 @@ def api_routes():
         return jsonify({"ok": False, "error": str(e)}), 400
     slot = request.args.get("drone") or DRONE_CAMERA_NAME
     run = run_of(slot) or next((r for r in reversed(list(route_runs.values())) if r["drone"] == slot), None) or {}
+    run = {k: v for k, v in run.items() if k != "photos"}
     b = backup_run_of(slot)
     return jsonify({"ok": True, "routes": load_routes(), "run": run, "max_distance_m": DRONE_LIMITS["max_distance_m"],
                     "backup_for": {"drone": b["drone"], "label": drone_label(b["drone"]), "name": b["name"],

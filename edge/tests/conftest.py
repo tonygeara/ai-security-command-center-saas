@@ -89,6 +89,7 @@ def fleet(d, client):
     for slot in list(d.virtual_drones):
         client.delete(f"/api/virtual-drones/{slot}")
     wait_until(lambda: not any(r["active"] for r in d.route_runs.values()), 10)
+    wait_until(lambda: all("report" in r for r in d.route_runs.values()), 10)  # reports are sent just after a run ends
     d.route_runs.clear()
     d.nofly.save_zones(d.NOFLY_FILE, [])
     d.sent.clear()
