@@ -10,7 +10,7 @@ STAGE = os.environ['AI_CC_STAGE']
 SLUG = os.environ.get('AI_CC_SLUG', 'AI-Command-Centre-Lebanon')
 
 # The compiled modules hide their imports from PyInstaller, so list what they use.
-hidden = ['dashboard', 'licensing', 'edition',
+hidden = ['dashboard', 'licensing', 'edition', 'nofly', 'users', 'geo', 'virtual_drone', 'pages', 'werkzeug.security',
           'flask', 'werkzeug', 'jinja2', 'markupsafe', 'itsdangerous', 'click', 'blinker',
           'cv2', 'numpy', 'requests', 'urllib3', 'certifi', 'idna', 'charset_normalizer',
           'paho.mqtt.client', 'paho.mqtt.publish', 'yaml', 'pyttsx3', 'comtypes', 'win32com.client',
@@ -21,7 +21,7 @@ hidden += collect_submodules('pyttsx3.drivers') + collect_submodules('flask') + 
 a = Analysis(
     [os.path.join(STAGE, 'launcher.pyw')],
     pathex=[STAGE],
-    datas=collect_data_files('cv2', includes=['data/*.xml']),
+    datas=collect_data_files('cv2', includes=['data/*.xml']) + [(os.path.join(STAGE, 'static'), 'static')],
     hiddenimports=hidden,
     excludes=['matplotlib', 'tkinter.test'],
     noarchive=False,
