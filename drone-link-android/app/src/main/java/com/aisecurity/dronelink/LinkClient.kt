@@ -44,7 +44,7 @@ class LinkClient(
             } catch (e: Exception) {
                 onStatus("PC not reachable (${e.message ?: e.javaClass.simpleName})", false)
             }
-            DroneController.releaseControl("PC link lost")
+            DroneController.linkLost("PC link lost")
             if (running) Thread.sleep(3000)
         }
     }
@@ -83,7 +83,7 @@ class LinkClient(
                 while (running && socket === s) {
                     send(out, DroneController.telemetry())
                     if ((DroneController.controlByPc || DroneController.missionActive) && System.currentTimeMillis() - lastFromPc > HEARTBEAT_TIMEOUT_MS) {
-                        DroneController.releaseControl("no heartbeat from the PC")
+                        DroneController.linkLost("no heartbeat from the PC")
                     }
                     Thread.sleep(200)
                 }

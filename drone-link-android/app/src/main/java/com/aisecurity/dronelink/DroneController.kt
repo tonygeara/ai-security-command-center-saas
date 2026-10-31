@@ -179,6 +179,8 @@ object DroneController {
 
     fun execute(cmd: String, args: JSONObject, done: (Boolean, String) -> Unit) {
         val fail: (IDJIError) -> Unit = { e -> done(false, e.description() ?: e.errorCode()) }
+        // The pilot or the PC decided what happens next, so no automatic lost-link action any more.
+        if (cmd in setOf("hover", "land", "go_home", "goto_cancel", "control_off")) lostLinkAction = ""
         when (cmd) {
             "takeoff" -> action(FlightControllerKey.KeyStartTakeoff, done, fail)
             "land" -> { abortMission("land pressed"); afterHandOver { action(FlightControllerKey.KeyStartAutoLanding, done, fail) } }
@@ -362,6 +364,28 @@ object DroneController {
     @Volatile private var mission: Mission? = null
     val missionActive get() = mission != null
 
+    /** What to do by itself if the PC link drops during an auto-fly: "home", "land", "hover" or "" (hand back to the pilot). */
+    @Volatile private var lostLinkAction = ""
+
+    /** The PC link dropped: run the auto-fly's lost-link action, or hand control back to the pilot (the drone hovers). */
+    fun linkLost(why: String) {
+        val act = lostLinkAction
+        lostLinkAction = ""
+        val flying = telemetry().optBoolean("flying", false)
+        if (act.isEmpty() || !flying || (!controlByPc && mission == null)) { releaseControl(why); return }
+        abortMission(why)
+        centreSticks()
+        when (act) {
+            "home" -> { event("$why: returning home (lost-link action)")
+                afterHandOver { action(FlightControllerKey.KeyStartGoHome, { ok, err -> if (!ok) event("Return home failed: $err") },
+                    { e -> event("Return home failed: ${e.description()}") }) } }
+            "land" -> { event("$why: landing (lost-link action)")
+                afterHandOver { action(FlightControllerKey.KeyStartAutoLanding, { ok, err -> if (!ok) event("Landing failed: $err") },
+                    { e -> event("Landing failed: ${e.description()}") }) } }
+            else -> releaseControl("$why: hovering (lost-link action)")
+        }
+    }
+
     private fun startMission(args: JSONObject, done: (Boolean, String) -> Unit) {
         if (!productConnected) { done(false, "Drone not connected"); return }
         val t = telemetry()
@@ -376,6 +400,7 @@ object DroneController {
         val flying = t.optBoolean("flying", false)
         m.state = if (flying) "ENABLING" else "TAKING_OFF"
         mission = m
+        lostLinkAction = args.optString("lost_link", "").let { if (it == "home" || it == "land" || it == "hover") it else "" }
         startControlLoop()
         if (!flying) {
             KeyManager.getInstance().performAction(KeyTools.createKey(FlightControllerKey.KeyStartTakeoff),
@@ -485,7 +510,7 @@ object DroneController {
 
     /** Sticks from the PC, each -1..1: x = right, y = forward, z = up, r = turn right. */
     fun setSticks(x0: Double, y0: Double, z0: Double, r0: Double) {
-        if (mission != null && (abs(x0) > 0.05 || abs(y0) > 0.05 || abs(z0) > 0.05 || abs(r0) > 0.05)) abortMission("manual control")
+        if (mission != null && (abs(x0) > 0.05 || abs(y0) > 0.05 || abs(z0) > 0.05 || abs(r0) > 0.05)) { abortMission("manual control"); lostLinkAction = "" }
         if (!controlByPc) return
         targetX = clamp(x0); targetY = clamp(y0); targetZ = clamp(z0); targetR = clamp(r0)
         lastStickAt = System.currentTimeMillis()

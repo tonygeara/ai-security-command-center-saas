@@ -2296,6 +2296,7 @@ def force_drone_ai_off(reason="Cloud entitlement disabled"):
 # ---------------- On-prem (offline license file) ----------------
 import licensing
 import edition
+import nofly
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
 BRAND_FLAGS = {
@@ -5522,6 +5523,12 @@ def api_drone_command():
             return jsonify({"ok": False, "error": "The drone has no GPS position yet."}), 409
         if _distance_m(home[0], home[1], lat, lon) > DRONE_LIMITS["max_distance_m"]:
             return jsonify({"ok": False, "error": f"That point is more than {DRONE_LIMITS['max_distance_m']} m from home."}), 400
+        z = nofly.zone_at(nofly_zones(), lat, lon)
+        if z:
+            return jsonify({"ok": False, "error": f"That point is inside no-fly zone “{z['name']}”."}), 400
+        if tel.get("lat") and nofly.leg_zone(nofly_zones(), (tel["lat"], tel["lon"]), (lat, lon),
+                                             {x["id"] for x in nofly_zones() if nofly.zone_at([x], tel["lat"], tel["lon"])}):
+            return jsonify({"ok": False, "error": "The straight line there crosses a no-fly zone. Add it as a route stop instead and the route flies round it."}), 400
         arrive = args.get("arrive") if args.get("arrive") in ("hover", "land", "home") else "hover"
         args = {"lat": lat, "lon": lon, "arrive": arrive,
                 "alt": max(5.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(args.get("alt") or 30))),
@@ -5536,7 +5543,10 @@ def api_drone_command():
         link["stick_active"] = False
     if cmd in ("cancel_land", "takeoff", "goto", "go_home", "hover", "control_on"):
         stop_land_assist(slot)
-    result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0, slot=slot)
+    if cmd == "go_home":
+        result = _go_home_safe(slot, "Return home pressed")  # flies round no-fly zones first if needed
+    else:
+        result = drone_command(cmd, args, timeout=15.0 if cmd in ("takeoff", "sim_on", "control_on") else 8.0, slot=slot)
     _drone_event(f"{cmd}: {'OK' if result['ok'] else result['error']}", slot)
     if cmd == "land" and result["ok"]:
         start_land_assist(slot, "Land pressed")
@@ -5655,6 +5665,7 @@ class VirtualDrone:
         self.mission, self.gimbal, self.sats, self.recording = None, 0.0, 17, False
         self.link_down_until, self.stop, self.sock, self.lock = 0.0, False, None, threading.Lock()
         self.confirm_needed = self.land_confirmed = False  # like a Mini: landing pauses at 0.5 m for confirmation
+        self.lost_link = ""  # what to do by itself if the PC link drops during an auto-fly ('' = hand back and hover)
 
     # ----- protocol (same messages as the Android app) -----
     def start(self):
@@ -5687,6 +5698,7 @@ class VirtualDrone:
             if time.time() < self.link_down_until:
                 time.sleep(0.5)
                 continue
+            linked = False
             try:
                 s = socket.create_connection(("127.0.0.1", DRONE_LINK_PORT), timeout=5)
                 reader = s.makefile("r", encoding="utf-8", newline="\n")
@@ -5694,7 +5706,7 @@ class VirtualDrone:
                 mac = hmac.new(drone_link_token(slot=self.slot).encode(), nonce.encode(), hashlib.sha256).hexdigest()
                 s.sendall((json.dumps({"t": "hello", "mac": mac, "device": "Virtual drone (simulator)", "app": "virtual"}) + "\n").encode())
                 s.settimeout(None)
-                self.sock = s
+                self.sock, linked = s, True
                 for line in reader:
                     if self.stop or self.sock is None or time.time() < self.link_down_until:
                         break
@@ -5714,13 +5726,29 @@ class VirtualDrone:
                         self._send({"t": "ack", "id": msg.get("id"), "ok": ok, "error": err})
             except (OSError, ValueError):
                 pass
+            if linked:
+                self._link_lost()
             self._close()
             time.sleep(2)
+
+    def _link_lost(self):
+        """Same as the phone app: the auto-fly's lost-link action, or hand control back to the pilot (hover)."""
+        with self.lock:
+            if not (self.mission or self.control_pc):
+                return
+            act, self.lost_link = self.lost_link, ""
+            self.mission, self.control_pc, self.stick = None, False, (0.0, 0.0, 0.0, 0.0)
+            if self.flying and act == "home":
+                self.mode, self.rth_phase = "GO_HOME", "climb"
+            elif self.flying and act == "land":
+                self.mode, self.land_confirmed = "AUTO_LANDING", True
+            self.last_lost_link = act or "hover"
 
     def _set_sticks(self, msg):
         vals = tuple(max(-1.0, min(1.0, float(msg.get(k) or 0))) for k in "xyzr")
         if self.mission and any(abs(v) > 0.05 for v in vals):
             self._abort("manual control")
+            self.lost_link = ""
         if self.control_pc:
             self.stick, self.stick_at = vals, time.time()
 
@@ -5732,6 +5760,8 @@ class VirtualDrone:
     def _command(self, cmd, args):
         if not self.powered:
             return False, "The drone is switched off."
+        if cmd in ("hover", "control_off", "land", "go_home", "goto_cancel"):
+            self.lost_link = ""  # the pilot / PC decided; no automatic lost-link action any more
         if cmd == "takeoff":
             if self.flying:
                 return False, "Already flying."
@@ -5775,6 +5805,7 @@ class VirtualDrone:
             self.mission = {"state": "ENABLING" if self.flying else "TAKING_OFF", "lat": lat, "lon": lon,
                             "alt": max(5.0, min(120.0, float(args.get("alt") or 30))), "speed": max(1.0, min(8.0, float(args.get("speed") or 5))),
                             "arrive": args.get("arrive") if args.get("arrive") in ("hover", "land", "home") else "hover", "distance": -1, "arrived_at": 0.0}
+            self.lost_link = args.get("lost_link") if args.get("lost_link") in ("home", "hover", "land") else ""
             if not self.flying:
                 self.motors, self.flying, self.mode = True, True, "AUTO_TAKE_OFF"
             elif self.mode in ("GO_HOME", "AUTO_LANDING"):
@@ -6071,6 +6102,7 @@ let map=null,pick=null,pickMark=null,marks={},trails={},homes={},data={drones:[]
 function msg(t,ok){const e=$('vdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('vdMap').setView([lat,lon],17);
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{maxZoom:19,attribution:'Esri'}).addTo(map);
+  fetch('/api/nofly').then(r=>r.json()).then(d=>(d.zones||[]).forEach(z=>L.polygon(z.points.map(p=>[p.lat,p.lon]),{color:'#ff4d6a',weight:2,fillOpacity:.25,interactive:false}).addTo(map))).catch(()=>{});
   map.on('click',e=>{pick=[e.latlng.lat,e.latlng.lng];pickMark=pickMark||L.circleMarker(pick,{radius:8,color:'#ffd23f'}).addTo(map);pickMark.setLatLng(pick);
     $('vdPick').textContent='Start point: '+pick[0].toFixed(5)+', '+pick[1].toFixed(5)})}
 const icon=h=>L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${h||0}deg);font-size:22px;line-height:26px;text-align:center;color:#ffcf7a;text-shadow:0 0 4px #000">➤</div>`});
@@ -6246,6 +6278,9 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 .dc-tel small{display:block;color:#6d8b9d;font-size:9px;letter-spacing:1.5px;text-transform:uppercase}
 .dc-tel b{color:#e9f8ff;font-size:15px}
 #dcMap{height:260px;border:1px solid #155879;border-radius:5px;background:#020a10}
+.nf-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #7a2935;background:rgba(125,12,28,.18);color:#ffb3bb;border-radius:12px;padding:2px 4px 2px 10px;font-size:12px}
+.nf-chip button{background:none;border:0;color:#ff7b86;cursor:pointer;font-weight:bold;padding:0 6px}
+.nf-chip button.armed{background:#7a1020;color:#fff;border-radius:10px}
 .dc-keys{display:grid;grid-template-columns:repeat(2,1fr);gap:4px 14px;font-size:12px;color:#9edfff}
 .dc-keys kbd{display:inline-block;min-width:22px;text-align:center;padding:2px 5px;border:1px solid #155879;border-radius:3px;background:#020a10;color:#5bd9ff;font:bold 11px Arial}
 .dc-ctl-on{box-shadow:0 0 0 2px #26ee89 inset}
@@ -6309,6 +6344,12 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <div class="muted">Click the map to add stops; the drone takes off if needed and flies through them in order (one stop = fly to a point). Every stop must be within <span id="routeMax">500</span> m of home. STOP, any flying key or the controller cancels it.</div>
 <div class="actions" style="margin-top:10px"><button class="hud-btn" onclick="undoPoint()">Undo</button><button class="hud-btn" onclick="clearRoute()">Clear</button>
 <select id="routeSel" onchange="loadRoute(this.value)" style="flex:1;min-width:140px"><option value="">Saved routes…</option></select></div>
+<div style="margin-top:10px;border:1px solid #5a1b25;border-radius:4px;padding:8px 10px;background:rgba(122,16,32,.08)">
+<b style="color:#ff7b86;font-size:11px;letter-spacing:1.5px">⛔ NO-FLY ZONES</b> <span class="muted">Areas every drone stays out of (neighbours, roads, a helipad). Routes crossing them are refused; auto-fly, drone responses and return home fly round them. The dashed circle is this drone's <span class="nf-range">500</span> m range from its home point: keep route stops inside it.</span>
+<div class="actions" style="margin-top:6px"><button class="hud-btn" id="nfDrawBtn" onclick="nfDraw()">＋ Draw a zone</button>
+<input id="nfName" placeholder="Zone name, e.g. Neighbour" style="flex:1;min-width:120px;display:none"><button class="hud-btn primary" id="nfSaveBtn" style="display:none" onclick="nfSave()">Save zone</button>
+<button class="hud-btn" id="nfUndoBtn" style="display:none" onclick="nfUndo()">Undo corner</button><button class="hud-btn" id="nfCancelBtn" style="display:none" onclick="nfCancel()">Cancel</button></div>
+<div id="nfList" style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap"></div><div id="nfMsg" class="hud-msg"></div></div>
 <div id="routeInfo" class="muted" style="margin-top:8px">No stops yet.</div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0 10px">
 <div><label for="rtAlt">Height (m)</label><input id="rtAlt" type="number" min="10" max="120" value="30" oninput="routeInfo()"></div>
@@ -6322,6 +6363,9 @@ DRONE_CONTROL_PAGE = hud_page("Drone Control", r"""
 <label style="margin-top:6px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtNoBat" onchange="noBatUi()"> <b>Keep patrolling whatever the battery level</b>: repeats the route non-stop, no return home or swap by the PC</label>
 <div id="noBatNote" class="hud-msg bad" style="display:none">The PC will not bring the drone home for battery. The drone's own low-battery protection still takes over (DJI: return home, then forced landing when critical) and the patrol stops there. Watch the battery yourself.</div>
 <div class="muted" style="margin-top:4px">A continuous patrol always sends the drone home at that battery level; without relay the patrol then ends. Each drone needs its own phone and controller (or use virtual drones).</div>
+<label style="margin-top:8px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rtLostOn" checked onchange="$('rtLost').disabled=!this.checked">
+<b>If the PC link drops</b> mid-patrol the drone will <select id="rtLost" style="width:auto"><option value="home">return home</option><option value="hover">hover</option><option value="land">land where it is</option></select></label>
+<div class="muted" style="margin-top:2px">Done by the phone itself, so it works even with the PC unreachable. Off: the drone hovers and hands control back to the pilot. If the controller's own signal is lost, the drone follows its DJI Fly setting (return home by default).</div>
 <div class="actions" style="margin-top:12px"><input id="rtName" placeholder="Route name" style="flex:1;min-width:120px"><button class="hud-btn" onclick="saveRoute()">Save</button><button class="hud-btn danger" onclick="deleteRoute()">Delete</button></div>
 <label style="margin-top:8px;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap">Backup drone
 <select id="rtBackup" style="flex:1;min-width:160px"><option value="">None</option></select></label>
@@ -6445,7 +6489,7 @@ document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
-  map.on('click',e=>locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):addPoint(e.latlng.lat,e.latlng.lng))}
+  map.on('click',e=>nfPts?nfAdd(e.latlng.lat,e.latlng.lng):locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):addPoint(e.latlng.lat,e.latlng.lng));drawNofly()}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
@@ -6460,7 +6504,10 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   $('tCtl').textContent=t.control||'–';$('confirmLand').style.display=t.landing_confirm_needed?'':'none';
   if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg(/LANDING|GO_HOME/.test(t.flight_mode||'')?'Keyboard control ended: the drone is landing / returning home by itself.':'The pilot took control on the remote controller.',false)}
   if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));
-    trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon])}}
+    trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon]);
+      // The range ring: every route stop must be inside it.
+      rCircle=rCircle||L.circle([t.home_lat,t.home_lon],{radius:rMax,color:'#36cfff',weight:1.5,dashArray:'8 6',fillColor:'#36cfff',fillOpacity:.04,interactive:false}).addTo(map);
+      rCircle.setLatLng([t.home_lat,t.home_lon]).setRadius(rMax)}}
     $('coords').textContent=t.lat.toFixed(6)+', '+t.lon.toFixed(6)}
   $('mapState').textContent=typeof L==='undefined'?'MAP NEEDS INTERNET':'';
   const m=t.mission;if(m)$('flyState').textContent='AUTO-FLY · '+m.state+(m.distance>=0?' · '+Math.round(m.distance)+' m to stop':'');
@@ -6481,7 +6528,32 @@ function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySel
 function toggleSched(i){scheds=scheds.map((s,j)=>j===i?{...s,enabled:!s.enabled}:s);saveScheds('Updated.')}
 function delSched(i){if(!confirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
 async function loadScheds(){try{const d=await fetch('/api/response/settings').then(r=>r.json());scheds=d.settings.patrol_schedules||[];renderScheds()}catch(e){}}
-let route=[],routes={},rLine=null,rMarks=[],rMax=500,filledRun='';
+let route=[],routes={},rLine=null,rMarks=[],rMax=500,filledRun='',rCircle=null;
+let nfZones=[],nfPts=null,nfLayers=[],nfTmp=null,nfArm='';
+function nfmsg(t,ok){const e=$('nfMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
+function nfButtons(){const on=!!nfPts;$('nfDrawBtn').style.display=on?'none':'';['nfName','nfSaveBtn','nfUndoBtn','nfCancelBtn'].forEach(id=>$(id).style.display=on?'':'none')}
+async function loadNofly(){try{const d=await fetch('/api/nofly?drone='+encodeURIComponent(DRONE)).then(r=>r.json());nfZones=d.zones||[];
+  if(d.max_distance_m)document.querySelectorAll('.nf-range').forEach(e=>e.textContent=d.max_distance_m);
+  if(!map&&d.centre)initMap(d.centre[0],d.centre[1]);drawNofly()}catch(e){}}
+function drawNofly(){
+  $('nfList').innerHTML=nfZones.length?nfZones.map(z=>`<span class="nf-chip">⛔ ${esc(z.name)}<button type="button" class="${nfArm===z.id?'armed':''}" title="Delete this zone" onclick="nfDel('${esc(z.id)}')">${nfArm===z.id?'Delete?':'✕'}</button></span>`).join(''):'<span class="muted">No zones yet.</span>';
+  if(!map||typeof L==='undefined')return;nfLayers.forEach(l=>map.removeLayer(l));
+  nfLayers=nfZones.map(z=>L.polygon(z.points.map(p=>[p.lat,p.lon]),{color:'#ff4d6a',weight:2,fillColor:'#ff4d6a',fillOpacity:.25}).bindTooltip('⛔ No-fly: '+z.name).addTo(map));
+  if(nfTmp){map.removeLayer(nfTmp);nfTmp=null}
+  if(nfPts&&nfPts.length)nfTmp=(nfPts.length>2?L.polygon(nfPts,{color:'#ff4d6a',dashArray:'4 4',fillOpacity:.12}):L.polyline(nfPts,{color:'#ff4d6a',dashArray:'4 4'})).addTo(map)}
+function nfDraw(){if(!map){nfmsg('The map shows once a drone is connected or a camera location is saved.',false);return}
+  nfPts=[];nfButtons();nfmsg('Click the map to place each corner of the zone (3 or more), give it a name, then press Save zone.',null)}
+function nfAdd(lat,lon){nfPts.push([lat,lon]);drawNofly();nfmsg(nfPts.length+' corner'+(nfPts.length>1?'s':'')+(nfPts.length<3?' (at least 3)':'')+'.',null)}
+function nfUndo(){if(nfPts&&nfPts.length){nfPts.pop();drawNofly()}}
+function nfCancel(){nfPts=null;nfButtons();drawNofly();nfmsg('',null)}
+async function nfSave(){if(!nfPts||nfPts.length<3){nfmsg('Place at least 3 corners on the map.',false);return}
+  const d=await fetch('/api/nofly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:$('nfName').value,points:nfPts.map(p=>({lat:p[0],lon:p[1]}))})}).then(r=>r.json());
+  if(!d.ok){nfmsg(d.error,false);return}nfZones=d.zones;nfPts=null;$('nfName').value='';nfButtons();drawNofly();
+  nfmsg('Zone “'+d.zone.name+'” saved. Routes crossing it are refused and auto-fly flies round it.',true)}
+async function nfDel(id){if(nfArm!==id){nfArm=id;drawNofly();setTimeout(()=>{if(nfArm===id){nfArm='';drawNofly()}},4000);return}
+  nfArm='';const d=await fetch('/api/nofly',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
+  if(d.ok){nfZones=d.zones;nfmsg('Zone deleted.',true)}drawNofly()}
+loadNofly();setInterval(loadNofly,15000);
 function rtmsg(t,ok){const e=$('routeMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function addPoint(lat,lon){if(route.length>=25){rtmsg('25 stops maximum.',false);return}route.push({lat,lon});drawRoute()}
 function undoPoint(){route.pop();drawRoute()}
@@ -6498,7 +6570,7 @@ function drawRoute(){routeInfo();if(!map||typeof L==='undefined')return;rMarks.f
   rLine=rLine||L.polyline([],{color:'#ffd23f',weight:3}).addTo(map);rLine.setLatLngs(route.map(p=>[p.lat,p.lon]));
   route.forEach((p,i)=>rMarks.push(L.marker([p.lat,p.lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],
     html:`<div style="width:22px;height:22px;border-radius:50%;background:#ffd23f;color:#111;font:bold 12px Arial;display:flex;align-items:center;justify-content:center;box-shadow:0 0 6px #000">${i+1}</div>`})}).addTo(map)))}
-async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||500;$('routeMax').textContent=rMax;
+async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||500;$('routeMax').textContent=rMax;if(rCircle)rCircle.setRadius(rMax);
   const sel=$('routeSel'),cur=sel.value;sel.innerHTML='<option value="">Saved routes…</option>'+Object.keys(routes).map(n=>`<option>${esc(n)}</option>`).join('');sel.value=cur;
   if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();
   const bf=d.backup_for;$('backupNote').style.display=bf?'':'none';$('flyRouteBtn').disabled=!!bf;
@@ -6507,10 +6579,10 @@ async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.jso
   // A backup (or a drone that took over) shows the route it covers, filled once per run so later edits stay.
   const cover=bf&&bf.route?bf:(r.active&&r.route?r:null);
   if(cover&&cover.id&&cover.id!==filledRun){filledRun=cover.id;loadRoute(cover.name,cover.route)}$('routeState').textContent=r.active?('ROUTE '+r.name+' · '+r.message):(r.message||'')}catch(e){}}
-function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtNoBat').checked=!!r.ignore_battery;noBatUi();$('rtName').value=n;drawRoute();
+function loadRoute(n,given){const r=given||routes[n];if(!r)return;route=r.points.map(p=>({...p}));$('rtAlt').value=r.alt;$('rtSpeed').value=r.speed;$('rtPause').value=r.pause;$('rtEnd').value=r.end;$('rtLoop').checked=!!r.loop;$('rtRelay').checked=!!r.relay;$('rtSwap').value=r.swap_at||20;$('rtNoBat').checked=!!r.ignore_battery;noBatUi();$('rtLostOn').checked=r.lost_link_on!==false;$('rtLost').value=r.lost_link||'home';$('rtLost').disabled=!$('rtLostOn').checked;$('rtName').value=n;drawRoute();
   if(map&&route.length)map.fitBounds(route.map(p=>[p.lat,p.lon]),{padding:[30,30]})}
 function routeBody(){return{points:route,alt:+$('rtAlt').value,speed:+$('rtSpeed').value,pause:+$('rtPause').value,end:$('rtEnd').value,
-  loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,ignore_battery:$('rtNoBat').checked,backup:$('rtNoBat').checked?'':$('rtBackup').value}}
+  loop:$('rtLoop').checked,relay:$('rtRelay').checked,swap_at:+$('rtSwap').value||20,ignore_battery:$('rtNoBat').checked,lost_link_on:$('rtLostOn').checked,lost_link:$('rtLost').value,backup:$('rtNoBat').checked?'':$('rtBackup').value}}
 // Ignoring the battery means no swap, so relay and backup are switched off while it is ticked.
 function noBatUi(){const on=$('rtNoBat').checked;['rtRelay','rtSwap','rtBackup'].forEach(id=>$(id).disabled=on);$('noBatNote').style.display=on?'':'none';
   if(on)$('rtLoop').checked=true;$('rtLoop').disabled=on;routeInfo()}
@@ -6739,13 +6811,31 @@ def dispatch_drone(camera, by="dashboard", drone=None):
         return {"ok": False, "error": problem}
     cfg = load_response_settings()
     loc = cfg["camera_locations"][camera]
-    result = drone_command("goto", {"lat": loc["lat"], "lon": loc["lon"], "alt": cfg["altitude_m"],
-                                    "speed": cfg["speed_ms"], "arrive": "hover"}, timeout=15.0, slot=slot)
+    tel = get_link(slot)["telemetry"]
+    via = nofly.detour(nofly_zones(), (tel["lat"], tel["lon"]), (loc["lat"], loc["lon"])) if tel.get("lat") else []
+    if via is None:
+        z = nofly.zone_at(nofly_zones(), loc["lat"], loc["lon"])
+        return {"ok": False, "error": f"Camera {camera} is inside no-fly zone “{z['name']}”." if z else
+                f"There is no way round the no-fly zones to {camera}."}
+    first = via[0] if via else (loc["lat"], loc["lon"])
+    goto = {"alt": cfg["altitude_m"], "speed": cfg["speed_ms"], "arrive": "hover", "lost_link": "home"}
+    result = drone_command("goto", {"lat": first[0], "lon": first[1], **goto}, timeout=15.0, slot=slot)
     if not result["ok"]:
         return result
     who = drone_label(slot) if len(drone_slots()) > 1 else "Drone"
     drone_response.update(active=True, drone=slot, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
-                          message=f"{who} on its way to {camera}")
+                          message=f"{who} on its way to {camera}", routing=bool(via))
+    if via:
+        def round_zones():
+            # The response worker waits while the drone flies round the zones, then watches the last leg as usual.
+            for q, nxt in zip(via, via[1:] + [(loc["lat"], loc["lon"])]):
+                if _wait_point(slot, q, time.time(), lambda: not drone_response["active"]):
+                    break
+                if not drone_command("goto", {"lat": nxt[0], "lon": nxt[1], **goto}, timeout=15.0, slot=slot)["ok"]:
+                    break
+            drone_response.update(routing=False, started=time.time())
+        threading.Thread(target=round_zones, daemon=True).start()
+        _drone_event(f"Flying round the no-fly zones to {camera} ({len(via)} turn{'s' if len(via) > 1 else ''})", slot)
     _drone_event(f"Drone response to {camera} started ({by})", slot)
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
 
@@ -6753,7 +6843,7 @@ def dispatch_drone(camera, by="dashboard", drone=None):
 def recall_drone(reason="recalled"):
     if not drone_response["active"]:
         return {"ok": False, "error": "No drone response in progress."}
-    result = drone_command("go_home", timeout=10.0, slot=drone_response["drone"])
+    result = _go_home_safe(drone_response["drone"], reason)
     drone_response.update(phase="returning", message=f"Returning home ({reason})")
     _drone_event(f"Drone response: returning home ({reason})", drone_response["drone"])
     return result
@@ -6783,6 +6873,8 @@ def _drone_response_worker():
             mission = tel.get("mission")
             cam = drone_response["camera"]
             cfg = load_response_settings()
+            if drone_response["phase"] == "flying" and drone_response.get("routing"):
+                continue  # still flying round a no-fly zone
             if drone_response["phase"] == "flying":
                 if not mission and drone_response["started"] and time.time() - drone_response["started"] > 5:
                     loc = cfg["camera_locations"].get(cam) or {}
@@ -7165,11 +7257,87 @@ def start_assistant():
     threading.Thread(target=_briefing_worker, daemon=True).start()
     threading.Thread(target=_drone_response_worker, daemon=True).start()
     threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
+    threading.Thread(target=_nofly_watch_worker, daemon=True).start()
 
 
 # ---------- multi-stop routes (draw on the map, fly stop by stop) ----------
 ROUTES_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_routes.json")
 ROUTE_MAX_POINTS = 25
+NOFLY_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "nofly_zones.json")
+LOST_LINK_ACTIONS = ("home", "hover", "land")
+
+
+def nofly_zones():
+    return nofly.load_zones(NOFLY_FILE)
+
+
+def _lost_link_args(route):
+    """What the phone does by itself if the PC link drops mid-flight ('' = hand control back to the pilot)."""
+    return {"lost_link": route.get("lost_link", "home") if route.get("lost_link_on", True) else ""}
+
+
+def _wait_point(slot, q, started, should_stop=lambda: False, limit=900):
+    """Wait until the drone's auto-fly reaches q = (lat, lon). '' on arrival, else why it ended."""
+    while True:
+        time.sleep(0.5)
+        if should_stop():
+            return "stopped from the PC"
+        link = get_link(slot)
+        if time.time() - link["tel_at"] > 5:
+            if time.time() - started > limit:
+                return "lost contact with the drone"
+            continue
+        tel = link["telemetry"]
+        if tel.get("mission") or time.time() - started < 3:
+            continue
+        if tel.get("lat") and _distance_m(tel["lat"], tel["lon"], q[0], q[1]) < 8:
+            return ""
+        return "STOP pressed, the pilot took control or the link dropped"
+
+
+def _go_home_safe(slot, why="return home"):
+    """Return home. DJI's return home flies straight back, so first fly round any no-fly zone in the way."""
+    tel = get_link(slot)["telemetry"]
+    home = (tel.get("home_lat"), tel.get("home_lon"))
+    via = []
+    if tel.get("lat") and None not in home:
+        via = nofly.detour(nofly_zones(), (tel["lat"], tel["lon"]), home) or []
+    if not via:
+        return drone_command("go_home", timeout=10.0, slot=slot)
+    alt = max(30.0, float(tel.get("altitude") or 0))
+
+    def fly():
+        _drone_event(f"Flying round a no-fly zone before returning home ({why})", slot)
+        for q in via:
+            r = drone_command("goto", {"lat": q[0], "lon": q[1], "alt": alt, "speed": 6, "arrive": "hover", "lost_link": "home"},
+                              timeout=15.0, slot=slot)
+            if not r["ok"] or _wait_point(slot, q, time.time()):
+                break
+        drone_command("go_home", timeout=10.0, slot=slot)
+    threading.Thread(target=fly, daemon=True).start()
+    return {"ok": True, "error": ""}
+
+
+def _nofly_watch_worker():
+    """Tell the owner when any drone is inside a no-fly zone (manual flying can still take it there)."""
+    inside = {}
+    while True:
+        time.sleep(1)
+        try:
+            zones = nofly_zones()
+            for slot in drone_slots():
+                link = get_link(slot)
+                tel = link["telemetry"]
+                if not zones or time.time() - link["tel_at"] > 5 or not tel.get("flying") or not tel.get("lat"):
+                    inside.pop(slot, None)
+                    continue
+                z = nofly.zone_at(zones, tel["lat"], tel["lon"])
+                if z and inside.get(slot) != z["id"]:
+                    _drone_event(f"⛔ Entered no-fly zone {z['name']}", slot)
+                    send_telegram(f"⛔ {drone_label(slot)} is inside no-fly zone “{z['name']}”. Fly it out.") if telegram_ready() else None
+                inside[slot] = z["id"] if z else None
+        except Exception as e:
+            print("No-fly watch error:", e)
 route_runs = {}  # run id -> state; each drone can fly its own route (a run moves to the backup drone on a handover)
 
 
@@ -7200,6 +7368,8 @@ def _clean_route(r):
             "end": r.get("end") if r.get("end") in ("hover", "home", "land") else "home",
             "loop": bool(r.get("loop") or r.get("ignore_battery")), "relay": bool(r.get("relay")),
             "ignore_battery": bool(r.get("ignore_battery")),
+            "lost_link_on": r.get("lost_link_on", True) is not False,
+            "lost_link": r.get("lost_link") if r.get("lost_link") in LOST_LINK_ACTIONS else "home",
             "swap_at": max(20, min(50, int(float(r.get("swap_at") or 20))))}
 
 
@@ -7208,7 +7378,11 @@ def save_route(name, route):
     if not name:
         raise ValueError("Give the route a name")
     routes = load_routes()
-    routes[name] = _clean_route(route)
+    route = _clean_route(route)
+    problem = nofly.route_problem(nofly_zones(), route["points"], route["loop"])
+    if problem:
+        raise ValueError(problem)
+    routes[name] = route
     tmp = ROUTES_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(routes, f, indent=2)
@@ -7244,6 +7418,9 @@ def _route_problem(route, slot=None):
         d = _distance_m(home[0], home[1], p["lat"], p["lon"])
         if d > DRONE_LIMITS["max_distance_m"]:
             return f"Stop {i} is {int(d)} m from home (limit {DRONE_LIMITS['max_distance_m']} m)."
+    problem = nofly.route_problem(nofly_zones(), pts, route.get("loop"), home, route.get("end") == "home")
+    if problem:
+        return problem
     if (tel.get("battery") or 0) < load_response_settings()["min_battery"]:
         return f"Battery is {tel.get('battery')}%."
     b = backup_run_of(slot)
@@ -7275,9 +7452,11 @@ def _wait_arrival(p, started, run):
         if tel.get("lat") and _distance_m(tel["lat"], tel["lon"], p["lat"], p["lon"]) < 8:
             return ""
         b = tel.get("battery")
-        if b is not None and b <= 20 and str(tel.get("flight_mode") or "").upper() in ("GO_HOME", "AUTO_LANDING", "LANDING"):
+        if str(tel.get("flight_mode") or "").upper() in ("GO_HOME", "AUTO_LANDING", "LANDING"):
             mode = str(tel.get('flight_mode')).replace('_', ' ').lower()
-            return f"the drone's own low-battery protection took over at {b}% ({mode})"
+            if b is not None and b <= 20:
+                return f"the drone's own low-battery protection took over at {b}% ({mode})"
+            return f"the drone took over by itself ({mode}): the link dropped and it did its lost-link action, or the pilot sent it"
         return "STOP pressed, the pilot took control or the link dropped"
 
 
@@ -7293,10 +7472,27 @@ def _battery_low(slot, run):
     return bool(run.get("swap_at")) and b is not None and b <= run["swap_at"]
 
 
+def _fly_leg(slot, p, route, run):
+    """Fly to stop p, round any no-fly zone on the way. '' on arrival, SWAP, or why it ended."""
+    tel = get_link(slot)["telemetry"]
+    via = nofly.detour(nofly_zones(), (tel["lat"], tel["lon"]), (p["lat"], p["lon"])) if tel.get("lat") else []
+    if via is None:
+        raise RuntimeError(f"no way round the no-fly zones to stop {run['index']}")
+    for q in via + [(p["lat"], p["lon"])]:
+        r = drone_command("goto", {"lat": q[0], "lon": q[1], "alt": route["alt"], "speed": route["speed"], "arrive": "hover",
+                                   **_lost_link_args(route)}, timeout=15.0, slot=slot)
+        if not r["ok"]:
+            raise RuntimeError(r["error"] or "the drone refused the next stop")
+        why = _wait_arrival({"lat": q[0], "lon": q[1]}, time.time(), run)
+        if why:
+            return why
+    return ""
+
+
 def _hand_over(name, route, old, stop, run):
     """Send the tired drone home and put the backup (or the next ready drone) on the route. Returns the new drone."""
     bat = get_link(old)["telemetry"].get("battery")
-    drone_command("go_home", timeout=10.0, slot=old)
+    _go_home_safe(old, f"battery {bat}%")
     _drone_event(f"Battery {bat}%: returning home from route {name}", old)
     backup, run["backup"] = run.get("backup"), None  # released, so it can take over
     nxt, problem = None, "no other drone"
@@ -7346,17 +7542,13 @@ def _run_route(name, route, by, slot, run):
                 slot = _hand_over(name, route, slot, i + 1, run)
             lap = f" · lap {run['lap']}" if route["loop"] else ""
             run.update(index=i + 1, phase="flying", message=f"{drone_label(slot)} flying to stop {i + 1} of {len(pts)}{lap}")
-            r = drone_command("goto", {"lat": p["lat"], "lon": p["lon"], "alt": route["alt"], "speed": route["speed"], "arrive": "hover"},
-                              timeout=15.0, slot=slot)
-            if not r["ok"]:
-                raise RuntimeError(r["error"] or "the drone refused the next stop")
-            why = _wait_arrival(p, time.time(), run)
+            why = _fly_leg(slot, p, route, run)
             if why == SWAP:
                 slot = _hand_over(name, route, slot, i + 1, run)
                 continue  # the new drone flies to the same stop
             if why:
                 # The drone is already flying home or landing on its own: end the patrol without telling it to hover.
-                raise (PatrolEnded if "low-battery protection" in why else RuntimeError)(why)
+                raise (PatrolEnded if "took over" in why else RuntimeError)(why)
             run.update(phase="pause", message=f"{drone_label(slot)} at stop {i + 1} of {len(pts)}{lap}")
             end = time.time() + route["pause"]
             while time.time() < end and not run["stop"]:
@@ -7369,9 +7561,10 @@ def _run_route(name, route, by, slot, run):
                     break
                 i = 0
                 run["lap"] += 1
-        action = {"home": "go_home", "land": "land"}.get(route["end"])
-        if action:
-            drone_command(action, timeout=10.0, slot=slot)
+        if route["end"] == "home":
+            _go_home_safe(slot, f"route {name} complete")
+        elif route["end"] == "land":
+            drone_command("land", timeout=10.0, slot=slot)
         done = {"home": "returning home", "land": "landing at the last stop", "hover": "hovering at the last stop"}[route["end"]]
         run.update(phase="done", message=f"Route {name} complete, {done}")
         _drone_event(f"Route {name} complete ({done})", slot)
@@ -7379,7 +7572,7 @@ def _run_route(name, route, by, slot, run):
     except PatrolEnded as e:
         run.update(phase="done", message=f"Patrol {name} ended: {e}")
         _drone_event(f"Route {name} ended: {e}", slot)
-        if "low-battery protection" in str(e) and telegram_ready():
+        if "took over" in str(e) and telegram_ready():
             send_telegram(f"🔋 Patrol “{name}” ({drone_label(slot)}) ended: {e}.")
     except Exception as e:
         drone_command("hover", timeout=5.0, slot=slot)
@@ -7441,6 +7634,41 @@ def api_routes():
     return jsonify({"ok": True, "routes": load_routes(), "run": run, "max_distance_m": DRONE_LIMITS["max_distance_m"],
                     "backup_for": {"drone": b["drone"], "label": drone_label(b["drone"]), "name": b["name"],
                                    "id": b.get("id"), "route": b.get("route")} if b else None})
+
+
+@app.route("/api/nofly", methods=["GET", "POST", "DELETE"])
+def api_nofly():
+    """No-fly zones shared by every drone. GET also gives a map centre for when no drone is connected."""
+    zones = nofly_zones()
+    try:
+        if request.method == "POST":
+            z = nofly.clean_zone(request.get_json(silent=True) or {})
+            for slot in drone_slots():
+                tel = get_link(slot)["telemetry"]
+                if tel.get("home_lat") and nofly.zone_at([z], tel["home_lat"], tel["home_lon"]):
+                    raise ValueError(f"{drone_label(slot)}'s home point is inside that zone. Draw it round the home point instead.")
+            zones = [x for x in zones if x["id"] != z["id"]] + [z]
+            nofly.save_zones(NOFLY_FILE, zones)
+            return jsonify({"ok": True, "zone": z, "zones": zones})
+        if request.method == "DELETE":
+            zid = str((request.get_json(silent=True) or {}).get("id") or "")
+            zones = [x for x in zones if x["id"] != zid]
+            nofly.save_zones(NOFLY_FILE, zones)
+            return jsonify({"ok": True, "zones": zones})
+    except (TypeError, ValueError, KeyError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    centre = None
+    for slot in [request.args.get("drone") or DRONE_CAMERA_NAME] + drone_slots():
+        tel = get_link(slot)["telemetry"]
+        if tel.get("home_lat") or tel.get("lat"):
+            centre = [tel.get("home_lat") or tel["lat"], tel.get("home_lon") or tel["lon"]]
+            break
+    locs = list(load_response_settings()["camera_locations"].values())
+    if not centre and locs:
+        centre = [locs[0]["lat"], locs[0]["lon"]]
+    if not centre and zones:
+        centre = [zones[0]["points"][0]["lat"], zones[0]["points"][0]["lon"]]
+    return jsonify({"ok": True, "zones": zones, "centre": centre, "max_distance_m": DRONE_LIMITS["max_distance_m"]})
 
 
 @app.route("/api/routes/fly", methods=["POST"])
