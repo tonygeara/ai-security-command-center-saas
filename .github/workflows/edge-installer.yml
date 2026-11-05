@@ -1,0 +1,93 @@
+# Builds the Windows edge installer (AI-Security-Command-Center-Setup-<version>.exe) on GitHub's Windows machines,
+# runs the edge tests on it, and publishes it as a GitHub release you can download.
+#
+# Run it: GitHub → Actions → "Edge installer" → Run workflow (or push a tag such as edge-v11.2.0).
+# The version comes from APP_VERSION in edge/app/launcher.pyw; release notes from releases/V<major>.<minor>.md.
+name: Edge installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish as a GitHub release (otherwise only a downloadable build artifact)"
+        type: boolean
+        default: true
+  push:
+    tags: ["edge-v*"]
+
+permissions:
+  contents: write  # to create the release
+
+concurrency:
+  group: edge-installer-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Inno Setup
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ }
+          if (-not $iscc) { choco install innosetup -y --no-progress; if ($LASTEXITCODE) { throw 'Inno Setup install failed' } }
+
+      - name: Version
+        id: version
+        run: |
+          $v = (Select-String -Path edge\app\launcher.pyw -Pattern "^APP_VERSION = '(.+)'").Matches[0].Groups[1].Value
+          $d = (Select-String -Path edge\app\dashboard.py -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
+          if (-not $v -or $v -ne $d) { throw "APP_VERSION differs: launcher.pyw '$v', dashboard.py '$d'" }
+          $n = $v.TrimStart('V')
+          $notes = "releases\V$(($n -split '\.')[0..1] -join '.').md"
+          "number=$n" >> $env:GITHUB_OUTPUT
+          "notes=$notes" >> $env:GITHUB_OUTPUT
+          Write-Host "Building $v (notes: $notes)"
+
+      - name: Build installer
+        run: powershell -ExecutionPolicy Bypass -File edge\installer\build.ps1
+
+      - name: Tests
+        working-directory: edge
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          .venv-build\Scripts\python.exe -m pip install --quiet "pytest>=8,<9"
+          .venv-build\Scripts\python.exe -m pytest tests
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI-Security-Command-Center-Setup-${{ steps.version.outputs.number }}
+          path: edge/installer/output/*.exe
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.event_name == 'push' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "edge-v${{ steps.version.outputs.number }}"
+          $exe = Get-ChildItem edge\installer\output\*.exe | Select-Object -First 1
+          $notes = "${{ steps.version.outputs.notes }}"
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag *> $null
+          $exists = $LASTEXITCODE -eq 0
+          $ErrorActionPreference = 'Stop'
+          if ($exists) {
+            gh release upload $tag $exe.FullName --clobber
+          } else {
+            $ghArgs = @($tag, $exe.FullName, '--title', "Edge Agent V${{ steps.version.outputs.number }}", '--target', "${{ github.sha }}")
+            if (Test-Path $notes) { $ghArgs += @('--notes-file', $notes) } else { $ghArgs += @('--notes', 'Windows edge installer.') }
+            gh release create @ghArgs
+          }
+          if ($LASTEXITCODE) { throw 'Publishing the release failed' }
+          Write-Host "Published: https://github.com/${{ github.repository }}/releases/tag/$tag"
