@@ -53,6 +53,13 @@ def d(tmp_path_factory):
     dashboard.telegram_ready = lambda cfg=None: True
     dashboard.sent = []
     dashboard.send_telegram = lambda text, *a, **k: dashboard.sent.append(text) or {"ok": True}
+    # No internet in tests: weather, air traffic and terrain are "unknown" unless a test supplies them.
+    dashboard._weather_fetch = lambda lat, lon: None
+    dashboard._traffic_fetch = lambda settings, lat, lon: None
+
+    def _no_terrain(cells):
+        raise OSError("offline")
+    dashboard._elevation_fetch = _no_terrain
     dashboard.start_drone_link()
     # Only the background workers the drone tests need (not the Telegram poller).
     import threading

@@ -80,7 +80,10 @@ BODY = r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">🗺️ Auto-fly route</div><div class="live" id="routeState"></div></div>
 <div class="panel-body">
 <div class="muted">Click the map to add stops; the drone takes off if needed and flies through them in order (one stop = fly to a point). Every stop must be within <span id="routeMax">500</span> m of home. STOP, any flying key or the controller cancels it.</div>
+<div id="fsBanner" class="hud-msg" style="display:none"></div>
 <div class="actions" style="margin-top:10px"><button class="hud-btn" onclick="undoPoint()">Undo</button><button class="hud-btn" onclick="clearRoute()">Clear</button>
+<button class="hud-btn" onclick="shortestOrder()" title="Reorder the stops to fly the shortest distance">Shortest order</button>
+<button class="hud-btn" onclick="checkSignal()" title="Expected controller signal at each stop">Check signal</button>
 <select id="routeSel" onchange="loadRoute(this.value)" style="flex:1;min-width:140px"><option value="">Saved routes…</option></select></div>
 <div style="margin-top:10px;border:1px solid #5a1b25;border-radius:4px;padding:8px 10px;background:rgba(122,16,32,.08)">
 <b style="color:#ff7b86;font-size:11px;letter-spacing:1.5px">⛔ NO-FLY ZONES</b> <span class="muted">Areas every drone stays out of (neighbours, roads, a helipad). Routes crossing them are refused; auto-fly, drone responses and return home fly round them. The dashed circle is this drone's <span class="nf-range">500</span> m range from its home point: keep route stops inside it.</span>
@@ -210,6 +213,7 @@ let st={},control=false,map=null,dMark=null,hMark=null,trail=null,keys=new Set()
 function msg(t,ok){const e=$('cmdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))return;msg(c.replace('_',' ')+'…');
   try{const r=await fetch('/api/drone/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd:c,args:args||{}})});const d=await r.json();
+    if(!d.ok&&d.can_force&&confirm('⚠ '+d.error+'\n\nTake off anyway? You are responsible for the flight.'))return cmd(c,{...(args||{}),force:true});
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
 function takeoff(){const sim=(st.telemetry||{}).simulator;
   cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF: the simulator is OFF and the motors WILL start. Propellers on, people clear, drone in sight, pilot holding the controller?')}
@@ -319,6 +323,28 @@ function drawRoute(){routeInfo();if(!map||typeof L==='undefined')return;rMarks.f
   rLine=rLine||L.polyline([],{color:'#ffd23f',weight:3}).addTo(map);rLine.setLatLngs(route.map(p=>[p.lat,p.lon]));
   route.forEach((p,i)=>rMarks.push(L.marker([p.lat,p.lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],
     html:`<div style="width:22px;height:22px;border-radius:50%;background:#ffd23f;color:#111;font:bold 12px Arial;display:flex;align-items:center;justify-content:center;box-shadow:0 0 6px #000">${i+1}</div>`})}).addTo(map)))}
+async function shortestOrder(){if(route.length<3){rtmsg('Add at least 3 stops to reorder.',false);return}
+  const d=await fetch('/api/routes/optimize',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({points:route,loop:$('rtLoop').checked,drone:DRONE})}).then(r=>r.json());
+  if(!d.ok){rtmsg(d.error,false);return}
+  if(d.after_m>=d.before_m){rtmsg(`The stops are already in the shortest order (${d.before_m} m${d.from_home?' from home':''}).`,true);return}
+  route=d.points;drawRoute();rtmsg(`Reordered: ${d.before_m} m → ${d.after_m} m (${Math.round((1-d.after_m/d.before_m)*100)}% shorter${d.from_home?', from the home point':''}). Save the route to keep the new order.`,true)}
+let sigMarks=[];
+async function checkSignal(){if(!route.length){rtmsg('Add stops first.',false);return}
+  const d=await fetch('/api/rf/check',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({points:route,alt:+$('rtAlt').value})}).then(r=>r.json());
+  if(!d.ok){rtmsg(d.error,false);return}
+  sigMarks.forEach(m=>map&&map.removeLayer(m));sigMarks=[];const col={good:'#26ee89',weak:'#ffd23f',poor:'#ff4d6a'};
+  if(map)d.results.forEach(r=>sigMarks.push(L.circleMarker([r.lat,r.lon],{radius:9,color:col[r.quality],weight:3,fill:false})
+    .bindTooltip(`Signal ${r.quality} (${r.margin_db>0?'+':''}${r.margin_db} dB)`).addTo(map)));
+  rtmsg(d.summary,d.worst.quality==='good')}
+let acMarks=[];
+async function loadSafety(){try{const d=await fetch('/api/safety',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  const c=d.conditions,b=$('fsBanner');b.style.display=c.problem||c.warnings.length?'':'none';
+  b.className='hud-msg '+(c.problem?'bad':'');b.innerHTML=c.problem?'⛔ '+esc(c.problem)+' <a href="/safety" style="color:#5bd9ff">Flight safety</a>':c.warnings.map(w=>'⚠ '+esc(w)).join('<br>');
+  if(!map)return;acMarks.forEach(m=>map.removeLayer(m));acMarks=[];const th=new Set((d.traffic.threats||[]).map(a=>a.hex));
+  (d.traffic.fresh?d.traffic.aircraft:[]).forEach(a=>acMarks.push(L.marker([a.lat,a.lon],{icon:L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,12],
+    html:`<div style="transform:rotate(${(a.track||0)-45}deg);font-size:18px;line-height:24px;text-align:center;color:${th.has(a.hex)?'#ff4d6a':'#ffd23f'};text-shadow:0 0 4px #000">✈</div>`})})
+    .bindTooltip(`${esc(a.call||a.hex)} · ${(a.dist_m/1000).toFixed(1)} km · ${a.height_ft==null?'?':Math.round(a.height_ft/100)*100} ft`).addTo(map)))}catch(e){}}
+setInterval(loadSafety,10000);setTimeout(loadSafety,1500);
 async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||500;$('routeMax').textContent=rMax;if(rCircle)rCircle.setRadius(rMax);
   const sel=$('routeSel'),cur=sel.value;sel.innerHTML='<option value="">Saved routes…</option>'+Object.keys(routes).map(n=>`<option>${esc(n)}</option>`).join('');sel.value=cur;
   if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();

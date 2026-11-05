@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-PAGES = ["/", "/drone-control", "/drone-control?drone=drone", "/drone-grid", "/virtual-drones", "/settings", "/license",
+PAGES = ["/", "/drone-control", "/drone-control?drone=drone", "/drone-grid", "/virtual-drones", "/maps", "/safety", "/settings", "/license",
          "/setup/add"]
 NODE = shutil.which("node")
 

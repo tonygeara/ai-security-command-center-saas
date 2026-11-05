@@ -45,3 +45,10 @@ The launcher runs `docker compose -p ai-security -f runtime/docker-compose.yml u
 On first start it removes containers left by older versions (same names, other config
 folders); their data folders are not deleted. Ports are bound to 127.0.0.1 except
 RTMP 1935, which the drone app pushes to over the LAN.
+
+The 3D mapping engine (`nodeodm`, OpenDroneMap) is in the same file under the `mapping` profile, so
+`up -d` does not start or download it. The 3D Maps page starts it when a map is first processed
+(`docker compose --profile mapping up -d nodeodm`, port 3000 on 127.0.0.1), and the launcher's Stop
+also stops it. See [docs/DRONE-3D-MAPS.md](../docs/DRONE-3D-MAPS.md).
+
+Weather, crewed-aircraft (ADS-B), airspace and radio-coverage checks: [docs/FLIGHT-SAFETY.md](../docs/FLIGHT-SAFETY.md).

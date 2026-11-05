@@ -49,3 +49,16 @@ services:
       - "${AI_SECURITY_DATA:?set by the launcher}/frigate/storage:/media/frigate"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # Drone 3D site maps: OpenDroneMap's processing engine. Not started with the other services (it is a large
+  # download and uses all CPU cores while it works): the dashboard's 3D Maps page starts it when a map is processed,
+  # with  docker compose --profile mapping up -d nodeodm.
+  nodeodm:
+    image: opendronemap/nodeodm:3.6.2@sha256:fcd99eb23d8db194a7d1dc95f029f518283b3d6be32dd64422395f4e7af56720  # 3.6.2
+    container_name: mapping-engine
+    profiles: ["mapping"]
+    restart: "no"
+    ports:
+      - "127.0.0.1:3000:3000"   # local only: the dashboard sends it the images
+    volumes:
+      - "${AI_SECURITY_DATA:?set by the launcher}/mapping-engine:/var/www/data"
