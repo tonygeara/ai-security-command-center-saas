@@ -2309,10 +2309,11 @@ def force_drone_ai_off(reason="Cloud entitlement disabled"):
 import licensing
 import edition
 import nofly
+import mapping
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard  # noqa: E401
+import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps  # noqa: E401
 import users as user_accounts
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
@@ -3821,6 +3822,7 @@ HUD_NAV_ITEMS = [
     ("people", "/#face-library", "◎", "People"),
     ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
     ("drone", "/drone-control", "✈", "Drone"),
+    ("maps", "/maps", "▦", "3D Maps"),
     ("virtual", "/virtual-drones", "◇", "Virtual drones"),
     ("devices", "/setup/add", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
@@ -6097,6 +6099,7 @@ def start_assistant():
     threading.Thread(target=_drone_response_worker, daemon=True).start()
     threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
     threading.Thread(target=_nofly_watch_worker, daemon=True).start()
+    start_mapping()
 
 
 # ---------- multi-stop routes (draw on the map, fly stop by stop) ----------
@@ -6200,9 +6203,11 @@ def load_routes():
 
 
 def _clean_route(r):
+    # A 3D-map survey flies a grid with more stops than a patrol; it is built by the 3D Maps page, never typed in.
+    survey = r.get("survey") if mapping._safe_id(r.get("survey")) else None
     pts = [{"lat": float(p["lat"]), "lon": float(p["lon"])} for p in (r.get("points") or [])
-           if -90 <= float(p["lat"]) <= 90 and -180 <= float(p["lon"]) <= 180][:ROUTE_MAX_POINTS]
-    return {"points": pts, "alt": max(10.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(r.get("alt") or 30))),
+           if -90 <= float(p["lat"]) <= 90 and -180 <= float(p["lon"]) <= 180][:mapping.MAX_POINTS if survey else ROUTE_MAX_POINTS]
+    return {**({"survey": survey} if survey else {}), "points": pts, "alt": max(10.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(r.get("alt") or 30))),
             "speed": max(1.0, min(8.0, float(r.get("speed") or 5))), "pause": max(0.0, min(120.0, float(r.get("pause") or 0))),
             "end": r.get("end") if r.get("end") in ("hover", "home", "land") else "home",
             "loop": bool(r.get("loop") or r.get("ignore_battery")), "relay": bool(r.get("relay")),
@@ -6342,7 +6347,8 @@ def patrol_report(name, run, ended_how):
     end = time.time()
     began = run.get("began") or end
     mins = max(0, int(round((end - began) / 60)))
-    lines = [f"📋 Patrol report: “{name}”", ended_how,
+    survey = (run.get("route") or {}).get("survey")
+    lines = [f"🗺 Mapping flight: “{name}”" if survey else f"📋 Patrol report: “{name}”", ended_how,
              f"⏱ {mins} min · {run.get('lap', 1)} lap{'s' if run.get('lap', 1) != 1 else ''} · {run.get('total', 0)} stops"]
     for slot, start in run.get("battery", {}).items():
         now_b = get_link(slot)["telemetry"].get("battery")
@@ -6355,6 +6361,8 @@ def patrol_report(name, run, ended_how):
     people, vehicles = seen.count("person"), seen.count("vehicle")
     lines.append(f"👁 Seen: {people} {'person' if people == 1 else 'people'}, {vehicles} vehicle{'s' if vehicles != 1 else ''}"
                  if seen else "👁 Nothing seen by the drone cameras")
+    if survey:
+        lines.append(f"📸 {run.get('frames', 0)} map images captured")
     text = "\n".join(lines)
     run["report"] = text
     if telegram_ready():
@@ -6439,6 +6447,9 @@ def _run_route(name, route, by, slot, run):
     kind += f" · backup {drone_label(run['backup'])}" if run.get("backup") and not nobat else ""
     _drone_event(f"Route {name} started ({len(pts)} stops, {by}{kind})", slot)
     send_telegram(f"🗺️ Route “{name}”{who} started: {len(pts)} stops at {int(route['alt'])} m{kind}.") if telegram_ready() else None
+    if route.get("survey"):  # 3D-map survey: camera straight down, grab images along the grid
+        drone_command("gimbal", {"pitch": -90}, timeout=5.0, slot=slot)
+        threading.Thread(target=_survey_capture_worker, args=(run,), daemon=True).start()
     i = 0
     try:
         while True:
@@ -6489,6 +6500,11 @@ def _run_route(name, route, by, slot, run):
     finally:
         run.update(active=False, swap_at=0, backup=None, ended_at=time.time())
     run.setdefault("battery_end", {})[slot] = get_link(slot)["telemetry"].get("battery")
+    if route.get("survey"):
+        try:
+            _survey_flight_ended(run, how)
+        except Exception as e:
+            print("Mapping flight end error:", e)
     try:
         time.sleep(1.5)  # let the last photo arrive
         patrol_report(name, run, how)
@@ -6610,6 +6626,505 @@ def api_routes_stop():
     run["stop"] = True
     drone_command("hover", timeout=5.0, slot=slot)
     return jsonify({"ok": True})
+
+
+# ---------- drone 3D site maps (survey grid → images → OpenDroneMap → 3D model + orthophoto) ----------
+MAPS_DIR = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "maps")
+MAP_BUSY = ("queued", "starting", "uploading", "processing", "downloading")
+MAP_ENGINE_WAIT_S = 45 * 60  # the first start downloads the engine (several GB)
+MAP_POLL_S = 10
+_map_queue = queue.Queue()
+_map_engine = {"at": 0.0, "ok": False, "error": "", "version": "", "starting": False}
+
+
+def mapping_engine_url():
+    url = str(load_local_settings().get("mapping_engine_url") or "").strip().rstrip("/")
+    return url if re.match(r"^https?://[\w.\-]+(:\d+)?$", url) else mapping.DEFAULT_ENGINE_URL
+
+
+def mapping_engine_status(fresh=False):
+    if fresh or time.time() - _map_engine["at"] > 10:
+        try:
+            info = mapping.engine_info(mapping_engine_url())
+            _map_engine.update(ok=True, error="", version=str(info.get("engineVersion") or info.get("version") or ""),
+                               queue=info.get("taskQueueCount", 0))
+        except mapping.EngineError as e:
+            _map_engine.update(ok=False, error=str(e), version="")
+        _map_engine["at"] = time.time()
+    return {"ok": _map_engine["ok"], "error": _map_engine["error"], "version": _map_engine["version"],
+            "starting": _map_engine["starting"], "url": mapping_engine_url(),
+            "local": mapping_engine_url() == mapping.DEFAULT_ENGINE_URL}
+
+
+def _compose_file():
+    here = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+    for p in (os.path.join(here, "runtime", "docker-compose.yml"), os.path.join(os.path.dirname(here), "runtime", "docker-compose.yml")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def start_mapping_engine():
+    """Start the local engine container (docker compose profile "mapping"). Returns (ok, message)."""
+    compose = _compose_file()
+    if not compose:
+        return False, "The Docker setup (runtime\\docker-compose.yml) was not found."
+    env = os.environ.copy()
+    env["AI_SECURITY_DATA"] = (os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER)).replace("\\", "/")
+    _map_engine["starting"] = True
+    try:
+        p = run_background_command(["docker", "compose", "-p", "ai-security", "-f", compose, "--profile", "mapping", "up", "-d", "nodeodm"],
+                                   capture_output=True, text=True, timeout=MAP_ENGINE_WAIT_S, env=env)
+        return p.returncode == 0, (p.stdout + p.stderr).strip()[-400:]
+    except Exception as e:
+        return False, str(e)
+    finally:
+        _map_engine.update(starting=False, at=0.0)
+
+
+def _ensure_engine(sid):
+    """Wait for the engine; start the local one if needed. Raises EngineError when it never comes up."""
+    if mapping_engine_status(fresh=True)["ok"]:
+        return
+    if mapping_engine_url() != mapping.DEFAULT_ENGINE_URL:
+        raise mapping.EngineError(f"The mapping engine at {mapping_engine_url()} is not reachable.")
+    _map_step(sid, status="starting",
+              message="Starting the mapping engine. The first time, Docker downloads it (several GB): this can take a while.")
+    result = {}
+    t = threading.Thread(target=lambda: result.update(r=start_mapping_engine()), daemon=True)
+    t.start()
+    end = time.time() + MAP_ENGINE_WAIT_S
+    while time.time() < end:
+        time.sleep(MAP_POLL_S)
+        _map_step(sid)  # stops here if cancelled
+        if mapping_engine_status(fresh=True)["ok"]:
+            return
+        if not t.is_alive() and not result.get("r", (True,))[0]:
+            raise mapping.EngineError("Could not start the mapping engine: " + (result["r"][1] or "Docker failed."))
+    raise mapping.EngineError("The mapping engine did not start in time. Check that Docker Desktop is running.")
+
+
+class _MapFrames:
+    """The drone's live video, decoded in the background; jpeg() gives the newest frame at full stream quality."""
+
+    def __init__(self, slot):
+        self.url, self.frame, self.at, self.stop = f"rtsp://127.0.0.1:8556/{slot}", None, 0.0, False
+        self.slot = slot
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        cap = None
+        while not self.stop:
+            try:
+                if cap is None:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = DRONE_FFMPEG_CAPTURE_OPTIONS
+                    cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                ok, frame = cap.read()
+                if ok:
+                    self.frame, self.at = frame, time.time()
+                    continue
+            except Exception as e:
+                print("Map capture video error:", e)
+            if cap is not None:
+                cap.release()
+                cap = None
+            time.sleep(1.0)
+        if cap is not None:
+            cap.release()
+
+    def jpeg(self):
+        frame = self.frame
+        if frame is not None and time.time() - self.at < 1.0:
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if ok:
+                return buf.tobytes()
+        try:  # fallback: Frigate's latest drone frame (no boxes drawn on it)
+            r = requests.get(f"{FRIGATE_API_URL}/api/{self.slot}/latest.jpg", params={"quality": 95}, timeout=2)
+            if r.ok and r.content[:2] == b"\xff\xd8":
+                return r.content
+        except Exception:
+            pass
+        return None
+
+    def close(self):
+        self.stop = True
+
+
+def _map_frame_source(slot):
+    return _MapFrames(slot)
+
+
+def _survey_capture_worker(run):
+    """During a mapping flight: one image every `every_m` metres along the grid, tagged with the drone's position."""
+    sid = run["route"]["survey"]
+    try:
+        s = mapping.load(MAPS_DIR, sid)
+    except KeyError:
+        return
+    every, alt, photos = s["plan"]["every_m"], s["settings"]["alt"], s["settings"].get("photos")
+    run["frames"], source, slot, last = s.get("frames", 0), None, None, None
+    try:
+        while run["active"] and not run["stop"]:
+            time.sleep(0.2)
+            if run["drone"] != slot:  # first start, or the backup drone took over
+                if source:
+                    source.close()
+                slot, last = run["drone"], None
+                source = _map_frame_source(slot)
+            if run.get("index", 0) < 2 or run.get("phase") != "flying":
+                continue  # still on the way to the first grid line
+            link = get_link(slot)
+            tel = link["telemetry"]
+            if time.time() - link["tel_at"] > 2 or not tel.get("lat") or float(tel.get("altitude") or 0) < alt - 4:
+                continue
+            if tel.get("gimbal_pitch") is not None and float(tel["gimbal_pitch"]) > -75:
+                continue  # camera not pointing down (yet)
+            pos = (float(tel["lat"]), float(tel["lon"]))
+            if last and _distance_m(last[0], last[1], pos[0], pos[1]) < every:
+                continue
+            jpeg = source.jpeg()
+            if not jpeg:
+                continue
+            run["frames"] = mapping.add_frame(MAPS_DIR, sid, jpeg, pos[0], pos[1], float(tel.get("altitude") or alt))
+            last = pos
+            if photos:  # full-resolution photo on the drone's SD card too, to import after landing
+                threading.Thread(target=drone_command, args=("photo",), kwargs={"timeout": 5.0, "slot": slot}, daemon=True).start()
+    finally:
+        if source:
+            source.close()
+
+
+def _survey_flight_ended(run, how):
+    sid = run["route"]["survey"]
+    s = mapping.load(MAPS_DIR, sid)
+    frames = s.get("frames", 0)
+    flights = (s.get("flights") or []) + [{"at": time.time(), "drone": run["drone"], "frames": run.get("frames", frames),
+                                            "ended": re.sub(r"^\W+", "", how)[:200]}]
+    images = frames + s.get("photos", 0)
+    if images >= 5:
+        msg = f"{images} images ready. Process them into a 3D map, or fly again to add more."
+    elif is_virtual(run["drone"]):
+        msg = "Virtual drones have no camera: the flight was a rehearsal and captured no images."
+    else:
+        msg = f"Only {images} images were captured. Check the drone's video reached this PC, then fly again or import photos."
+    mapping.update(MAPS_DIR, sid, status="captured" if images >= 5 else "planned", message=msg, flights=flights[-20:])
+
+
+class _MapCanceled(Exception):
+    pass
+
+
+def _map_step(sid, **fields):
+    """Save progress, unless the map was cancelled (or deleted) meanwhile: then stop the job."""
+    with mapping._lock:
+        if mapping.load(MAPS_DIR, sid).get("status") == "canceled":
+            raise _MapCanceled()
+        return mapping.update(MAPS_DIR, sid, **fields)
+
+
+def _process_map(sid):
+    s = mapping.load(MAPS_DIR, sid)
+    if s.get("status") not in MAP_BUSY:
+        return  # cancelled while it waited in the queue
+    base = mapping_engine_url()
+    task = s.get("task")
+    try:
+        _ensure_engine(sid)
+        if not (task and s.get("status") in ("processing", "downloading")):
+            if task:
+                mapping.remove_task(base, task)  # an upload cut short by a restart
+                task = None
+            files, geo = mapping.image_files(MAPS_DIR, sid)
+            _map_step(sid, status="uploading", progress=0, task=None, message=f"Sending {len(files)} images to the mapping engine…")
+            task = mapping.submit(base, s["name"], files, geo, s["settings"].get("quality", "balanced"),
+                                  progress=lambda a, b: _map_step(sid, message=f"Sending images to the mapping engine: {a} of {b}"))
+            _map_step(sid, status="processing", task=task, progress=0, message="Processing started.")
+        while True:
+            info = mapping.task_info(base, task)
+            if info["state"] == "completed":
+                break
+            if info["state"] in ("failed", "canceled"):
+                _map_step(sid)  # cancelled from here: stop quietly
+                raise mapping.EngineError(info["error"] or f"Processing {info['state']}.")
+            mins = info["seconds"] // 60
+            _map_step(sid, progress=round(info["progress"], 1),
+                      message=f"Building the 3D map: {int(info['progress'])}% ({mins} min so far)" if info["state"] == "running"
+                      else "Waiting for the mapping engine (another map is being processed).")
+            time.sleep(MAP_POLL_S)
+        _map_step(sid, status="downloading", progress=100, message="Downloading the results…")
+        folder = mapping.survey_dir(MAPS_DIR, sid)
+        archive = os.path.join(folder, "results.zip")
+        mapping.download(base, task, archive)
+        found = mapping.extract_results(archive, os.path.join(folder, "result"))
+        os.remove(archive)
+        if not found["model"] and not found["tiles"]:
+            raise mapping.EngineError("The engine finished but made no 3D model or map. Try more images with more overlap.")
+        mapping.remove_task(base, task)
+        s = mapping.update(MAPS_DIR, sid, status="ready", result=found, task=None, processed_at=time.time(),
+                           message="3D map ready." + ("" if found["model"] else " (No 3D model: map view only.)"))
+        if telegram_ready():
+            send_telegram(f"🗺 3D map “{s['name']}” is ready. Open 3D Maps on the dashboard to see it.")
+    except _MapCanceled:
+        if task:
+            mapping.cancel(base, task)
+            mapping.remove_task(base, task)
+        mapping.update(MAPS_DIR, sid, task=None)
+    except (mapping.EngineError, OSError, ValueError, mapping.zipfile.BadZipFile) as e:
+        try:
+            _map_step(sid, status="failed", message=f"Processing failed: {e}")
+        except _MapCanceled:
+            pass
+    except KeyError:
+        pass  # the map was deleted meanwhile
+
+
+def _map_worker():
+    while True:
+        sid = _map_queue.get()
+        try:
+            _process_map(sid)
+        except Exception as e:
+            print("3D map processing error:", e)
+
+
+def start_mapping():
+    """Background processing, and maps that were processing when the PC was restarted carry on."""
+    threading.Thread(target=_map_worker, daemon=True).start()
+    for s in mapping.list_all(MAPS_DIR):
+        if s.get("status") in MAP_BUSY:
+            _map_queue.put(s["id"])
+        elif s.get("status") == "flying":
+            mapping.update(MAPS_DIR, s["id"], status="captured" if s.get("frames", 0) + s.get("photos", 0) >= 5 else "planned",
+                           message="The flight was interrupted by a restart. Fly again to add more images.")
+
+
+def _survey_run(sid):
+    return next((r for r in list(route_runs.values()) if r["active"] and r["route"].get("survey") == sid), None)
+
+
+def _map_public(s):
+    run = _survey_run(s["id"])
+    out = {k: s.get(k) for k in ("id", "name", "created_at", "area", "settings", "status", "message", "frames", "photos",
+                                  "progress", "result", "flights", "processed_at")}
+    out["plan"] = {k: v for k, v in s["plan"].items() if k != "points"}
+    out["points"] = s["plan"]["points"]
+    out["bounds"] = mapping.bounds(s["area"])
+    if run:
+        out.update(status="flying", message=run.get("message", ""), frames=run.get("frames", s.get("frames", 0)), drone=run["drone"])
+    return out
+
+
+def _map_or_404(sid):
+    try:
+        return mapping.load(MAPS_DIR, sid), None
+    except KeyError:
+        return None, (jsonify({"ok": False, "error": "No such map."}), 404)
+
+
+def _map_settings(data):
+    return {k: data[k] for k in ("alt", "overlap", "sidelap", "speed", "photos") if k in data}
+
+
+@app.route("/api/maps", methods=["GET", "POST"])
+def api_maps():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        try:
+            alt = float(data.get("alt") or 40)
+            if not 15 <= alt <= DRONE_LIMITS["max_altitude_m"]:
+                raise ValueError(f"Fly between 15 and {DRONE_LIMITS['max_altitude_m']} m.")
+            s = mapping.create(MAPS_DIR, data.get("name"), data.get("area"), quality=data.get("quality") or "balanced",
+                               **{**_map_settings(data), "alt": alt})
+        except (TypeError, ValueError, KeyError) as e:
+            return jsonify({"ok": False, "error": str(e) or "Invalid map settings."}), 400
+        return jsonify({"ok": True, "map": _map_public(s)})
+    return jsonify({"ok": True, "maps": [_map_public(s) for s in mapping.list_all(MAPS_DIR)],
+                    "engine": mapping_engine_status(), "allowed": drone_control_allowed(),
+                    "drones": [{"slot": d, "label": drone_label(d), "virtual": is_virtual(d)} for d in drone_slots()]})
+
+
+@app.route("/api/maps/plan", methods=["POST"])
+def api_maps_plan():
+    """Preview the grid for an area before saving it."""
+    data = request.get_json(silent=True) or {}
+    try:
+        plan = mapping.plan_grid(data.get("area"), **{**{"alt": 40}, **_map_settings(data)})
+    except (TypeError, ValueError, KeyError) as e:
+        return jsonify({"ok": False, "error": str(e) or "Invalid area."}), 400
+    problem = nofly.route_problem(nofly_zones(), plan["points"], False)
+    return jsonify({"ok": True, "plan": plan, "warning": problem or (
+        f"About {plan['minutes']} minutes of flying: more than one battery. The flight swaps to the backup drone, "
+        "or fly the rest after a battery swap." if plan["minutes"] > 18 else "")})
+
+
+@app.route("/api/maps/<sid>", methods=["GET", "DELETE"])
+def api_map(sid):
+    s, err = _map_or_404(sid)
+    if err:
+        return err
+    if request.method == "DELETE":
+        if _survey_run(sid):
+            return jsonify({"ok": False, "error": "The drone is flying this map. Stop the flight first."}), 409
+        if s.get("task"):
+            mapping.cancel(mapping_engine_url(), s["task"])
+            mapping.remove_task(mapping_engine_url(), s["task"])
+        mapping.delete(MAPS_DIR, sid)
+        return jsonify({"ok": True})
+    return jsonify({"ok": True, "map": _map_public(s)})
+
+
+@app.route("/api/maps/<sid>/fly", methods=["POST"])
+def api_map_fly(sid):
+    s, err = _map_or_404(sid)
+    if err:
+        return err
+    if s.get("status") in MAP_BUSY:
+        return jsonify({"ok": False, "error": "This map is being processed."}), 409
+    data = request.get_json(silent=True) or {}
+    drone = data.get("drone") if data.get("drone") in drone_slots() else None
+    backup = data.get("backup") if data.get("backup") in drone_slots() and data.get("backup") != drone else None
+    route = {"survey": sid, "points": s["plan"]["points"], "alt": s["settings"]["alt"], "speed": s["settings"]["speed"],
+             "pause": 0, "end": "home", "lost_link": "home", "relay": bool(backup), "swap_at": 25}
+    r = fly_route(f"Map: {s['name']}", route, by="3D Maps", drone=drone, backup=backup)
+    if r["ok"]:
+        mapping.update(MAPS_DIR, sid, status="flying", message="Flying the mapping grid…")
+    return jsonify(r), (200 if r["ok"] else 409)
+
+
+@app.route("/api/maps/<sid>/stop", methods=["POST"])
+def api_map_stop(sid):
+    run = _survey_run(sid)
+    if run is None:
+        return jsonify({"ok": False, "error": "This map is not being flown."}), 409
+    run["stop"] = True
+    drone_command("hover", timeout=5.0, slot=run["drone"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/maps/<sid>/photos", methods=["POST"])
+def api_map_photos(sid):
+    """Photos copied from the drone's SD card (full resolution, GPS in each photo)."""
+    s, err = _map_or_404(sid)
+    if err:
+        return err
+    if s.get("status") in MAP_BUSY:
+        return jsonify({"ok": False, "error": "This map is being processed."}), 409
+    added, problems = 0, []
+    for f in request.files.getlist("photos"):
+        try:
+            mapping.add_photo(MAPS_DIR, sid, f.filename, f.read())
+            added += 1
+        except ValueError as e:
+            problems.append(str(e))
+    s = mapping.load(MAPS_DIR, sid)
+    if added and s["status"] in ("planned", "failed", "canceled", "ready", "captured"):
+        images = s.get("frames", 0) + s.get("photos", 0)
+        mapping.update(MAPS_DIR, sid, status="captured" if images >= 5 else "planned",
+                       message=f"{images} images ready. Process them into a 3D map." if images >= 5 else f"{images} images so far (5 needed).")
+    return jsonify({"ok": added > 0 or not problems, "added": added, "photos": s.get("photos", 0), "errors": problems[:5]})
+
+
+@app.route("/api/maps/<sid>/process", methods=["POST"])
+def api_map_process(sid):
+    s, err = _map_or_404(sid)
+    if err:
+        return err
+    if s.get("status") in MAP_BUSY or _survey_run(sid):
+        return jsonify({"ok": False, "error": "This map is already flying or processing."}), 409
+    files, _ = mapping.image_files(MAPS_DIR, sid)
+    if len(files) < 5:
+        return jsonify({"ok": False, "error": f"A 3D map needs at least 5 images; this one has {len(files)}."}), 409
+    mapping.update(MAPS_DIR, sid, status="queued", progress=0, task=None, message="Waiting to be processed…")
+    _map_queue.put(sid)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/maps/<sid>/cancel", methods=["POST"])
+def api_map_cancel(sid):
+    s, err = _map_or_404(sid)
+    if err:
+        return err
+    if s.get("status") not in MAP_BUSY:
+        return jsonify({"ok": False, "error": "This map is not being processed."}), 409
+    mapping.update(MAPS_DIR, sid, status="canceled", message="Processing cancelled.")
+    if s.get("task"):
+        mapping.cancel(mapping_engine_url(), s["task"])
+    return jsonify({"ok": True})
+
+
+@app.route("/api/maps/engine", methods=["GET", "POST"])
+def api_map_engine():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if "url" in data:
+            url = str(data.get("url") or "").strip().rstrip("/")
+            if url and not re.match(r"^https?://[\w.\-]+(:\d+)?$", url):
+                return jsonify({"ok": False, "error": "Enter the engine address like http://192.168.1.20:3000"}), 400
+            save_local_settings({"mapping_engine_url": url})
+        if data.get("start"):
+            if mapping_engine_url() != mapping.DEFAULT_ENGINE_URL:
+                return jsonify({"ok": False, "error": "The engine is on another computer: start it there."}), 409
+            if not _map_engine["starting"]:
+                threading.Thread(target=start_mapping_engine, daemon=True).start()
+    return jsonify({"ok": True, "engine": mapping_engine_status(fresh=True)})
+
+
+def _map_result_dir(sid, *sub):
+    return os.path.join(mapping.survey_dir(MAPS_DIR, sid), "result", *sub)
+
+
+@app.route("/maps/<sid>/model/<path:filename>")
+def map_model_file(sid, filename):
+    try:
+        return send_from_directory(_map_result_dir(sid, "model"), filename, max_age=3600)
+    except KeyError:
+        return Response(status=404)
+
+
+@app.route("/maps/<sid>/tiles/<int:z>/<int:x>/<int:y>.png")
+def map_ortho_tile(sid, z, x, y):
+    # gdal2tiles numbers rows from the south (TMS); the page's Leaflet layer is set to match.
+    try:
+        folder = _map_result_dir(sid, "tiles", str(z), str(x))
+    except KeyError:
+        return Response(status=404)
+    if not os.path.exists(os.path.join(folder, f"{y}.png")):
+        return Response(status=404)
+    return send_from_directory(folder, f"{y}.png", mimetype="image/png", max_age=86400)
+
+
+@app.route("/maps/<sid>/report.pdf")
+def map_report(sid):
+    try:
+        return send_from_directory(_map_result_dir(sid), "report.pdf", mimetype="application/pdf")
+    except KeyError:
+        return Response(status=404)
+
+
+@app.route("/vendor/three/<path:filename>")
+def vendor_three(filename):
+    mime = "text/javascript" if filename.endswith(".js") else None
+    return send_from_directory(os.path.join(VENDOR_DIR, "three"), filename, mimetype=mime, max_age=7 * 86400)
+
+
+@app.route("/maps")
+def maps_page():
+    return Response(MAPS_PAGE, mimetype="text/html")
+
+
+@app.route("/maps/<sid>/3d")
+def map_viewer_page(sid):
+    s, err = _map_or_404(sid)
+    if err or not (s.get("result") or {}).get("model"):
+        return Response(hud_page("3D map", '<main class="hud-main"><h1 class="page-title">No 3D model yet</h1>'
+                                           '<a class="hud-btn" href="/maps">Back to 3D Maps</a></main>', active="maps"),
+                        status=404, mimetype="text/html")
+    page = MAP_VIEWER_PAGE.replace("__MAP_ID__", sid).replace("__MODEL__", urllib.parse.quote(s["result"]["model"]))
+    return Response(page.replace("__MAP_NAME__", html_escape(s["name"])), mimetype="text/html")
+
+
+MAPS_PAGE = hud_page("3D Maps", pages.maps.BODY, active="maps")
+MAP_VIEWER_PAGE = hud_page("3D map", pages.maps.VIEWER, active="maps", head=pages.maps.VIEWER_HEAD)
 
 
 # ---------- scheduled patrols (a saved route on chosen days at a set time) ----------

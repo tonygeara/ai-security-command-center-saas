@@ -340,7 +340,7 @@ class App(tk.Tk):
                 except Exception: pass
                 try: os.remove(PID_FILE)
                 except OSError: pass
-            try: compose('stop', timeout=120)
+            try: compose('--profile', 'mapping', 'stop', timeout=120)  # also the 3D mapping engine, if it was started
             except Exception: pass
             for k in self.status_vars: self.emit('status',k,'Stopped')
             self.emit('msg','System stopped'); self.emit('log','System stopped.')
