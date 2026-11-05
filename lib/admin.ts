@@ -3,7 +3,7 @@
 import type {SupabaseClient} from "@supabase/supabase-js";
 
 // Bump when a new Windows release ships, so PCs on older versions are flagged.
-export const LATEST_APP_VERSION = "11.1.0";
+export const LATEST_APP_VERSION = "11.2.0";
 const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
 
 export type Row = Record<string, any>;
