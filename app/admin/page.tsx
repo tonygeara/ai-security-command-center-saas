@@ -1,6 +1,6 @@
 import Link from "next/link";
 import {createClient} from "../../lib/supabase/server";
-import {buildClients, isOnline, loadAdminData, needsAttention} from "../../lib/admin";
+import {buildClients, INSTALLERS, isOnline, LATEST_APP_VERSION, loadAdminData, needsAttention, RELEASE_URL} from "../../lib/admin";
 
 const ICON: Record<string, string> = {expiry: "⏳", payment: "$", trial: "★", offline: "⚠", version: "⬆", suspended: "⏸"};
 
@@ -23,6 +23,11 @@ export default async function Overview(){
     <div className="card attention">{alerts.length ? alerts.map((a, i) => <Link key={i} href={a.href} className={"alertRow " + a.level}>
       <i>{ICON[a.kind] ?? "•"}</i><div><b>{a.title}</b><div className="muted">{a.detail}</div></div><span className="alertLevel">{a.level === "high" ? "urgent" : a.level === "medium" ? "soon" : "info"}</span></Link>)
       : <p className="ok">✓ All clear: no expiring licences, overdue payments or offline PCs.</p>}</div>
+    <h2>Installers · V{LATEST_APP_VERSION}</h2>
+    <div className="card tableWrap"><table className="adminTable"><tbody>{INSTALLERS.map(i => <tr key={i.file}>
+      <td><b>{i.edition}</b><div className="muted">{i.note}</div></td>
+      <td style={{whiteSpace: "nowrap"}}><a className="btn small" href={i.url}>Download</a></td></tr>)}
+      <tr><td className="muted" colSpan={2}>Built and published by the “Edge installer” workflow on GitHub (sign in to GitHub to download). <a href={RELEASE_URL} target="_blank">Release notes ↗</a></td></tr></tbody></table></div>
     <h2>Recent activity</h2>
     <div className="card tableWrap"><table className="adminTable"><tbody>{(activity ?? []).map((e: any, i: number) => <tr key={i}>
       <td className="muted" style={{whiteSpace: "nowrap"}}>{new Date(e.created_at).toLocaleString()}</td>
