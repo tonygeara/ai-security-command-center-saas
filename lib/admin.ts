@@ -4,6 +4,13 @@ import type {SupabaseClient} from "@supabase/supabase-js";
 
 // Bump when a new Windows release ships, so PCs on older versions are flagged.
 export const LATEST_APP_VERSION = "11.2.0";
+// Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>
+// (private repository: open the links signed in to GitHub).
+export const RELEASE_URL = `https://github.com/tonygeara/ai-security-command-center-saas/releases/tag/edge-v${LATEST_APP_VERSION}`;
+export const INSTALLERS = [
+  {edition: "Online (cloud)", file: `AI-Security-Command-Center-Setup-${LATEST_APP_VERSION}.exe`, note: "Paired with this portal: features, limits and drone control are set per client here."},
+  {edition: "On-prem", file: `AI-Command-Centre-Lebanon-Setup-${LATEST_APP_VERSION}.exe`, note: "Works offline with a licence file from Licences. For a USB install without internet, add the AI-services file made with build_onprem.ps1."},
+].map(i => ({...i, url: `https://github.com/tonygeara/ai-security-command-center-saas/releases/download/edge-v${LATEST_APP_VERSION}/${i.file}`}));
 const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
 
 export type Row = Record<string, any>;

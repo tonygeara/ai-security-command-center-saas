@@ -55,6 +55,8 @@ Weather, crewed-aircraft (ADS-B), airspace and radio-coverage checks: [docs/FLIG
 
 ## Installer from GitHub
 
-GitHub → Actions → **Edge installer** → **Run workflow** builds the installer on a Windows machine, runs the tests
-and publishes it as a release (`edge-v<version>`) under **Releases**. Pushing a tag such as `edge-v11.2.0` does the
+GitHub → Actions → **Edge installer** → **Run workflow** builds both installers on Windows machines (the
+standard cloud edition and the on-prem "AI Command Centre Lebanon" edition), runs the tests and publishes them as
+one release (`edge-v<version>`) under **Releases**; the admin portal's Overview links to them. The on-prem USB
+package's offline AI-services file is not built there (run `build_onprem.ps1` on a PC with Docker for that). Pushing a tag such as `edge-v11.2.0` does the
 same. Bump `APP_VERSION` in `app/launcher.pyw` and `app/dashboard.py` first; they must match.

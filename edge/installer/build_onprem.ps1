@@ -23,7 +23,8 @@ Write-Host "Building $Name $version (on-prem)" -ForegroundColor Cyan
 
 # Python 3.12 environment (Nuitka's bundled compiler supports 3.12).
 if (-not (Test-Path (Join-Path $Venv 'Scripts\python.exe'))) {
-    $py312 = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
+    # PYTHON312 can point to another Python 3.12 (the GitHub build sets it).
+    $py312 = if ($env:PYTHON312) { $env:PYTHON312 } else { Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe' }
     if (-not (Test-Path $py312)) { throw 'Python 3.12 is required: winget install -e --id Python.Python.3.12' }
     & $py312 -m venv $Venv
 }

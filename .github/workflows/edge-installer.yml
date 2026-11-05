@@ -1,15 +1,24 @@
-# Builds the Windows edge installer (AI-Security-Command-Center-Setup-<version>.exe) on GitHub's Windows machines,
-# runs the edge tests on it, and publishes it as a GitHub release you can download.
+# Builds the Windows edge installers on GitHub's Windows machines and publishes them as one GitHub release:
+#   AI-Security-Command-Center-Setup-<version>.exe   standard (cloud / SaaS) edition, paired with the portal
+#   AI-Command-Centre-Lebanon-Setup-<version>.exe     on-prem edition, offline licence file, compiled code
+# The edge tests run first; nothing is published if they fail.
 #
 # Run it: GitHub → Actions → "Edge installer" → Run workflow (or push a tag such as edge-v11.2.0).
 # The version comes from APP_VERSION in edge/app/launcher.pyw; release notes from releases/V<major>.<minor>.md.
+# The on-prem USB package's offline AI-services file (ai-command-centre-images.tar, several GB) is not built here:
+# make it on a PC with Docker Desktop with edge\installer\build_onprem.ps1.
 name: Edge installer
 
 on:
   workflow_dispatch:
     inputs:
+      editions:
+        description: "Which installers to build"
+        type: choice
+        options: [both, standard, onprem]
+        default: both
       publish:
-        description: "Publish as a GitHub release (otherwise only a downloadable build artifact)"
+        description: "Publish as a GitHub release (otherwise only downloadable build artifacts)"
         type: boolean
         default: true
   push:
@@ -22,40 +31,44 @@ concurrency:
   group: edge-installer-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: pwsh
+
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: pwsh
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      number: ${{ steps.v.outputs.number }}
+      notes: ${{ steps.v.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
+      - id: v
+        run: |
+          $v = (Select-String -Path edge/app/launcher.pyw -Pattern "^APP_VERSION = '(.+)'").Matches[0].Groups[1].Value
+          $d = (Select-String -Path edge/app/dashboard.py -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
+          if (-not $v -or $v -ne $d) { throw "APP_VERSION differs: launcher.pyw '$v', dashboard.py '$d'" }
+          $n = $v.TrimStart('V')
+          "number=$n" >> $env:GITHUB_OUTPUT
+          "notes=releases/V$(($n -split '\.')[0..1] -join '.').md" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v"
 
+  standard:
+    needs: version
+    if: github.event_name == 'push' || inputs.editions != 'onprem'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
       - name: Inno Setup
         run: |
           $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ }
           if (-not $iscc) { choco install innosetup -y --no-progress; if ($LASTEXITCODE) { throw 'Inno Setup install failed' } }
-
-      - name: Version
-        id: version
-        run: |
-          $v = (Select-String -Path edge\app\launcher.pyw -Pattern "^APP_VERSION = '(.+)'").Matches[0].Groups[1].Value
-          $d = (Select-String -Path edge\app\dashboard.py -Pattern '^APP_VERSION = "(.+)"').Matches[0].Groups[1].Value
-          if (-not $v -or $v -ne $d) { throw "APP_VERSION differs: launcher.pyw '$v', dashboard.py '$d'" }
-          $n = $v.TrimStart('V')
-          $notes = "releases\V$(($n -split '\.')[0..1] -join '.').md"
-          "number=$n" >> $env:GITHUB_OUTPUT
-          "notes=$notes" >> $env:GITHUB_OUTPUT
-          Write-Host "Building $v (notes: $notes)"
-
       - name: Build installer
         run: powershell -ExecutionPolicy Bypass -File edge\installer\build.ps1
-
       - name: Tests
         working-directory: edge
         env:
@@ -63,31 +76,71 @@ jobs:
         run: |
           .venv-build\Scripts\python.exe -m pip install --quiet "pytest>=8,<9"
           .venv-build\Scripts\python.exe -m pytest tests
-
       - uses: actions/upload-artifact@v4
         with:
-          name: AI-Security-Command-Center-Setup-${{ steps.version.outputs.number }}
-          path: edge/installer/output/*.exe
+          name: standard-${{ needs.version.outputs.number }}
+          path: edge/installer/output/AI-Security-Command-Center-Setup-*.exe
           if-no-files-found: error
 
+  onprem:
+    needs: version
+    if: github.event_name == 'push' || inputs.editions != 'standard'
+    runs-on: windows-latest
+    timeout-minutes: 120  # compiling the app to native code takes a while
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        id: py312
+        with:
+          python-version: "3.12"  # Nuitka's bundled compiler supports 3.12
+      - name: Inno Setup
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ }
+          if (-not $iscc) { choco install innosetup -y --no-progress; if ($LASTEXITCODE) { throw 'Inno Setup install failed' } }
+      - name: Build on-prem installer
+        env:
+          PYTHON312: ${{ steps.py312.outputs.python-path }}
+        run: powershell -ExecutionPolicy Bypass -File edge\installer\build_onprem.ps1 -SkipImages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onprem-${{ needs.version.outputs.number }}
+          path: edge/installer/output/onprem-usb/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, standard, onprem]
+    # Publish what was built, as long as nothing that was asked for failed.
+    if: >-
+      always() && needs.version.result == 'success' &&
+      (github.event_name == 'push' || inputs.publish) &&
+      !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
       - name: Publish release
-        if: github.event_name == 'push' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "edge-v${{ steps.version.outputs.number }}"
-          $exe = Get-ChildItem edge\installer\output\*.exe | Select-Object -First 1
-          $notes = "${{ steps.version.outputs.notes }}"
+          $n = "${{ needs.version.outputs.number }}"
+          $tag = "edge-v$n"
+          $files = @(Get-ChildItem dist -Recurse -Filter *.exe | ForEach-Object FullName)
+          $files += @(Get-ChildItem dist -Recurse -Filter INSTALL.txt | ForEach-Object {
+            $to = Join-Path $_.DirectoryName 'On-prem-INSTALL.txt'; Copy-Item $_.FullName $to; $to })
+          if (-not $files) { throw 'No installers were built.' }
           $ErrorActionPreference = 'Continue'
           gh release view $tag *> $null
           $exists = $LASTEXITCODE -eq 0
           $ErrorActionPreference = 'Stop'
           if ($exists) {
-            gh release upload $tag $exe.FullName --clobber
+            gh release upload $tag @files --clobber
           } else {
-            $ghArgs = @($tag, $exe.FullName, '--title', "Edge Agent V${{ steps.version.outputs.number }}", '--target', "${{ github.sha }}")
-            if (Test-Path $notes) { $ghArgs += @('--notes-file', $notes) } else { $ghArgs += @('--notes', 'Windows edge installer.') }
+            $notes = "${{ needs.version.outputs.notes }}"
+            $ghArgs = @($tag) + $files + @('--title', "Edge Agent V$n", '--target', "${{ github.sha }}")
+            if (Test-Path $notes) { $ghArgs += @('--notes-file', $notes) } else { $ghArgs += @('--notes', 'Windows edge installers.') }
             gh release create @ghArgs
           }
           if ($LASTEXITCODE) { throw 'Publishing the release failed' }
-          Write-Host "Published: https://github.com/${{ github.repository }}/releases/tag/$tag"
+          Write-Host "Published $($files.Count) file(s): https://github.com/${{ github.repository }}/releases/tag/$tag"
