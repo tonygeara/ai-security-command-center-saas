@@ -52,3 +52,9 @@ The 3D mapping engine (`nodeodm`, OpenDroneMap) is in the same file under the `m
 also stops it. See [docs/DRONE-3D-MAPS.md](../docs/DRONE-3D-MAPS.md).
 
 Weather, crewed-aircraft (ADS-B), airspace and radio-coverage checks: [docs/FLIGHT-SAFETY.md](../docs/FLIGHT-SAFETY.md).
+
+## Installer from GitHub
+
+GitHub → Actions → **Edge installer** → **Run workflow** builds the installer on a Windows machine, runs the tests
+and publishes it as a release (`edge-v<version>`) under **Releases**. Pushing a tag such as `edge-v11.2.0` does the
+same. Bump `APP_VERSION` in `app/launcher.pyw` and `app/dashboard.py` first; they must match.
