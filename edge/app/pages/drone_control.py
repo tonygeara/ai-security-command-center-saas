@@ -33,6 +33,15 @@ BODY = r"""
 .dc-fleet button:disabled{opacity:.5;cursor:not-allowed}
 .vcam-x{position:absolute;left:50%;top:50%;width:46px;height:46px;margin:-23px 0 0 -23px;border:2px solid rgba(91,217,255,.85);border-radius:50%;z-index:500;pointer-events:none}
 .vcam-tag{position:absolute;right:10px;top:10px;z-index:500;background:rgba(3,16,26,.85);border:1px solid #7a5a12;color:#ffcf7a;padding:4px 8px;border-radius:3px;font:bold 10px Arial;letter-spacing:1px}
+#l4d{display:none;position:relative;height:460px;border:1px solid #155879;border-radius:5px;background:#020a10;overflow:hidden}
+#l4dBar{display:none;gap:6px;flex-wrap:wrap;margin-top:8px}
+.l4d-switch{display:flex;align-items:center;gap:7px;margin:0;color:#5bd9ff;font:bold 10px Arial;letter-spacing:1.5px;cursor:pointer}
+.l4d-chip{display:inline-flex;align-items:center;gap:8px;border:1px solid #155879;border-radius:14px;background:#05131d;padding:3px 4px 3px 8px;font-size:12px;color:#cfeeff}
+.l4d-chip label{display:flex;align-items:center;gap:6px;margin:0;text-transform:none;letter-spacing:0;font-size:12px;cursor:pointer}
+.l4d-chip label input.toggle{width:34px;height:18px}.l4d-chip label input.toggle::after{width:12px;height:12px}
+.l4d-chip i{width:9px;height:9px;border-radius:50%;display:inline-block}
+.l4d-chip button,.l4d-reset{border:1px solid #155879;background:#020a10;color:#9edfff;border-radius:10px;padding:3px 9px;font:bold 10px Arial;cursor:pointer}
+.l4d-chip button.on{background:#25c7ff;color:#02131d;border-color:#45d0ff}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -53,8 +62,9 @@ BODY = r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">✈ Live view</div><div class="live" id="flyState">ON GROUND</div></div>
 <div class="dc-video"><div class="live-slot" data-live-camera="drone"></div>
 <div class="dc-hud"><span>ALT <b id="hAlt">–</b> m</span><span>DIST <b id="hDist">–</b> m</span><span>SPD <b id="hSpd">–</b> m/s</span><span>BAT <b id="hBat">–</b>%</span><span>GPS <b id="hGps">–</b></span><span>SIGNAL <b id="hSig">–</b></span></div></div></section>
-<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="live" id="mapState"></div></div>
-<div class="panel-body"><div id="dcMap"></div><div class="muted" id="coords" style="margin-top:8px"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="actions" style="align-items:center;gap:10px"><div class="live" id="mapState"></div>
+<label class="l4d-switch" title="Watch every drone fly in 3D, live"><input type="checkbox" class="toggle" id="l4dOn" onchange="toggle4d(this.checked)"> 4D LIVE</label></div></div>
+<div class="panel-body"><div id="dcMap"></div><div id="l4d"></div><div id="l4dBar"></div><div class="muted" id="coords" style="margin-top:8px"></div></div></section>
 </div>
 <div>
 <section class="panel"><div class="panel-head"><div class="panel-title">◉ Flight</div><div class="live" id="modeState"></div></div>
@@ -336,6 +346,16 @@ async function checkSignal(){if(!route.length){rtmsg('Add stops first.',false);r
   if(map)d.results.forEach(r=>sigMarks.push(L.circleMarker([r.lat,r.lon],{radius:9,color:col[r.quality],weight:3,fill:false})
     .bindTooltip(`Signal ${r.quality} (${r.margin_db>0?'+':''}${r.margin_db} dB)`).addTo(map)));
   rtmsg(d.summary,d.worst.quality==='good')}
+// 4D live: the map's switch swaps the flat map for the live 3D view (drones, trails, routes, zones, aircraft).
+let l4d=null;
+function storeGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
+function storeSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+async function toggle4d(on){$('l4dOn').checked=on;storeSet('l4d-on',on?'1':'0');
+  $('dcMap').style.display=on?'none':'';$('l4d').style.display=on?'block':'none';$('l4dBar').style.display=on?'flex':'none';
+  if(!on){if(l4d)l4d.stop();if(map)setTimeout(()=>map.invalidateSize(),50);return}
+  try{l4d=l4d||await import('/live4d.js');l4d.start($('l4d'),$('l4dBar'),DRONE)}
+  catch(e){$('l4d').innerHTML='<p class="muted" style="padding:14px">The 3D view could not start in this browser: '+esc(e.message||e)+'</p>'}}
+if(storeGet('l4d-on')==='1')setTimeout(()=>toggle4d(true),300);
 let acMarks=[];
 async function loadSafety(){try{const d=await fetch('/api/safety',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
   const c=d.conditions,b=$('fsBanner');b.style.display=c.problem||c.warnings.length?'':'none';

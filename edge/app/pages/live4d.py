@@ -1,0 +1,267 @@
+"""4D live: the drones flying in 3D over the site, in real time (served as /live4d.js, an ES module).
+
+Shown on the Drone page when its map's "4D LIVE" switch is on. Each drone has its own switch (show / hide)
+and a Follow button. Coordinates: metres east (x), up (y) and south (z) of the site centre.
+"""
+IMPORTMAP = '<script type="importmap">{"imports":{"three":"/vendor/three/three.module.min.js","three/addons/":"/vendor/three/"}}</script>'
+
+JS = r"""
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/OrbitControls.js';
+import {MTLLoader} from 'three/addons/MTLLoader.js';
+import {OBJLoader} from 'three/addons/OBJLoader.js';
+
+const COLORS = [0x25c7ff, 0xffd23f, 0x26ee89, 0xff7bd5, 0xff9a3c, 0xa98bff, 0x7dffea, 0xff5d5d];
+const ZONE = {airport: 0xff9a3c, airspace: 0xb36bff};
+const M_LAT = 110540, M_LON = 111320;
+const store = {get(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}}, set(k, v){try{localStorage.setItem(k, JSON.stringify(v))}catch(e){}}};
+const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[c]);
+
+let st = null;  // one running view
+
+export function start(box, bar, drone){
+  if (st) return;
+  const renderer = new THREE.WebGLRenderer({antialias: true});
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  box.innerHTML = '';
+  box.appendChild(renderer.domElement);
+  const info = document.createElement('div');
+  info.style.cssText = 'position:absolute;left:8px;bottom:8px;z-index:2;background:rgba(3,16,26,.88);border:1px solid #155879;border-radius:4px;padding:5px 8px;color:#9edfff;font:11px Arial;pointer-events:none';
+  info.textContent = 'Connecting…';
+  box.appendChild(info);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x020a10);
+  scene.fog = new THREE.Fog(0x020a10, 1500, 6000);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.8); sun.position.set(300, 600, 200); scene.add(sun);
+  const camera = new THREE.PerspectiveCamera(50, 1, 1, 20000);
+  camera.position.set(-120, 110, 160);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+  const groups = {zones: new THREE.Group(), aircraft: new THREE.Group(), site: new THREE.Group()};
+  Object.values(groups).forEach(g => scene.add(g));
+  st = {box, bar, drone, renderer, scene, camera, controls, groups, info, centre: null, drones: {}, follow: store.get('l4d-follow') || drone,
+        hidden: new Set(store.get('l4d-hidden') || []), zonesKey: '', siteKey: '', timer: null, raf: 0, alive: true, last: null};
+  const size = () => { const w = box.clientWidth, h = box.clientHeight; renderer.setSize(w, h); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix(); };
+  st.size = size; window.addEventListener('resize', size); size();
+  const loop = () => { if (!st || !st.alive) return; st.raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); };
+  loop();
+  poll();
+  st.timer = setInterval(poll, 1000);
+}
+
+export function stop(){
+  if (!st) return;
+  st.alive = false; clearInterval(st.timer); cancelAnimationFrame(st.raf);
+  window.removeEventListener('resize', st.size);
+  st.renderer.dispose(); st.box.innerHTML = ''; st.bar.innerHTML = '';
+  st = null;
+}
+
+function enu(lat, lon, alt){
+  const c = st.centre;
+  return new THREE.Vector3((lon - c.lon) * M_LON * Math.cos(c.lat * Math.PI / 180), alt || 0, -(lat - c.lat) * M_LAT);
+}
+
+async function poll(){
+  let d;
+  try { d = await fetch('/api/live4d?drone=' + encodeURIComponent(st.drone), {cache: 'no-store'}).then(r => r.json()); }
+  catch (e) { if (st) st.info.textContent = 'Lost contact with the dashboard'; return; }
+  if (!st || !d.ok) { if (st) st.info.textContent = d && d.error || 'No data'; return; }
+  if (!st.centre) { st.centre = d.centre; ground(); }
+  zones(d.zones || []);
+  site(d.maps || []);
+  drones(d.drones || []);
+  aircraft(d.aircraft || []);
+  barUi(d.drones || []);
+  const flying = (d.drones || []).filter(x => x.flying).length;
+  st.info.innerHTML = `<b>4D LIVE</b> · ${d.drones.length} drone${d.drones.length === 1 ? '' : 's'}, ${flying} flying` +
+    (d.aircraft.length ? ` · ✈ ${d.aircraft.length} aircraft` : '') + ' · drag to turn, right-drag to move, scroll to zoom';
+}
+
+// ----- ground: satellite tiles round the centre (from the dashboard's offline tile cache) -----
+function ground(){
+  const z = 17, n = 2 ** z, c = st.centre, R = 2;  // 5 × 5 tiles ≈ 1.2 km across
+  const tx = Math.floor((c.lon + 180) / 360 * n), ty = Math.floor((1 - Math.log(Math.tan(c.lat * Math.PI / 180) + 1 / Math.cos(c.lat * Math.PI / 180)) / Math.PI) / 2 * n);
+  const lon = x => x / n * 360 - 180, lat = y => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+  const nw = enu(lat(ty - R), lon(tx - R), 0), se = enu(lat(ty + R + 1), lon(tx + R + 1), 0);
+  const canvas = document.createElement('canvas'); canvas.width = canvas.height = 256 * (2 * R + 1);
+  const g = canvas.getContext('2d'); g.fillStyle = '#0b1c26'; g.fillRect(0, 0, canvas.width, canvas.height);
+  const tex = new THREE.CanvasTexture(canvas); tex.colorSpace = THREE.SRGBColorSpace;
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(se.x - nw.x, se.z - nw.z), new THREE.MeshBasicMaterial({map: tex}));
+  plane.rotation.x = -Math.PI / 2; plane.position.set((nw.x + se.x) / 2, -0.2, (nw.z + se.z) / 2);
+  st.scene.add(plane);
+  const grid = new THREE.GridHelper(4000, 40, 0x155879, 0x0d2c3d); grid.position.y = -0.5; st.scene.add(grid);
+  for (let i = -R; i <= R; i++) for (let j = -R; j <= R; j++) {
+    const img = new Image();
+    img.onload = () => { g.drawImage(img, (i + R) * 256, (j + R) * 256); tex.needsUpdate = true; };
+    img.src = `/tiles/sat/${z}/${tx + i}/${ty + j}`;
+  }
+}
+
+// ----- no-fly zones and airspace as see-through volumes up to the drones' 120 m ceiling -----
+function zones(list){
+  const key = JSON.stringify(list.map(z => [z.id, z.points.length]));
+  if (key === st.zonesKey) return;
+  st.zonesKey = key; st.groups.zones.clear();
+  for (const z of list) {
+    const shape = new THREE.Shape(z.points.map(p => { const v = enu(p.lat, p.lon, 0); return new THREE.Vector2(v.x, -v.z); }));
+    const geo = new THREE.ExtrudeGeometry(shape, {depth: 120, bevelEnabled: false});
+    geo.rotateX(-Math.PI / 2);
+    const color = ZONE[z.source] || 0xff4d6a;
+    st.groups.zones.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color, transparent: true, opacity: 0.13, depthWrite: false})));
+    st.groups.zones.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.6})));
+  }
+}
+
+// ----- the finished 3D site map (from 3D Maps), placed where it was flown -----
+function site(maps){
+  const m = maps[0], key = m ? m.id : '';
+  if (key === st.siteKey) return;
+  st.siteKey = key; st.groups.site.clear();
+  if (!m) return;
+  const base = `/maps/${m.id}/model/`, mtl = new MTLLoader();
+  mtl.setPath(base); mtl.setResourcePath(base);
+  const place = materials => { const obj = new OBJLoader(); if (materials) obj.setMaterials(materials); obj.setPath(base);
+    obj.load(m.model, o => {
+      o.traverse(c => { if (c.isMesh) { const ms = Array.isArray(c.material) ? c.material : [c.material];
+        c.material = ms.map(x => new THREE.MeshBasicMaterial({map: x.map || null, color: x.map ? 0xffffff : 0x8fb7c9, side: THREE.DoubleSide}));
+        if (c.material.length === 1) c.material = c.material[0]; } });
+      o.rotation.x = -Math.PI / 2;  // the model is east/north/up in metres from its origin
+      const g = new THREE.Group(); g.add(o); g.updateMatrixWorld(true);
+      const low = new THREE.Box3().setFromObject(g).min.y, at = enu(m.origin.lat, m.origin.lon, 0);
+      g.position.set(at.x, -low, at.z);
+      if (st && st.siteKey === key) st.groups.site.add(g);
+    });
+  };
+  mtl.load(m.model.replace(/\.obj$/i, '.mtl'), x => { x.preload(); place(x); }, undefined, () => place(null));
+}
+
+// ----- drones: body, heading, height stick, label, trail, the route it is flying -----
+function label(text, color){
+  const c = document.createElement('canvas'), g = c.getContext('2d');
+  g.font = 'bold 40px Arial';
+  const w = Math.ceil(g.measureText(text).width) + 40;  // as wide as the text
+  c.width = w; c.height = 96;
+  g.fillStyle = 'rgba(3,16,26,.85)'; g.fillRect(0, 0, w, 96);
+  g.strokeStyle = '#' + color.toString(16).padStart(6, '0'); g.lineWidth = 6; g.strokeRect(3, 3, w - 6, 90);
+  g.fillStyle = '#e9f8ff'; g.font = 'bold 40px Arial'; g.textBaseline = 'middle'; g.fillText(text, 20, 50);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({map: new THREE.CanvasTexture(c), depthTest: false, sizeAttenuation: false}));
+  s.scale.set(0.0375 * w / 96, 0.0375, 1); s.center.set(0.5, -0.4); s.renderOrder = 10; s.userData.text = text;
+  return s;
+}
+
+function droneMesh(color){
+  const g = new THREE.Group(), mat = new THREE.MeshLambertMaterial({color});
+  g.scale.setScalar(1.6);
+  g.add(new THREE.Mesh(new THREE.BoxGeometry(3.2, 1.2, 4.4), mat));
+  for (const [x, z] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.4, 4.6), mat);
+    arm.position.set(x / 2, 0, z / 2); arm.rotation.y = Math.atan2(x, z); g.add(arm);
+    const rotor = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 1.7, 0.2, 20), new THREE.MeshBasicMaterial({color: 0xe9f8ff, transparent: true, opacity: 0.55}));
+    rotor.position.set(x, 0.5, z); g.add(rotor);
+  }
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(0.9, 2.4, 12), new THREE.MeshBasicMaterial({color: 0xffffff}));
+  nose.rotation.x = -Math.PI / 2; nose.position.z = -3.4; g.add(nose);  // points the way the drone faces
+  return g;
+}
+
+function drones(list){
+  const seen = new Set();
+  list.forEach((d, i) => {
+    seen.add(d.slot);
+    let o = st.drones[d.slot];
+    const color = COLORS[i % COLORS.length];
+    if (!o) {
+      o = st.drones[d.slot] = {color, root: new THREE.Group(), body: droneMesh(color), stick: null, tag: null,
+        trail: new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({color})),
+        route: new THREE.Group(), home: new THREE.Mesh(new THREE.RingGeometry(3, 4.5, 32), new THREE.MeshBasicMaterial({color, side: THREE.DoubleSide}))};
+      o.stick = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineDashedMaterial({color, dashSize: 3, gapSize: 2}));
+      o.home.rotation.x = -Math.PI / 2;
+      o.root.add(o.body, o.stick, o.trail, o.route, o.home);
+      st.scene.add(o.root);
+    }
+    o.root.visible = !st.hidden.has(d.slot);
+    o.data = d;
+    if (d.home) o.home.position.copy(enu(d.home.lat, d.home.lon, 0.3));
+    o.home.visible = !!d.home;
+    const has = d.lat != null;
+    o.body.visible = o.stick.visible = has;
+    if (has) {
+      const p = enu(d.lat, d.lon, Math.max(0, d.altitude || 0) + 1);
+      o.body.position.copy(p);
+      o.body.rotation.y = -((d.heading || 0) * Math.PI / 180);
+      o.stick.geometry.setFromPoints([new THREE.Vector3(p.x, 0, p.z), p]); o.stick.computeLineDistances();
+      const text = `${d.label} · ${Math.round(d.altitude || 0)} m${d.battery != null ? ' · ' + d.battery + '%' : ''}${d.mission ? ' · ' + d.mission : ''}`;
+      if (!o.tag || o.tag.userData.text !== text) { if (o.tag) o.root.remove(o.tag); o.tag = label(text, color); o.root.add(o.tag); }
+      o.tag.position.copy(p);
+    } else if (o.tag) { o.root.remove(o.tag); o.tag = null; }
+    const pts = (d.trail || []).map(t => enu(t[0], t[1], Math.max(0, t[2]) + 1));
+    o.trail.geometry.setFromPoints(pts.length > 1 ? pts : [new THREE.Vector3(), new THREE.Vector3()]);
+    o.trail.visible = pts.length > 1;
+    const rk = JSON.stringify(d.route || null);
+    if (rk !== o.routeKey) {
+      o.routeKey = rk; o.route.clear();
+      if (d.route && d.route.points.length) {
+        const rp = d.route.points.map(p => enu(p.lat, p.lon, d.route.alt));
+        const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(rp), new THREE.LineDashedMaterial({color, dashSize: 6, gapSize: 4, transparent: true, opacity: 0.8}));
+        line.computeLineDistances(); o.route.add(line);
+        rp.forEach((v, k) => { const s = new THREE.Mesh(new THREE.SphereGeometry(k + 1 === d.route.index ? 2.6 : 1.6, 14, 10), new THREE.MeshBasicMaterial({color}));
+          s.position.copy(v); o.route.add(s); });
+      }
+    }
+    if (st.follow === d.slot && has && o.root.visible) followTo(o.body.position);
+  });
+  for (const k of Object.keys(st.drones)) if (!seen.has(k)) { st.scene.remove(st.drones[k].root); delete st.drones[k]; }
+}
+
+function followTo(p){
+  const c = st.controls;
+  if (!st.last) {  // start following: look at the drone from behind and above it
+    c.target.copy(p); st.camera.position.copy(p).add(new THREE.Vector3(-45, 35, 55)); st.last = p.clone(); return;
+  }
+  const delta = p.clone().sub(st.last);
+  c.target.add(delta); st.camera.position.add(delta); st.last = p.clone();
+}
+
+// ----- crewed aircraft from the air-traffic watch (Flight safety) -----
+function aircraft(list){
+  st.groups.aircraft.clear();
+  for (const a of list) {
+    const h = a.height_ft == null ? 300 : Math.max(30, a.height_ft * 0.3048), p = enu(a.lat, a.lon, h);
+    const color = a.threat ? 0xff4d6a : 0xffd23f;
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(6, 22, 12), new THREE.MeshBasicMaterial({color}));
+    cone.rotation.x = -Math.PI / 2; const g = new THREE.Group(); g.add(cone);
+    g.position.copy(p); g.rotation.y = -((a.track || 0) * Math.PI / 180);
+    const stick = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(p.x, 0, p.z), p]), new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.35}));
+    const tag = label(`✈ ${a.call || a.hex} · ${a.height_ft == null ? '?' : Math.round(a.height_ft / 100) * 100} ft`, color);
+    tag.position.copy(p);
+    st.groups.aircraft.add(g, stick, tag);
+  }
+}
+
+// ----- one switch per drone: show / hide, and follow -----
+function barUi(list){
+  const key = JSON.stringify(list.map(d => [d.slot, d.label, st.hidden.has(d.slot), st.follow === d.slot, !!d.flying]));
+  if (key === st.barKey) return;
+  st.barKey = key;
+  st.bar.innerHTML = list.map((d, i) => {
+    const col = '#' + COLORS[i % COLORS.length].toString(16).padStart(6, '0'), on = !st.hidden.has(d.slot);
+    return `<span class="l4d-chip" style="border-color:${col}"><label><input type="checkbox" class="toggle" data-l4d-show="${esc(d.slot)}" ${on ? 'checked' : ''}>
+      <i style="background:${col}"></i>${esc(d.label)}${d.flying ? ' · flying' : ''}</label>
+      <button type="button" class="${st.follow === d.slot ? 'on' : ''}" data-l4d-follow="${esc(d.slot)}">${st.follow === d.slot ? 'Following' : 'Follow'}</button></span>`;
+  }).join('') + `<button type="button" class="l4d-reset" data-l4d-reset="1">Whole site</button>`;
+  st.bar.querySelectorAll('[data-l4d-show]').forEach(el => el.onchange = () => {
+    const s = el.dataset.l4dShow; el.checked ? st.hidden.delete(s) : st.hidden.add(s);
+    store.set('l4d-hidden', [...st.hidden]); st.barKey = '';
+  });
+  st.bar.querySelectorAll('[data-l4d-follow]').forEach(el => el.onclick = () => {
+    st.follow = st.follow === el.dataset.l4dFollow ? '' : el.dataset.l4dFollow; st.last = null;
+    store.set('l4d-follow', st.follow); st.barKey = '';
+  });
+  st.bar.querySelector('[data-l4d-reset]').onclick = () => {
+    st.follow = ''; st.last = null; store.set('l4d-follow', ''); st.barKey = '';
+    st.controls.target.set(0, 0, 0); st.camera.position.set(-120, 110, 160);
+  };
+}
+"""

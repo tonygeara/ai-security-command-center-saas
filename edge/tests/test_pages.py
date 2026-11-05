@@ -15,7 +15,7 @@ def test_page_loads_and_scripts_parse(client, url, tmp_path):
     r = client.get(url)
     assert r.status_code == 200, url
     html = r.get_data(as_text=True)
-    scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, re.S)
+    scripts = re.findall(r"<script(?![^>]*\b(?:src=|type=\"importmap\"))[^>]*>(.*?)</script>", html, re.S)
     if not NODE:
         pytest.skip("node is not installed")
     for i, js in enumerate(scripts):

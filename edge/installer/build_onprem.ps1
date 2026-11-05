@@ -16,7 +16,10 @@ $Usb = Join-Path $Installer 'output\onprem-usb'
 $Name = 'AI Command Centre Lebanon'
 $Slug = 'AI-Command-Centre-Lebanon'
 $AppId = '{6F3C2A9E-5B1D-4E8A-9C47-2D8B1F0A7E53}'
-$env:NUITKA_CACHE_DIR = Join-Path $Installer 'build\nuitka-cache'
+if (-not $env:NUITKA_CACHE_DIR) { $env:NUITKA_CACHE_DIR = Join-Path $Installer 'build\nuitka-cache' }
+# C compiler for Nuitka: MinGW64, downloaded by Nuitka (default), or Visual Studio's (NUITKA_COMPILER=msvc, used by the
+# GitHub build, whose Windows machines have it installed).
+$compiler = if ($env:NUITKA_COMPILER -eq 'msvc') { '--msvc=latest' } else { '--mingw64' }
 
 $version = (Select-String -Path (Join-Path $App 'launcher.pyw') -Pattern "^APP_VERSION = '(.+)'").Matches[0].Groups[1].Value
 Write-Host "Building $Name $version (on-prem)" -ForegroundColor Cyan
@@ -62,12 +65,12 @@ Push-Location $Stage
 try {
     foreach ($m in 'edition', 'licensing', 'geo', 'nofly', 'users', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dashboard') {
         Write-Host "Compiling $m to native code..."
-        & $python -m nuitka --module "$m.py" --mingw64 --assume-yes-for-downloads --remove-output --quiet
+        & $python -m nuitka --module "$m.py" $compiler --assume-yes-for-downloads --remove-output --quiet
         if ($LASTEXITCODE) { throw "Nuitka failed for $m" }
         Remove-Item "$m.py", "$m.pyi" -ErrorAction SilentlyContinue
     }
     Write-Host "Compiling the page templates to native code..."
-    & $python -m nuitka --module pages --include-package=pages --mingw64 --assume-yes-for-downloads --remove-output --quiet
+    & $python -m nuitka --module pages --include-package=pages $compiler --assume-yes-for-downloads --remove-output --quiet
     if ($LASTEXITCODE) { throw "Nuitka failed for pages" }
     Remove-Item 'pages' -Recurse -Force
     Remove-Item 'pages.pyi' -ErrorAction SilentlyContinue
