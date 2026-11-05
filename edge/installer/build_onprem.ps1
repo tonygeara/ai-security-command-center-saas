@@ -42,7 +42,7 @@ New-Item -ItemType Directory -Force $Stage | Out-Null
 Copy-Item (Join-Path $App 'launcher.pyw') $Stage
 Copy-Item (Join-Path $App 'dashboard.py') $Stage
 Copy-Item (Join-Path $App 'licensing.py') $Stage
-foreach ($m in 'nofly', 'users', 'geo', 'virtual_drone', 'mapping') { Copy-Item (Join-Path $App "$m.py") $Stage }
+foreach ($m in 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf') { Copy-Item (Join-Path $App "$m.py") $Stage }
 Copy-Item (Join-Path $App 'pages') $Stage -Recurse
 Copy-Item (Join-Path $App 'static') $Stage -Recurse  # map + 3D viewer libraries (data, not code)
 Get-ChildItem $Stage -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
@@ -59,7 +59,7 @@ DATA_DIR_NAME = "$Slug"
 # 2. Compile the application modules to native code; then remove their sources.
 Push-Location $Stage
 try {
-    foreach ($m in 'edition', 'licensing', 'geo', 'nofly', 'users', 'virtual_drone', 'mapping', 'dashboard') {
+    foreach ($m in 'edition', 'licensing', 'geo', 'nofly', 'users', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dashboard') {
         Write-Host "Compiling $m to native code..."
         & $python -m nuitka --module "$m.py" --mingw64 --assume-yes-for-downloads --remove-output --quiet
         if ($LASTEXITCODE) { throw "Nuitka failed for $m" }
@@ -80,7 +80,7 @@ try {
     & $python -m PyInstaller --clean --noconfirm --distpath dist --workpath build\pyi-onprem onprem.spec
     if ($LASTEXITCODE) { throw 'PyInstaller build failed' }
 } finally { Pop-Location }
-$own = 'dashboard', 'licensing', 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'main_page', 'drone_control', 'maps'
+$own = 'dashboard', 'licensing', 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'main_page', 'drone_control', 'maps', 'safety'
 $leak = Get-ChildItem (Join-Path $Installer "dist\$Slug") -Recurse -Include ($own | ForEach-Object { "$_.py"; "$_.pyc" }) -ErrorAction SilentlyContinue
 if ($leak) { throw "Source/bytecode leaked into the package: $($leak.FullName -join ', ')" }
 

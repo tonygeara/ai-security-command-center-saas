@@ -66,7 +66,16 @@ def clean_zone(z):
     if len(pts) < 3:
         raise ValueError("A no-fly zone needs at least 3 corners")
     name = " ".join(str(z.get("name") or "").split())[:40] or "No-fly zone"
-    return {"id": str(z.get("id") or f"z{int(time.time() * 1000)}"), "name": name, "points": pts}
+    out = {"id": str(z.get("id") or f"z{int(time.time() * 1000)}"), "name": name, "points": pts}
+    # Imported official airspace ("airport", "airspace") can be switched off where the site is authorised to fly.
+    if z.get("source") in ("airport", "airspace"):
+        out.update(source=z["source"], enabled=z.get("enabled", True) is not False, note=str(z.get("note") or "")[:120])
+    return out
+
+
+def active(zones):
+    """The zones drones must keep out of (imported airspace marked as authorised is left out)."""
+    return [z for z in zones if z.get("enabled", True) is not False]
 
 
 def load_zones(path):
@@ -171,3 +180,62 @@ def detour(zones, start, end):
         path.append(_ll(nodes[k][0], nodes[k][1], ref))
         k = prev[k]
     return list(reversed(path))
+
+
+def path_m(zones, a, b):
+    """Flying distance a → b (each (lat, lon)) going round the zones; inf when there is no way."""
+    via = detour(zones, a, b)
+    if via is None:
+        return math.inf
+    pts = [a] + via + [b]
+    return sum(math.hypot(*_xy(q[0], q[1], p)) for p, q in zip(pts, pts[1:]))
+
+
+def best_order(zones, stops, start=None, loop=False):
+    """The order of stops that flies the shortest distance (round the zones), starting from start (the home point).
+
+    loop: the route repeats, so it is a closed circuit. Nearest-neighbour first, then 2-opt improvement: for the
+    25 stops a route can have this is fast and within a few percent of the best possible.
+    Returns (order as indexes into stops, metres before, metres after).
+    """
+    pts = [(p["lat"], p["lon"]) for p in stops]
+    n = len(pts)
+    nodes = pts + ([start] if start else [])
+    s = n if start else None
+    dist = [[0.0 if i == j else path_m(zones, nodes[i], nodes[j]) for j in range(len(nodes))] for i in range(len(nodes))]
+
+    def length(order):
+        seq = ([s] if s is not None else []) + order + ([order[0]] if loop and order else [])
+        return sum(dist[i][j] for i, j in zip(seq, seq[1:]))
+
+    original = list(range(n))
+    if n < 3 and not (n == 2 and start):
+        return original, length(original), length(original)
+    # nearest neighbour from the start (or from the first stop)
+    left, order = set(range(n)), []
+    cur = s if s is not None else 0
+    if s is None:
+        order.append(0)
+        left.discard(0)
+    while left:
+        cur = min(left, key=lambda j: dist[cur][j])
+        order.append(cur)
+        left.discard(cur)
+    best = length(order)
+    improved = True
+    while improved:
+        improved = False
+        for i in range(0, n - 1):
+            for k in range(i + 1, n):
+                cand = order[:i] + order[i:k + 1][::-1] + order[k + 1:]
+                c = length(cand)
+                if c < best - 0.01:
+                    order, best, improved = cand, c, True
+    if loop and s is not None:  # a circuit: start at the stop nearest home, keep the direction
+        first = min(range(n), key=lambda k: dist[s][order[k]])
+        order = order[first:] + order[:first]
+        best = length(order)
+    before = length(original)
+    if best >= before:
+        return original, before, before
+    return order, before, best
