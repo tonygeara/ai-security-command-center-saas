@@ -141,7 +141,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.2.0"
+APP_VERSION = "V11.3.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2317,7 +2317,7 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety  # noqa: E401
+import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d  # noqa: E401
 import users as user_accounts
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
@@ -5343,7 +5343,7 @@ def drone_control_page():
             .replace('<h1 class="page-title">Drone Control</h1>', f'<h1 class="page-title">Drone Control · {drone_label(slot)}</h1>', 1))
 
 
-DRONE_CONTROL_PAGE = hud_page("Drone Control", pages.drone_control.BODY, active="drone")
+DRONE_CONTROL_PAGE = hud_page("Drone Control", pages.drone_control.BODY, active="drone", head=pages.live4d.IMPORTMAP)
 _body_end = DRONE_CONTROL_PAGE.rfind("</body>")
 DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_CONTROL_PAGE[_body_end:]
 
@@ -6116,6 +6116,7 @@ def start_assistant():
     threading.Thread(target=_nofly_watch_worker, daemon=True).start()
     start_mapping()
     threading.Thread(target=_traffic_worker, daemon=True).start()
+    threading.Thread(target=_trail_worker, daemon=True).start()
 
 
 # ---------- multi-stop routes (draw on the map, fly stop by stop) ----------
@@ -7537,6 +7538,83 @@ def api_rf_coverage():
     results, terrain = rf.check({**s["rf"], "controller": c}, elevation, pts, alt)
     step = 2 * DRONE_LIMITS["max_distance_m"] / 12
     return jsonify({"ok": True, "results": results, "terrain": terrain, "controller": c, "cell_m": step, "alt": alt})
+
+
+# ---------- 4D live: every drone in 3D over the site, in real time (Drone page → map → 4D LIVE) ----------
+TRAIL_SECONDS = 900  # the trail shows the last 15 minutes of flying
+TRAIL_STEP_M = 2.0
+drone_trails = {}  # slot -> [(lat, lon, alt, time)]
+
+
+def record_trails(now=None):
+    """Add each flying drone's position to its trail (called once a second)."""
+    now = now or time.time()
+    for slot in drone_slots():
+        tel = get_link(slot)["telemetry"]
+        trail = drone_trails.setdefault(slot, [])
+        while trail and now - trail[0][3] > TRAIL_SECONDS:
+            trail.pop(0)
+        if not link_fresh(slot, 3) or not tel.get("lat") or not (tel.get("flying") or float(tel.get("altitude") or 0) > 0.5):
+            continue
+        p = (float(tel["lat"]), float(tel["lon"]), float(tel.get("altitude") or 0), now)
+        last = trail[-1] if trail else None
+        if last and _distance_m(last[0], last[1], p[0], p[1]) < TRAIL_STEP_M and abs(last[2] - p[2]) < 1 and now - last[3] < 10:
+            continue
+        trail.append(p)
+
+
+def _trail_worker():
+    while True:
+        time.sleep(1)
+        try:
+            record_trails()
+        except Exception as e:
+            print("Trail error:", e)
+
+
+def _live_drone(slot):
+    link, fresh = get_link(slot), link_fresh(slot, 5)
+    tel = link["telemetry"] if fresh else {}
+    run = run_of(slot)
+    mission = "route" if run else ("response" if drone_response["active"] and drone_response.get("drone") == slot else "")
+    trail = drone_trails.get(slot, [])[-400:]
+    return {"slot": slot, "label": drone_label(slot), "virtual": is_virtual(slot), "connected": fresh,
+            "lat": tel.get("lat"), "lon": tel.get("lon"), "altitude": tel.get("altitude"), "heading": tel.get("heading"),
+            "speed": tel.get("speed"), "battery": tel.get("battery"), "flying": bool(tel.get("flying")), "mission": mission,
+            "home": {"lat": tel["home_lat"], "lon": tel["home_lon"]} if tel.get("home_lat") else None,
+            "trail": [[round(a, 7), round(b, 7), round(c, 1)] for a, b, c, _ in trail],
+            "route": {"points": run["route"]["points"], "alt": run["route"]["alt"], "index": run.get("index", 0)} if run else None}
+
+
+@app.route("/api/live4d")
+def api_live4d():
+    slot = request.args.get("drone")
+    tel = get_link(slot)["telemetry"] if slot in drone_slots() else {}
+    centre = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
+    if None in centre:
+        centre = _site_location()[0]
+    if not centre:
+        return jsonify({"ok": False, "error": "No position yet: connect a drone or set the site on Flight safety."}), 409
+    t = traffic_state
+    fresh = t["ok"] and time.time() - t["at"] < TRAFFIC_STALE_S
+    threats = {a["hex"] for a in t["threats"]} if fresh else set()
+    maps = []
+    for m in mapping.list_all(MAPS_DIR):
+        r = m.get("result") or {}
+        o = r.get("origin")
+        if m.get("status") == "ready" and r.get("model") and o and _distance_m(centre[0], centre[1], o["lat"], o["lon"]) < 3000:
+            maps.append({"id": m["id"], "name": m["name"], "model": r["model"], "origin": o})
+    return jsonify({"ok": True, "centre": {"lat": centre[0], "lon": centre[1]},
+                    "drones": [_live_drone(d) for d in drone_slots() if d not in _sources_over_limit()],
+                    "zones": [{"id": z["id"], "name": z["name"], "source": z.get("source", ""), "points": z["points"]} for z in nofly_zones()],
+                    "aircraft": [{**{k: a[k] for k in ("hex", "call", "lat", "lon", "height_ft", "track", "dist_m")}, "threat": a["hex"] in threats}
+                                 for a in (t["aircraft"] if fresh else [])][:40],
+                    "maps": maps[:1]})
+
+
+@app.route("/live4d.js")
+def live4d_js():
+    return Response(pages.live4d.JS, mimetype="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
 @app.route("/safety")

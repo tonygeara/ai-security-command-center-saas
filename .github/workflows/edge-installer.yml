@@ -100,6 +100,8 @@ jobs:
       - name: Build on-prem installer
         env:
           PYTHON312: ${{ steps.py312.outputs.python-path }}
+          NUITKA_COMPILER: msvc  # Visual Studio's compiler is on the runner; the MinGW download came incomplete
+          NUITKA_CACHE_DIR: C:\nc
         run: powershell -ExecutionPolicy Bypass -File edge\installer\build_onprem.ps1 -SkipImages
       - uses: actions/upload-artifact@v4
         with:

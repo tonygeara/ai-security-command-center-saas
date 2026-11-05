@@ -51,3 +51,13 @@ Operators may plan, fly, import photos and process maps. Only admins delete maps
 - Video frames come from the drone's live stream to this PC: check *Drone* shows video before flying.
   Virtual drones have no camera, so they rehearse the flight without capturing images.
 - Fly in steady light and low wind; avoid flying over water or large plain surfaces only.
+
+## 4D live (Drone page)
+
+On the Drone page, switch the map's **4D LIVE** on to watch every drone in 3D, live: position, height, heading,
+battery, its trail over the last 15 minutes and the route it is flying, over the satellite map. No-fly zones and
+imported airspace show as volumes up to 120 m, crewed aircraft from Flight safety at their height. The newest
+finished 3D map within 3 km is placed under the drones (maps processed from V11.3 on carry their position).
+
+Each drone has its own switch to show or hide it, and **Follow** keeps the camera on it; **Whole site** goes back.
+The page remembers the switches. Drag to turn, right-drag to move, scroll to zoom.

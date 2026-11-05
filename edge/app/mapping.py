@@ -372,6 +372,7 @@ def extract_results(zip_path, out_dir):
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(model_dir)
     found = {"model": None, "tiles": False, "min_zoom": None, "max_zoom": None, "report": False}
+    georef = {}
     with zipfile.ZipFile(zip_path) as z:
         for info in z.infolist():
             name = info.filename.replace("\\", "/")
@@ -389,6 +390,10 @@ def extract_results(zip_path, out_dir):
                 found["tiles"] = True
                 found["min_zoom"] = zi if found["min_zoom"] is None else min(found["min_zoom"], zi)
                 found["max_zoom"] = zi if found["max_zoom"] is None else max(found["max_zoom"], zi)
+            elif name in ("odm_georeferencing/coords.txt", "odm_georeferencing/proj.txt"):
+                with z.open(info) as src:
+                    georef[name.split("/")[1]] = src.read(4096).decode("utf-8", "replace")
+                continue
             elif name == "odm_report/report.pdf":
                 target = os.path.join(out_dir, "report.pdf")
                 found["report"] = True
@@ -396,4 +401,28 @@ def extract_results(zip_path, out_dir):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with z.open(info) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst, 1 << 20)
+    origin = model_origin(georef.get("coords.txt", ""), georef.get("proj.txt", ""))
+    if origin:
+        found["origin"] = origin
     return found
+
+
+def model_origin(coords_txt, proj_txt=""):
+    """Where the 3D model's (0, 0) is on Earth. OpenDroneMap writes the model in UTM metres minus an offset:
+    coords.txt holds the zone ("WGS84 UTM 36N") and the offset ("east north"); proj.txt may hold the zone instead."""
+    from geo import utm_to_latlon
+    lines = [ln.strip() for ln in (coords_txt or "").splitlines() if ln.strip()]
+    m = re.search(r"UTM\s*(\d{1,2})\s*([NS])", lines[0], re.I) if lines else None
+    if not m:
+        p = re.search(r"\+zone=(\d{1,2})", proj_txt or "")
+        m = (p.group(1), "S" if "+south" in proj_txt else "N") if p else None
+    else:
+        m = (m.group(1), m.group(2).upper())
+    try:
+        east, north = (float(v) for v in lines[1].split()[:2])
+    except (IndexError, ValueError):
+        return None
+    if not m or not 1 <= int(m[0]) <= 60:
+        return None
+    lat, lon = utm_to_latlon(east, north, int(m[0]), m[1] == "N")
+    return {"lat": round(lat, 7), "lon": round(lon, 7), "utm_zone": f"{int(m[0])}{m[1]}", "east": east, "north": north}
