@@ -7,8 +7,8 @@ import FeatureToggle from "../../FeatureToggle";
 import DownloadLicense from "./DownloadLicense";
 import RemoveButton from "../../RemoveButton";
 
-const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"]];
-const FEATURE_LABEL = Object.fromEntries([...FEATURES, ["drone_control", "Fly drone from PC"]]);
+const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"]];
+const FEATURE_LABEL = Object.fromEntries(FEATURES);
 
 function Contact({c}: {c: Record<string, any>}){
   const wa = String(c.phone || "").replace(/[^\d]/g, "");
@@ -45,7 +45,11 @@ export default async function ClientPage({params}: {params: Promise<{key: string
           <p><a className="btn small" href={"/portal?organization=" + encodeURIComponent(o.id)}>Open their dashboard</a></p></article>
         <article className="card"><h3>Feature access</h3>{FEATURES.map(([k, label]) => {
           const ov = overrides?.find(e => e.feature_key === k), def = defaults?.find(e => e.feature_key === k), lim = ov?.limit_value ?? def?.limit_value;
-          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={ov?.enabled ?? def?.enabled ?? false}/></p>; })}</article>
+          // Until "Fly drone from PC" is set for a client, the PC allows flying whenever Drone live is on.
+          const live = overrides?.find(e => e.feature_key === "drone_live") ?? defaults?.find(e => e.feature_key === "drone_live");
+          const follows = k === "drone_control" && !ov && !def;
+          const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : false);
+          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial}/></p>; })}</article>
       </section>
       <h2>PCs (Edge Agents)</h2>
       <div className="card tableWrap"><table className="adminTable"><thead><tr><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>
