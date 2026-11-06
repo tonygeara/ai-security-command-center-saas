@@ -125,15 +125,16 @@ begin
   if RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#OtherAppId}_is1') or
      RegKeyExists(HKLM, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#OtherAppId}_is1') then
   begin
-    MsgBox('{#OtherAppName} is already installed on this computer.' + #13#10 + #13#10 +
+    { SuppressibleMsgBox: a silent install (/SUPPRESSMSGBOXES) takes the default answer instead of waiting for a click. }
+    SuppressibleMsgBox('{#OtherAppName} is already installed on this computer.' + #13#10 + #13#10 +
            '{#MyAppName} cannot be installed next to it, because both use the same local AI services.' + #13#10 +
-           'Uninstall {#OtherAppName} first (Settings > Apps), or install on another computer.', mbCriticalError, MB_OK);
+           'Uninstall {#OtherAppName} first (Settings > Apps), or install on another computer.', mbCriticalError, MB_OK, IDOK);
     Result := False;
     exit;
   end;
   if not FileExists(ExpandConstant('{commonpf64}\Docker\Docker\Docker Desktop.exe')) then
-    if MsgBox('Docker Desktop is required to run the local AI services (Frigate, MQTT, MediaMTX).' + #13#10 + #13#10 +
+    if SuppressibleMsgBox('Docker Desktop is required to run the local AI services (Frigate, MQTT, MediaMTX).' + #13#10 + #13#10 +
               'Install it from https://www.docker.com/products/docker-desktop/ before starting the app.' + #13#10 +
-              'Continue installing anyway?', mbConfirmation, MB_YESNO) = IDNO then
+              'Continue installing anyway?', mbConfirmation, MB_YESNO, IDYES) = IDNO then
       Result := False;
 end;
