@@ -24,7 +24,7 @@ OPEN_PATHS = ("/login", "/logout", "/healthz", "/favicon.ico", "/api/cloud/can-a
 ADMIN_ONLY_READ = ("/users", "/api/users", "/api/drone/link/pair")
 # What an operator may change: flying, routes, responses, which live feeds are shown.
 OPERATOR_WRITES = [re.compile(p) for p in (
-    r"^/api/drone/(?!add$|link/pair)",
+    r"^/api/drone/(?!add$|remove$|link/pair)",  # adding, removing and pairing drones: admins
     r"^/api/routes(/fly|/stop)?$",
     r"^/api/response/(dispatch|recall)$",
     r"^/api/assistant/briefing$",

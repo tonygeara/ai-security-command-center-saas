@@ -88,3 +88,19 @@ def test_route_settings_saved(d, client):
     assert r["route"]["lost_link"] == "land" and r["route"]["lost_link_on"] is True and r["route"]["loop"] is True
     r = client.post("/api/routes", json={"name": "off", "points": [offset(10, 0)], "lost_link_on": False}).get_json()
     assert r["route"]["lost_link_on"] is False
+
+
+def test_remove_drones(d, client, fleet):
+    v1, v2 = fleet(2)
+    assert client.get("/drone-control").get_data(as_text=True).count("const IS_ADMIN=true") == 1  # sign-in off
+    assert client.post(f"/api/routes/fly?drone={v1}", json={"points": [offset(10, 0)], "alt": 15, "speed": 8, "pause": 0, "loop": True}).get_json()["ok"]
+    r = client.post("/api/drone/remove", json={"drone": v1})
+    assert r.status_code == 409 and ("mission" in r.get_json()["error"] or "flying" in r.get_json()["error"])
+    r = client.post("/api/drone/remove", json={"drone": v2}).get_json()
+    assert r["ok"] and r["removed"] and v2 not in d.virtual_drones
+    old = d.drone_link_token(slot="drone")
+    r = client.post("/api/drone/remove", json={"drone": "drone"}).get_json()
+    assert r["ok"] and not r["removed"] and d.drone_link_token(slot="drone") != old  # the first drone is unpaired
+    assert client.post("/api/drone/remove", json={"drone": "nope"}).status_code == 404
+    import users
+    assert not users.allowed("operator", "POST", "/api/drone/remove") and users.allowed("operator", "POST", "/api/drone/command")

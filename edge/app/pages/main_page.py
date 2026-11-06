@@ -6660,12 +6660,10 @@ function refreshDroneFeedStatus() {
 setInterval(refreshDroneFeedStatus, 1000);
 refreshDroneFeedStatus();
 
-/* Links like /#history from the other pages open the matching panel. */
+/* Old links like /#history now go to the Events / People / Vehicles pages under Settings. */
 function openPanelFromHash() {
-    const h = location.hash;
-    if (h === "#history") openEventHistory();
-    else if (h === "#face-library") document.getElementById("openFaceLibrary")?.click();
-    else if (h === "#vehicle-library") document.getElementById("openVehicleLibrary")?.click();
+    const h = location.hash, to = {"#history": "/settings/events", "#face-library": "/settings/people", "#vehicle-library": "/settings/vehicles"}[h];
+    if (to && location.pathname === "/") location.replace(to);
 }
 window.addEventListener("hashchange", openPanelFromHash);
 openPanelFromHash();

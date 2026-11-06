@@ -32,13 +32,13 @@ Demo mode: let automatic missions (alert response, patrols set to "any drone", T
 <div class="muted" style="margin-top:8px">Fly them from <b>Open controls</b> exactly like a real drone (take off, keyboard, click-to-fly, routes, patrols). Battery lasts about 24 minutes of flight; at 15% they return home and at 5% they land, like a real DJI drone.</div></div></section>
 </div>
 </main>
-<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 let map=null,pick=null,pickMark=null,marks={},trails={},homes={},data={drones:[]};
 function msg(t,ok){const e=$('vdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
-function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('vdMap').setView([lat,lon],17);
+function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('vdMap').setView([lat,lon],17);setTimeout(()=>window.addMapSearch&&addMapSearch(map),0);
   L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:19,attribution:'Esri'}).addTo(map);
   fetch('/api/nofly').then(r=>r.json()).then(d=>(d.zones||[]).forEach(z=>L.polygon(z.points.map(p=>[p.lat,p.lon]),{color:'#ff4d6a',weight:2,fillOpacity:.25,interactive:false}).addTo(map))).catch(()=>{});
   map.on('click',e=>{pick=[e.latlng.lat,e.latlng.lng];pickMark=pickMark||L.circleMarker(pick,{radius:8,color:'#ffd23f'}).addTo(map);pickMark.setLatLng(pick);
