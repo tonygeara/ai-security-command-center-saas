@@ -3103,7 +3103,7 @@ MQTT EVENT BUS
 
 <div class="center-column">
 
-
+<div id="cameraFeedPanel">
 <div class="panel">
 
 <div class="panel-head">
@@ -3147,6 +3147,7 @@ FRONT CAMERA • FACE AI • LPR AI
 </div>
 
 </div>
+</div><!-- cameraFeedPanel -->
 
 
 <div class="panel" style="margin-top:9px;">

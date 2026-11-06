@@ -44,6 +44,11 @@ BODY = r"""
 .l4d-chip button.on{background:#25c7ff;color:#02131d;border-color:#45d0ff}
 .l4d-chip button.l4d-go{display:flex;align-items:center;gap:6px;border:0;background:none;color:#cfeeff;font:12px Arial;padding:2px 2px;cursor:pointer}
 .l4d-chip button.l4d-go:hover{color:#fff;text-decoration:underline}
+.fs-strip{display:flex;align-items:stretch;gap:0;margin:0 0 14px;border:1px solid #155879;border-radius:5px;background:#05131d;overflow-x:auto;white-space:nowrap;scrollbar-width:thin}
+.fs-cell{display:flex;align-items:center;gap:7px;padding:8px 14px;border-right:1px solid #123447;color:#9edfff;font-size:12px}
+.fs-cell b{color:#e9f8ff}.fs-cell.bad{color:#ff9ea8;background:rgba(125,12,28,.16)}.fs-cell.warn{color:#ffcf7a;background:rgba(125,90,12,.12)}
+.fs-cell.ok{color:#7dffc1}.fs-link{margin-left:auto;border-right:0;color:#5bd9ff;text-decoration:none}.fs-link:hover{color:#fff}
+#m3d{display:none;width:100%;height:760px;border:1px solid #155879;border-radius:5px;background:#020a10}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -51,6 +56,9 @@ BODY = r"""
 <div class="page-sub">Fly the drone from this PC through the Drone Link app on the controller's phone. Keep the drone in sight — the pilot's controller can take over at any time.</div></div>
 <div class="actions"><span class="state" id="linkState"><i class="dot bad"></i>PHONE NOT CONNECTED</span></div></div>
 <div class="dc-fleet" id="fleet"></div>
+<div class="fs-strip" id="fsStrip"><span class="fs-cell" id="fsVerdict"><i class="dot warn"></i>Flight safety: checking…</span>
+<span class="fs-cell" id="fsWx">☁ –</span><span class="fs-cell" id="fsAc">✈ –</span><span class="fs-cell" id="fsZones">🛇 –</span>
+<a class="fs-cell fs-link" href="/safety">⚙ Flight safety settings</a></div>
 
 <section class="panel" id="pairPanel"><div class="panel-head"><div class="panel-title">⌁ Connect the phone</div><div class="live">PAIRING</div></div>
 <div class="panel-body dc-pair"><div class="qr" id="pairQr"></div><div style="flex:1;min-width:240px">
@@ -65,8 +73,9 @@ BODY = r"""
 <div class="dc-video"><div class="live-slot" data-live-camera="drone"></div>
 <div class="dc-hud"><span>ALT <b id="hAlt">–</b> m</span><span>DIST <b id="hDist">–</b> m</span><span>SPD <b id="hSpd">–</b> m/s</span><span>BAT <b id="hBat">–</b>%</span><span>GPS <b id="hGps">–</b></span><span>SIGNAL <b id="hSig">–</b></span></div></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="actions" style="align-items:center;gap:10px"><div class="live" id="mapState"></div>
+<label class="l4d-switch" title="Plan, fly and view 3D site maps"><input type="checkbox" class="toggle" id="m3dOn" onchange="toggle3d(this.checked)"> 3D MAP</label>
 <label class="l4d-switch" title="Watch every drone fly in 3D, live"><input type="checkbox" class="toggle" id="l4dOn" onchange="toggle4d(this.checked)"> 4D LIVE</label></div></div>
-<div class="panel-body"><div id="dcMap"></div><div id="l4d"></div><div id="l4dBar"></div><div class="muted" id="coords" style="margin-top:8px"></div></div></section>
+<div class="panel-body"><div id="dcMap"></div><iframe id="m3d" title="3D site maps"></iframe><div id="l4d"></div><div id="l4dBar"></div><div class="muted" id="coords" style="margin-top:8px"></div></div></section>
 </div>
 <div>
 <section class="panel"><div class="panel-head"><div class="panel-title">◉ Flight</div><div class="live" id="modeState"></div></div>
@@ -92,7 +101,6 @@ BODY = r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">🗺️ Auto-fly route</div><div class="live" id="routeState"></div></div>
 <div class="panel-body">
 <div class="muted">Click the map to add stops; the drone takes off if needed and flies through them in order (one stop = fly to a point). Every stop must be within <span id="routeMax">500</span> m of home. STOP, any flying key or the controller cancels it.</div>
-<div id="fsBanner" class="hud-msg" style="display:none"></div>
 <div class="actions" style="margin-top:10px"><button class="hud-btn" onclick="undoPoint()">Undo</button><button class="hud-btn" onclick="clearRoute()">Clear</button>
 <button class="hud-btn" onclick="shortestOrder()" title="Reorder the stops to fly the shortest distance">Shortest order</button>
 <button class="hud-btn" onclick="checkSignal()" title="Expected controller signal at each stop">Check signal</button>
@@ -354,16 +362,33 @@ async function checkSignal(){if(!route.length){rtmsg('Add stops first.',false);r
 let l4d=null;
 function storeGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function storeSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
+// 3D MAP: the 3D site-maps tool (plan an area, fly it, process, open the model) in place of the flat map.
+function toggle3d(on){$('m3dOn').checked=on;storeSet('m3d-on',on?'1':'0');
+  if(on&&$('l4dOn').checked)toggle4d(false);
+  const f=$('m3d');if(on&&!f.src)f.src='/maps-embed';
+  f.style.display=on?'block':'none';$('dcMap').style.display=on||$('l4dOn').checked?'none':'';
+  if(!on&&map)setTimeout(()=>map.invalidateSize(),50)}
+if(storeGet('m3d-on')==='1')setTimeout(()=>toggle3d(true),300);
 async function toggle4d(on){$('l4dOn').checked=on;storeSet('l4d-on',on?'1':'0');
+  if(on&&$('m3dOn').checked)toggle3d(false);
   $('dcMap').style.display=on?'none':'';$('l4d').style.display=on?'block':'none';$('l4dBar').style.display=on?'flex':'none';
   if(!on){if(l4d)l4d.stop();if(map)setTimeout(()=>map.invalidateSize(),50);return}
   try{l4d=l4d||await import('/live4d.js');l4d.start($('l4d'),$('l4dBar'),DRONE,{click:mapClick,draft:()=>({route,alt:+$('rtAlt').value||30,zone:nfPts})})}
   catch(e){$('l4d').innerHTML='<p class="muted" style="padding:14px">The 3D view could not start in this browser: '+esc(e.message||e)+'</p>'}}
-if(storeGet('l4d-on')==='1')setTimeout(()=>toggle4d(true),300);
+if(storeGet('l4d-on')==='1'&&storeGet('m3d-on')!=='1')setTimeout(()=>toggle4d(true),300);
 let acMarks=[];
+// The one-row flight-safety strip: verdict, weather, aircraft, airspace (full settings on Flight safety).
+function renderStrip(d){const c=d.conditions,v=$('fsVerdict'),w=d.weather||{},r=w.reading,t=d.traffic||{},s=d.settings||{};
+  v.className='fs-cell '+(c.problem?'bad':c.warnings.length?'warn':'ok');v.title=c.problem||c.warnings.join(' ')||'No weather or air-traffic problem found.';
+  v.innerHTML=c.problem?'⛔ <b>On hold</b> '+esc(c.problem.length>90?c.problem.slice(0,88)+'…':c.problem):c.warnings.length?'⚠ <b>Warnings</b> '+esc(c.warnings[0]):'✔ <b>Clear to fly</b>';
+  const wx=$('fsWx');wx.className='fs-cell'+((w.issues||[]).length?' warn':'');
+  wx.innerHTML=!w.enabled?'☁ Weather check off':!r?'☁ Weather unknown':`☁ <b>${r.wind_ms==null?'–':(+r.wind_ms).toFixed(1)}</b> m/s · gusts <b>${r.gust_ms==null?'–':(+r.gust_ms).toFixed(1)}</b> · ${esc(r.text)} · ${r.temp_c==null?'':Math.round(r.temp_c)+' °C'}`;
+  const ac=$('fsAc'),th=(t.threats||[]).length;ac.className='fs-cell'+(th?' bad':'');
+  ac.innerHTML=!(s.traffic||{}).enabled?'✈ Air traffic watch off':!t.fresh?'✈ No traffic data':`✈ <b>${(t.aircraft||[]).length}</b> aircraft${th?` · <b>${th} close</b>`:''}`;
+  const z=d.zones||[],on=z.filter(x=>x.enabled!==false),imp=on.filter(x=>x.source).length;
+  $('fsZones').innerHTML=`🛇 <b>${on.length}</b> no-fly zone${on.length===1?'':'s'}${imp?` (${imp} official)`:''}`}
 async function loadSafety(){try{const d=await fetch('/api/safety',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
-  const c=d.conditions,b=$('fsBanner');b.style.display=c.problem||c.warnings.length?'':'none';
-  b.className='hud-msg '+(c.problem?'bad':'');b.innerHTML=c.problem?'⛔ '+esc(c.problem)+' <a href="/safety" style="color:#5bd9ff">Flight safety</a>':c.warnings.map(w=>'⚠ '+esc(w)).join('<br>');
+  renderStrip(d);
   if(!map)return;acMarks.forEach(m=>map.removeLayer(m));acMarks=[];const th=new Set((d.traffic.threats||[]).map(a=>a.hex));
   (d.traffic.fresh?d.traffic.aircraft:[]).forEach(a=>acMarks.push(L.marker([a.lat,a.lon],{icon:L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,12],
     html:`<div style="transform:rotate(${(a.track||0)-45}deg);font-size:18px;line-height:24px;text-align:center;color:${th.has(a.hex)?'#ff4d6a':'#ffd23f'};text-shadow:0 0 4px #000">✈</div>`})})

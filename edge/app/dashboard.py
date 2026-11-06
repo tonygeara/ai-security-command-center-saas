@@ -141,7 +141,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.3.1"
+APP_VERSION = "V11.3.2"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -3822,21 +3822,19 @@ from pages.live_player import LIVE_PLAYER_HTML  # noqa: E402
 
 HUD_NAV_ITEMS = [
     ("dashboard", "/", "⌂", "Dashboard"),
-    ("events", "/#history", "◷", "Events"),
-    ("people", "/#face-library", "◎", "People"),
-    ("vehicles", "/#vehicle-library", "▱", "Vehicles"),
     ("drone", "/drone-control", "✈", "Drone"),
-    ("maps", "/maps", "▦", "3D Maps"),
-    ("safety", "/safety", "⚠", "Flight safety"),
     ("virtual", "/virtual-drones", "◇", "Virtual drones"),
     ("devices", "/setup/add", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
-    ("license", "/license", "⚿", "License"),
-    ("users", "/users", "👤", "Users"),
 ]
+# Pages reached from inside a tab light up that tab: 3D maps and flight safety from Drone; events, people,
+# vehicles, licence and users from Settings.
+NAV_ALIAS = {"maps": "drone", "safety": "drone", "license": "settings", "users": "settings",
+             "events": "settings", "people": "settings", "vehicles": "settings"}
 
 
 def hud_topbar(active="", nav=True):
+    active = NAV_ALIAS.get(active, active)
     active_attr = ' class="active"'
     links = "".join(
         f'<a href="{href}"{active_attr if key == active else ""}><span class="ico">{ico}</span>{label}</a>'
@@ -3867,6 +3865,7 @@ def hud_page(title, body, active="", head="", nav=True):
 
 def hud_subnav(active=""):
     """Navigation strip for the Drones & Control page, which keeps its own status top bar."""
+    active = NAV_ALIAS.get(active, active)
     links = "".join(
         f'<a href="{href}" class="{"active" if key == active else ""}"><span>{ico}</span>{label}</a>'
         for key, href, ico, label in HUD_NAV_ITEMS
@@ -7617,6 +7616,14 @@ def live4d_js():
     return Response(pages.live4d.JS, mimetype="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
+@app.route("/maps-embed")
+def maps_embed_page():
+    """The 3D maps tool inside the Drone page's map panel (3D MAP switch): no top bar; links open full pages."""
+    return Response('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<base target="_top"><link rel="stylesheet" href="/hud.css"><style>body{background:#020a10}.hud-main{padding:12px}'
+                    '.page-head{display:none}</style></head><body>' + pages.maps.BODY + '</body></html>', mimetype="text/html")
+
+
 @app.route("/safety")
 def safety_page():
     return Response(SAFETY_PAGE, mimetype="text/html")
@@ -7979,6 +7986,8 @@ def api_clear_all_events():
 # ============================================================
 
 from pages.main_page import PAGE  # noqa: E402
+CAMERA_FEED_SWITCH = ('<button type="button" class="feed-switch" data-feed-switch="main" aria-pressed="true" '
+                      'title="Show or hide this live feed">LIVE FEED <span class="knob"></span></button>')
 
 
 PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard"))
@@ -8067,7 +8076,7 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True}
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
     except Exception:return dict(DEFAULT_CUSTOMER_SETTINGS)
@@ -8081,6 +8090,21 @@ def _save_customer_settings(data):
 SETTINGS_PAGE = hud_page("Settings", r"""
 <main class="hud-main narrow">
 <div class="page-head"><div><div class="page-kicker">Configuration</div><h1 class="page-title">Settings</h1><div class="page-sub">Simple controls for AI, cameras and drones.</div></div></div>
+<style>.set-hub{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:16px}
+.set-hub a{display:flex;flex-direction:column;gap:4px;padding:14px;border:1px solid #155879;border-radius:5px;background:#05131d;color:#e9f8ff;text-decoration:none}
+.set-hub a:hover{border-color:#36cfff;box-shadow:0 0 12px rgba(53,203,255,.16)}
+.set-hub b{font-size:13px;letter-spacing:.5px}.set-hub span{font-size:20px;color:#5bd9ff}.set-hub small{color:#6d8b9d;font-size:11px}</style>
+<nav class="set-hub">
+<a href="/#history"><span>◷</span><b>Events</b><small>Detections and alerts</small></a>
+<a href="/#face-library"><span>◎</span><b>People</b><small>Known faces</small></a>
+<a href="/#vehicle-library"><span>▱</span><b>Vehicles</b><small>Known plates</small></a>
+<a href="/license"><span>⚿</span><b>Licence</b><small>This PC's licence</small></a>
+<a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
+<a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
+</nav>
+<section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Camera live feed on the dashboard</b><div class="muted">Off: the main camera's live video is not shown (or streamed) on the dashboard.</div></div><input class="toggle" type="checkbox" data-key="dashboard_camera_feed" onchange="save()"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">◎ AI &amp; devices</div><div class="live">LOCAL</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Camera AI</b><div class="muted">Person and vehicle detection</div></div><input class="toggle" type="checkbox" data-key="camera_ai"></div>
 <div class="hud-row"><div><b>Face recognition</b></div><input class="toggle" type="checkbox" data-key="face_ai"></div>
@@ -8403,7 +8427,12 @@ def dashboard():
         if not str(edge_cfg.get("device_token") or "").strip():
             return Response(PAIRING_PAGE, mimetype="text/html")
     events, history_events = _dashboard_context()
-    return render_template_string(PAGE, events=events, history_events=history_events)
+    page = PAGE
+    if not _load_customer_settings().get("dashboard_camera_feed"):
+        # Settings → Dashboard → "Camera live feed": off hides the panel and its switch, so nothing is streamed.
+        page = (page.replace('<div id="cameraFeedPanel">', '<div id="cameraFeedPanel" hidden style="display:none">', 1)
+                .replace(CAMERA_FEED_SWITCH, "", 1))
+    return render_template_string(page, events=events, history_events=history_events)
 
 @app.route("/api/license", methods=["GET", "POST"])
 def api_license():

@@ -1,6 +1,6 @@
 # Drone 3D site maps
 
-The **3D Maps** tab of the Windows edge dashboard turns a drone flight into:
+The 3D site maps tool (Drone tab → **Map** panel → **3D MAP** switch) turns a drone flight into:
 
 - a **3D textured model** of the site, viewed in the browser: turn, zoom, top view, and **measure** distances and heights;
 - an **orthophoto**: an up-to-date, map-accurate aerial photo shown over the satellite map;
