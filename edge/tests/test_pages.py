@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-PAGES = ["/", "/drone-control", "/drone-control?drone=drone", "/drone-grid", "/virtual-drones", "/maps", "/safety", "/settings", "/license",
+PAGES = ["/", "/drone-control", "/drone-control?drone=drone", "/drone-grid", "/virtual-drones", "/maps", "/maps-embed", "/safety", "/settings", "/license",
          "/setup/add"]
 NODE = shutil.which("node")
 
@@ -27,3 +27,29 @@ def test_page_loads_and_scripts_parse(client, url, tmp_path):
 
 def test_health(client):
     assert client.get("/healthz").get_json()["ok"] is True
+
+
+def test_top_bar_and_settings_hub(client):
+    html = client.get("/settings").get_data(as_text=True)
+    nav = html[html.index('<nav class="hud-nav">'):html.index("</nav>", html.index('<nav class="hud-nav">'))]
+    assert [t for t in ("Dashboard", "Drone", "Virtual drones", "Devices", "Settings") if t in nav] == \
+        ["Dashboard", "Drone", "Virtual drones", "Devices", "Settings"]
+    assert "3D Maps" not in nav and "Flight safety" not in nav and "License" not in nav and "Users" not in nav
+    for href in ("/#history", "/#face-library", "/#vehicle-library", "/license", "/users", "/safety"):
+        assert f'href="{href}"' in html
+    assert 'class="active"><span class="ico">⚙' in client.get("/license").get_data(as_text=True)  # Settings lit
+    drone = client.get("/drone-control").get_data(as_text=True)
+    assert 'id="fsStrip"' in drone and 'id="m3dOn"' in drone and 'id="l4dOn"' in drone
+
+
+def test_dashboard_camera_feed_follows_the_setting(d, client):
+    saved = d._load_customer_settings()
+    try:
+        client.post("/api/customer/settings", json={**saved, "dashboard_camera_feed": False})
+        html = client.get("/").get_data(as_text=True)
+        assert '<div id="cameraFeedPanel" hidden' in html and 'data-feed-switch="main"' not in html
+        client.post("/api/customer/settings", json={**saved, "dashboard_camera_feed": True})
+        html = client.get("/").get_data(as_text=True)
+        assert '<div id="cameraFeedPanel">' in html and 'data-feed-switch="main"' in html
+    finally:
+        client.post("/api/customer/settings", json=saved)

@@ -1,6 +1,7 @@
 # Flight safety
 
-The **Flight safety** tab of the Windows edge dashboard collects the checks made before every automatic flight
+The flight-safety checks (summary in one row at the top of the **Drone** tab; full settings via
+**⚙ Flight safety settings** there, or **Settings → Flight safety**) are the checks made before every automatic flight
 (routes, scheduled patrols, alert responses, 3D-map surveys) and before take-off from the PC. A blocked take-off
 from the Drone page can be overridden after a confirmation; automatic flights cannot. The pilot stays responsible:
 the checks help, they don't replace looking at the sky.
