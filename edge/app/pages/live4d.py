@@ -15,6 +15,9 @@ const COLORS = [0x25c7ff, 0xffd23f, 0x26ee89, 0xff7bd5, 0xff9a3c, 0xa98bff, 0x7d
 const ZONE = {airport: 0xff9a3c, airspace: 0xb36bff};
 const M_LAT = 110540, M_LON = 111320;
 const store = {get(k){try{return JSON.parse(localStorage.getItem(k))}catch(e){return null}}, set(k, v){try{localStorage.setItem(k, JSON.stringify(v))}catch(e){}}};
+// The place every map on this PC looks at (search, Locate me, moving a map): see /mapsearch.js.
+const focusGet = () => { const f = store.get('map-focus'); return f && isFinite(f.lat) && isFinite(f.lon) ? f : null; };
+const focusSet = (lat, lon) => { const f = focusGet(); store.set('map-focus', {lat, lon, zoom: f && f.zoom || 17, at: Date.now()}); };
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[c]);
 
 let st = null;  // one running view
@@ -29,6 +32,7 @@ export function start(box, bar, drone, hooks){
   info.style.cssText = 'position:absolute;left:8px;bottom:8px;z-index:2;background:rgba(3,16,26,.88);border:1px solid #155879;border-radius:4px;padding:5px 8px;color:#9edfff;font:11px Arial;pointer-events:none';
   info.textContent = 'Connecting…';
   box.appendChild(info);
+  box.appendChild(searchBox());
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x020a10);
   scene.fog = new THREE.Fog(0x020a10, 1500, 6000);
@@ -38,6 +42,8 @@ export function start(box, bar, drone, hooks){
   camera.position.set(-120, 110, 160);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
+  // Turning or moving the view by hand saves the place looked at, for the flat map and 3D MAP.
+  controls.addEventListener('end', () => { if (st && st.centre) { const ll = latlon(controls.target); focusSet(ll.lat, ll.lon); } });
   const groups = {zones: new THREE.Group(), aircraft: new THREE.Group(), site: new THREE.Group(), draft: new THREE.Group()};
   Object.values(groups).forEach(g => scene.add(g));
   st = {box, bar, drone, renderer, scene, camera, controls, groups, info, centre: null, drones: {}, follow: store.get('l4d-follow') || drone,
@@ -64,6 +70,68 @@ export function stop(){
   window.removeEventListener('resize', st.size);
   st.renderer.dispose(); st.box.innerHTML = ''; st.bar.innerHTML = '';
   st = null;
+}
+
+// Move the whole scene to another place: new ground there, everything else is redrawn round it.
+function recentre(lat, lon, label){
+  (st.groundObjs || []).forEach(o => st.scene.remove(o));
+  st.centre = {lat, lon}; st.zonesKey = ''; st.siteKey = ''; st.draftKey = ''; st.barKey = '';
+  Object.values(st.drones).forEach(o => { o.routeKey = null; });
+  if (st.follow) { st.follow = ''; store.set('l4d-follow', ''); }
+  st.last = null; ground(); focusSet(lat, lon);
+  st.anim = {t0: performance.now(), ms: 900, fromT: st.controls.target.clone(), toT: new THREE.Vector3(),
+             fromC: st.camera.position.clone(), toC: new THREE.Vector3(-120, 110, 160)};
+  const pin = new THREE.Mesh(new THREE.CylinderGeometry(1.2, 1.2, 40, 10), new THREE.MeshBasicMaterial({color: 0x25c7ff}));
+  pin.position.set(0, 20, 0); st.scene.add(pin);
+  const tag = label && label.length ? labelFor(label.length > 60 ? label.slice(0, 58) + '…' : label, 0x25c7ff) : null;
+  if (tag) { tag.position.set(0, 42, 0); st.scene.add(tag); }
+  setTimeout(() => { if (st) { st.scene.remove(pin); if (tag) st.scene.remove(tag); } }, 20000);
+  poll();
+}
+
+function searchBox(){
+  const w = document.createElement('div');
+  w.style.cssText = 'position:absolute;left:8px;top:8px;z-index:3;font:12px Arial';
+  w.innerHTML = '<div style="display:flex;gap:4px;background:rgba(3,16,26,.92);border:1px solid #155879;border-radius:5px;padding:4px">' +
+    '<input type="search" placeholder="Search address or lat, lon" aria-label="Search" style="width:220px;max-width:46vw;background:#020a10;color:#d9efff;border:1px solid #155879;border-radius:3px;padding:6px 8px;font:12px Arial;outline:none">' +
+    '<button type="button" title="Search" style="background:#05131d;color:#5bd9ff;border:1px solid #155879;border-radius:3px;min-width:30px;cursor:pointer;font:bold 14px Arial">⌕</button>' +
+    '<button type="button" title="Locate me" style="background:#05131d;color:#5bd9ff;border:1px solid #155879;border-radius:3px;min-width:30px;cursor:pointer;font:bold 14px Arial">◎</button></div>' +
+    '<div class="l4d-res" hidden style="margin-top:4px;background:rgba(3,16,26,.96);border:1px solid #155879;border-radius:5px;max-width:300px;overflow:hidden"></div>';
+  ['pointerdown', 'pointerup', 'wheel', 'keydown'].forEach(ev => w.addEventListener(ev, e => e.stopPropagation()));
+  const input = w.querySelector('input'), [go, me] = w.querySelectorAll('button'), list = w.querySelector('.l4d-res');
+  const row = 'padding:7px 9px;color:#cfeeff;border-bottom:1px solid #123447;cursor:pointer';
+  const note = t => { list.hidden = false; list.innerHTML = `<div style="${row};cursor:default;color:#8ba9b8">${esc(t)}</div>`; };
+  const search = async () => {
+    const q = input.value.trim();
+    if (q.length < 3) { note('Type at least 3 letters, or coordinates like 33.89, 35.50'); return; }
+    const m = q.match(/^\s*(-?\d{1,2}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)\s*$/);
+    if (m && Math.abs(+m[1]) <= 90 && Math.abs(+m[2]) <= 180) { list.hidden = true; recentre(+m[1], +m[2], q); return; }
+    note('Searching…');
+    let d;
+    try { d = await fetch('/api/geocode?q=' + encodeURIComponent(q)).then(r => r.json()); } catch (e) { note('No answer from the dashboard.'); return; }
+    if (!d.ok) { note(d.error || 'Search failed.'); return; }
+    if (!d.results.length) { note('Nothing found. Try a street and town, or coordinates.'); return; }
+    list.innerHTML = d.results.map((r, i) => `<div data-i="${i}" style="${row}">${esc(r.name)}</div>`).join('');
+    list.querySelectorAll('[data-i]').forEach(el => el.onclick = () => {
+      const r = d.results[+el.dataset.i]; list.hidden = true; input.value = r.name; recentre(r.lat, r.lon, r.name);
+    });
+    if (d.results.length === 1) list.querySelector('[data-i]').click();
+  };
+  go.onclick = search;
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); search(); } if (e.key === 'Escape') list.hidden = true; });
+  me.onclick = () => {
+    const site = async why => {
+      try { const d = await fetch('/api/safety', {cache: 'no-store'}).then(r => r.json()); const p = d && d.site && d.site.pos;
+        if (p) { recentre(p[0], p[1], 'Site'); note(why + ' Showing the site instead.'); setTimeout(() => list.hidden = true, 4000); return; } } catch (e) {}
+      note(why);
+    };
+    if (!navigator.geolocation) { site('This browser can\'t give a location.'); return; }
+    note('Finding where you are…');
+    navigator.geolocation.getCurrentPosition(p => { list.hidden = true; recentre(p.coords.latitude, p.coords.longitude, `You are here (±${Math.round(p.coords.accuracy)} m)`); },
+      err => site(err.code === 1 ? 'Location is blocked for this page (allow it in the browser\'s address bar).' : 'This computer could not find its location.'),
+      {enableHighAccuracy: true, timeout: 10000, maximumAge: 60000});
+  };
+  return w;
 }
 
 function latlon(v){
@@ -143,7 +211,7 @@ async function poll(){
   try { d = await fetch('/api/live4d?drone=' + encodeURIComponent(st.drone), {cache: 'no-store'}).then(r => r.json()); }
   catch (e) { if (st) st.info.textContent = 'Lost contact with the dashboard'; return; }
   if (!st || !d.ok) { if (st) st.info.textContent = d && d.error || 'No data'; return; }
-  if (!st.centre) { st.centre = d.centre; ground(); }
+  if (!st.centre) { const f = focusGet(); st.centre = f ? {lat: f.lat, lon: f.lon} : d.centre; ground(); }
   zones(d.zones || []);
   site(d.maps || []);
   drones(d.drones || []);
@@ -168,6 +236,7 @@ function ground(){
   plane.rotation.x = -Math.PI / 2; plane.position.set((nw.x + se.x) / 2, -0.2, (nw.z + se.z) / 2);
   st.scene.add(plane);
   const grid = new THREE.GridHelper(4000, 40, 0x155879, 0x0d2c3d); grid.position.y = -0.5; st.scene.add(grid);
+  st.groundObjs = [plane, grid];
   for (let i = -R; i <= R; i++) for (let j = -R; j <= R; j++) {
     const img = new Image();
     img.onload = () => { g.drawImage(img, (i + R) * 256, (j + R) * 256); tex.needsUpdate = true; };
@@ -214,6 +283,7 @@ function site(maps){
 }
 
 // ----- drones: body, heading, height stick, label, trail, the route it is flying -----
+function labelFor(text, color){ return label(text, color); }
 function label(text, color){
   const c = document.createElement('canvas'), g = c.getContext('2d');
   g.font = 'bold 40px Arial';

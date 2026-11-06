@@ -112,7 +112,7 @@ let map=null,data=null,zoneLayer=null,acLayer=null,siteLayer=null,rfLayer=null,p
 function initMap(){map=L.map('fsMap',{maxZoom:20}).setView([20,0],2);
   const sat=L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:20,maxNativeZoom:19,attribution:'Imagery © Esri'});
   const osm=L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,maxNativeZoom:19,attribution:'© OpenStreetMap'}).addTo(map);
-  L.control.layers({'Street map':osm,'Satellite':sat}).addTo(map);window.addMapSearch&&addMapSearch(map);
+  L.control.layers({'Street map':osm,'Satellite':sat}).addTo(map);if(window.addMapSearch&&addMapSearch(map))fitted=true;
   rfLayer=L.layerGroup();zoneLayer=L.layerGroup().addTo(map);acLayer=L.layerGroup().addTo(map);siteLayer=L.layerGroup().addTo(map);
   map.on('click',e=>{if(picking)setPos(picking,e.latlng.lat,e.latlng.lng)})}
 function pick(what){picking=what;$('fsHint').textContent=what==='site'?'CLICK WHERE THE DRONES FLY FROM':'CLICK WHERE THE PILOT STANDS'}

@@ -19,13 +19,24 @@ JS = r"""
   if (!document.getElementById('msr-css')) { const st = document.createElement('style'); st.id = 'msr-css'; st.textContent = css; document.head.appendChild(st); }
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'})[c]);
 
+  // The place being looked at, shared by every map on this PC (flat map, 3D MAP, 4D LIVE, the other tabs): set by a
+  // search, Locate me, or moving a map, so switching views stays on the same spot.
+  const KEY = 'map-focus';
+  window.mapFocus = {
+    get(){ try { const f = JSON.parse(localStorage.getItem(KEY)); return f && isFinite(f.lat) && isFinite(f.lon) ? f : null; } catch (e) { return null; } },
+    set(lat, lon, zoom){ try { localStorage.setItem(KEY, JSON.stringify({lat: +lat, lon: +lon, zoom: zoom || 17, at: Date.now()})); } catch (e) {} },
+    clear(){ try { localStorage.removeItem(KEY); } catch (e) {} },
+  };
+
+  // Returns true when the map was moved to the saved place (the page then skips its own first centring).
   window.addMapSearch = function(map, opts){
-    if (!map || typeof L === 'undefined' || map._msr) return;
+    if (!map || typeof L === 'undefined' || map._msr) return false;
     map._msr = true;
     opts = opts || {};
     let mark = null;
     const show = (lat, lon, label, zoom) => {
       map.setView([lat, lon], zoom || Math.max(map.getZoom(), 17));
+      mapFocus.set(lat, lon, map.getZoom());
       if (mark) map.removeLayer(mark);
       mark = L.circleMarker([lat, lon], {radius: 9, color: '#fff', weight: 2, fillColor: '#25c7ff', fillOpacity: .9}).addTo(map);
       if (label) mark.bindTooltip(esc(label), {permanent: false}).openTooltip();
@@ -77,6 +88,15 @@ JS = r"""
       return box;
     }});
     new Ctl().addTo(map);
+    const saved = mapFocus.get();
+    if (saved && opts.restore !== false) map.setView([saved.lat, saved.lon], saved.zoom || map.getZoom());
+    // Moving the map by hand keeps the shared place up to date (not the page's own automatic moves).
+    let byUser = false;
+    map.on('dragstart zoomstart', e => { if (e.originalEvent || map._msrUser) byUser = true; });
+    map.getContainer().addEventListener('pointerdown', () => { map._msrUser = true; });
+    map.getContainer().addEventListener('wheel', () => { map._msrUser = true; }, {passive: true});
+    map.on('moveend', () => { if (byUser || map._msrUser) { const c = map.getCenter(); mapFocus.set(c.lat, c.lng, map.getZoom()); } byUser = false; map._msrUser = false; });
+    return !!(saved && opts.restore !== false);
   };
 })();
 """
