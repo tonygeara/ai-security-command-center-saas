@@ -76,6 +76,26 @@ jobs:
         run: |
           .venv-build\Scripts\python.exe -m pip install --quiet "pytest>=8,<9"
           .venv-build\Scripts\python.exe -m pytest tests
+      - name: Upgrade test (install, start the app, install again over the running app)
+        run: |
+          $setup = (Get-ChildItem edge\installer\output\AI-Security-Command-Center-Setup-*.exe | Select-Object -First 1).FullName
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\AI Security Command Center\AI-Security-Command-Center.exe'
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$env:RUNNER_TEMP\setup1.log" -Wait -PassThru
+          if ($p.ExitCode) { Get-Content "$env:RUNNER_TEMP\setup1.log" -Tail 40; throw "First install failed ($($p.ExitCode))" }
+          if (-not (Test-Path $exe)) { throw "Not installed: $exe" }
+          # The dashboard keeps the program file in use, the case that made upgrades fail with "DeleteFile failed".
+          Start-Process $exe -ArgumentList '--dashboard'
+          $up = $false
+          foreach ($i in 1..60) { Start-Sleep 2; try { $up = (Invoke-RestMethod http://127.0.0.1:8080/healthz -TimeoutSec 2).ok } catch {}; if ($up) { break } }
+          if (-not $up) { throw 'The installed dashboard did not start' }
+          $p = Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/LOG=$env:RUNNER_TEMP\setup2.log" -Wait -PassThru
+          Get-Content "$env:RUNNER_TEMP\setup2.log" | Select-String -Pattern 'DeleteFile|error|failed' | ForEach-Object { Write-Host $_ }
+          if ($p.ExitCode) { Get-Content "$env:RUNNER_TEMP\setup2.log" -Tail 40; throw "Upgrade over the running app failed ($($p.ExitCode))" }
+          $again = $false
+          foreach ($i in 1..30) { Start-Sleep 2; if (Get-Process -Name 'AI-Security-Command-Center' -ErrorAction SilentlyContinue) { $again = $true; break } }
+          if (-not $again) { throw 'The app was not started again after the upgrade' }
+          Write-Host 'Upgrade over the running app: OK, and the app was started again.'
+          Stop-Process -Name 'AI-Security-Command-Center' -Force -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
         with:
           name: standard-${{ needs.version.outputs.number }}
