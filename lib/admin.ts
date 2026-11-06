@@ -3,7 +3,7 @@
 import type {SupabaseClient} from "@supabase/supabase-js";
 
 // Bump when a new Windows release ships, so PCs on older versions are flagged.
-export const LATEST_APP_VERSION = "11.3.4";
+export const LATEST_APP_VERSION = "11.3.5";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>
 // (private repository: open the links signed in to GitHub).
 export const RELEASE_URL = `https://github.com/tonygeara/ai-security-command-center-saas/releases/tag/edge-v${LATEST_APP_VERSION}`;

@@ -5,25 +5,45 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.net.ConnectException
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.NoRouteToHostException
 import java.net.Socket
+import java.net.SocketTimeoutException
+import java.security.MessageDigest
+import java.security.SecureRandom
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
  * Keeps a connection to the AI Security PC (the "drone link" port): proves it knows the pairing
  * code, sends telemetry 5x per second and carries out the PC's commands. Reconnects by itself.
+ *
+ * If the PC can't be reached at its saved address (new Wi-Fi or router, new DHCP address), the app asks the
+ * local network where the PC is (UDP broadcast to port 8766). Only the PC holding this phone's pairing code
+ * answers, and it signs the answer with that code, so no other device can redirect the drone. The new address
+ * is saved (onHostChanged): no new QR scan is needed.
  */
 class LinkClient(
-    private val host: String,
-    private val port: Int,
+    @Volatile private var host: String,
+    @Volatile private var port: Int,
     private val token: String,
     private val onStatus: (String, Boolean) -> Unit,
     private val onEvent: (String) -> Unit,
+    private val onHostChanged: (String, Int) -> Unit = { _, _ -> },
 ) {
     companion object {
         private const val HEARTBEAT_TIMEOUT_MS = 1500L  // PC silent this long -> give control back to the pilot
+        private const val DISCOVERY_PORT = 8766
+        private const val FIND_AFTER_FAILURES = 2  // connection attempts at the saved address before asking the network
     }
+
+    /** Could not open the connection at all (as opposed to a connection that dropped later). */
+    private class Unreachable(cause: Exception) : Exception(cause.message ?: cause.javaClass.simpleName, cause)
 
     @Volatile private var running = true
     @Volatile private var socket: Socket? = null
@@ -38,22 +58,83 @@ class LinkClient(
     }
 
     private fun loop() {
+        var failures = 0
         while (running) {
             try {
                 session()
+            } catch (e: Unreachable) {
+                failures++
+                onStatus("PC not reachable at $host (${e.message})", false)
             } catch (e: Exception) {
+                failures = 0
                 onStatus("PC not reachable (${e.message ?: e.javaClass.simpleName})", false)
             }
             DroneController.linkLost("PC link lost")
+            if (running && failures >= FIND_AFTER_FAILURES) {
+                onStatus("Looking for the PC on this Wi-Fi…", false)
+                val found = try { findPc() } catch (_: Exception) { null }
+                if (found != null) {
+                    failures = 0
+                    if (found.first != host || found.second != port) {
+                        host = found.first; port = found.second
+                        onEvent("Found the PC at its new address ${found.first}")
+                        onHostChanged(found.first, found.second)
+                        continue  // connect straight away
+                    }
+                }
+            }
             if (running) Thread.sleep(3000)
         }
     }
+
+    /** Ask the local network for the PC that holds this pairing code. Returns (address, port) or null. */
+    private fun findPc(): Pair<String, Int>? {
+        val id = sha256(token).take(16)
+        val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
+        val req = JSONObject().put("t", "where").put("id", id).put("nonce", nonce).toString().toByteArray(Charsets.UTF_8)
+        val targets = mutableSetOf<InetAddress>(InetAddress.getByName("255.255.255.255"))
+        try {
+            NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { ni ->
+                if (ni.isUp && !ni.isLoopback) ni.interfaceAddresses.forEach { a -> a.broadcast?.let { targets.add(it) } }
+            }
+        } catch (_: Exception) {}
+        DatagramSocket().use { ds ->
+            ds.broadcast = true
+            ds.soTimeout = 700
+            repeat(3) {
+                for (t in targets) try { ds.send(DatagramPacket(req, req.size, t, DISCOVERY_PORT)) } catch (_: Exception) {}
+                val until = System.currentTimeMillis() + 1500
+                val buf = ByteArray(1024)
+                while (System.currentTimeMillis() < until) {
+                    val pkt = DatagramPacket(buf, buf.size)
+                    try { ds.receive(pkt) } catch (_: SocketTimeoutException) { continue }
+                    val msg = try { JSONObject(String(pkt.data, 0, pkt.length, Charsets.UTF_8)) } catch (_: Exception) { continue }
+                    if (msg.optString("t") != "here" || msg.optString("id") != id) continue
+                    val h = msg.optString("host"); val p = msg.optInt("port", 0)
+                    // Only the PC that knows the pairing code can sign this; anything else is ignored.
+                    if (h.isEmpty() || p !in 1..65535 || msg.optString("sig") != hmac(token, "here|$nonce|$h|$p")) continue
+                    return h to p
+                }
+            }
+        }
+        return null
+    }
+
+    private fun sha256(s: String): String =
+        MessageDigest.getInstance("SHA-256").digest(s.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
 
     private fun session() {
         onStatus("Connecting to $host:$port…", false)
         val s = Socket()
         s.tcpNoDelay = true
-        s.connect(InetSocketAddress(host, port), 5000)
+        try {
+            s.connect(InetSocketAddress(host, port), 5000)
+        } catch (e: Exception) {
+            try { s.close() } catch (_: Exception) {}
+            if (e is ConnectException || e is SocketTimeoutException || e is NoRouteToHostException ||
+                e is java.net.UnknownHostException || e is java.net.SocketException) throw Unreachable(e)
+            throw e
+        }
         s.soTimeout = 5000
         socket = s
         val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
@@ -62,7 +143,7 @@ class LinkClient(
         val challenge = JSONObject(reader.readLine() ?: throw IllegalStateException("PC closed the connection"))
         val nonce = challenge.getString("nonce")
         send(out, JSONObject().put("t", "hello").put("mac", hmac(token, nonce))
-            .put("device", "${Build.MANUFACTURER} ${Build.MODEL}").put("app", "1.0"))
+            .put("device", "${Build.MANUFACTURER} ${Build.MODEL}").put("app", "1.1"))
         val welcome = JSONObject(reader.readLine() ?: throw IllegalStateException("PC closed the connection"))
         if (welcome.optString("t") != "welcome") {
             running = false  // wrong pairing code or no license: don't keep retrying

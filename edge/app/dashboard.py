@@ -141,7 +141,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.3.4"
+APP_VERSION = "V11.3.5"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -4914,9 +4914,73 @@ def _drone_link_server():
         threading.Thread(target=_drone_session, args=(conn, addr), daemon=True).start()
 
 
+# When the PC moves to another Wi-Fi or router, its address changes and the phone can't find it at the address in
+# its QR code. The Drone Link app then asks the local network (UDP broadcast); this PC answers only a phone that holds
+# one of its pairing codes, and signs the answer with that code, so no other device can redirect a drone.
+DRONE_DISCOVERY_PORT = int(os.environ.get("AI_SECURITY_DRONE_DISCOVERY_PORT", "8766"))
+
+
+def _token_id(token):
+    import hashlib
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
+def _local_ip_towards(ip):
+    """This PC's address on the network that reaches ip (the right one when the PC has several adapters)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((ip, 9))
+            return s.getsockname()[0]
+    except OSError:
+        return _lan_ip()
+
+
+def discovery_answer(data, sender_ip, local_ip=None):
+    """The reply to a Drone Link phone looking for this PC, or None to stay silent."""
+    import hashlib, hmac
+    try:
+        msg = json.loads(data.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(msg, dict) or msg.get("t") != "where":
+        return None
+    tid, nonce = str(msg.get("id") or ""), str(msg.get("nonce") or "")
+    if len(tid) != 16 or not 8 <= len(nonce) <= 64:
+        return None
+    for slot in drone_slots():
+        token = drone_link_token(slot=slot)
+        if hmac.compare_digest(_token_id(token), tid):
+            host = local_ip or _local_ip_towards(sender_ip)
+            sig = hmac.new(token.encode(), f"here|{nonce}|{host}|{DRONE_LINK_PORT}".encode(), hashlib.sha256).hexdigest()
+            _drone_event(f"Phone at {sender_ip} found this PC again at {host}", slot)
+            return json.dumps({"t": "here", "id": tid, "host": host, "port": DRONE_LINK_PORT, "sig": sig},
+                              separators=(",", ":")).encode()
+    return None
+
+
+def _drone_discovery_server():
+    try:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        srv.bind(("0.0.0.0", DRONE_DISCOVERY_PORT))
+    except OSError as e:
+        print(f"Drone discovery port {DRONE_DISCOVERY_PORT} unavailable: {e}")
+        return
+    while True:
+        try:
+            data, addr = srv.recvfrom(2048)
+            answer = discovery_answer(data, addr[0])
+            if answer:
+                srv.sendto(answer, addr)
+        except OSError:
+            time.sleep(0.5)
+        except Exception as e:
+            print("Drone discovery error:", e)
+
+
 def start_drone_link():
     drone_link_token()
     threading.Thread(target=_drone_link_server, daemon=True).start()
+    threading.Thread(target=_drone_discovery_server, daemon=True).start()
     threading.Thread(target=_drone_heartbeat_worker, daemon=True).start()
 
 
@@ -8748,9 +8812,10 @@ def _save_recovery_state(s):
 
 def _camera_source_parts(url):
     # Do not log returned user/password.
-    from urllib.parse import urlsplit
+    from urllib.parse import urlsplit, unquote
     u=urlsplit(url)
-    return u.username or "",u.password or "",u.hostname or "",u.port or 554,u.path or "/stream1"
+    # urlsplit leaves %-escapes in place: decode them so rebuilding the URL (which quotes them) keeps the password right.
+    return unquote(u.username or ""),unquote(u.password or ""),u.hostname or "",u.port or 554,u.path or "/stream1"
 
 def _rtsp_auth_probe(url, timeout=4):
     """Use OpenCV only as a last-mile stream check; URL is never logged."""
@@ -8827,44 +8892,6 @@ def _wait_for_frigate(timeout=45):
         time.sleep(2)
     return False
 
-def _safe_update_camera_host(camera_name,new_ip,new_stream=None):
-    """Patch only the go2rtc source host/path. Preserve every unrelated Frigate setting."""
-    path=_frigate_config_path()
-    if not path:return False,"Frigate config not found"
-    with open(path,"r",encoding="utf-8") as f: cfg=yaml.safe_load(f) or {}
-    streams=((cfg.get("go2rtc") or {}).get("streams") or {})
-    source=streams.get(camera_name)
-    if isinstance(source,list) and source: old=source[0]
-    elif isinstance(source,str): old=source
-    else:return False,"Camera source not found"
-    user,pw,host,port,stream=_camera_source_parts(old)
-    if not user or pw is None:return False,"Camera credentials are not configured"
-    stream=new_stream or stream
-    from urllib.parse import quote
-    # Quote credentials for URI safety without changing what is stored in the camera.
-    new=f"rtsp://{quote(user,safe='')}:{quote(pw,safe='')}@{new_ip}:{port}{stream}"
-    candidate=copy.deepcopy(cfg)
-    if isinstance(source,list):candidate["go2rtc"]["streams"][camera_name][0]=new
-    else:candidate["go2rtc"]["streams"][camera_name]=new
-    # Validate serialization before touching live file.
-    rendered=yaml.safe_dump(candidate,sort_keys=False,allow_unicode=True)
-    yaml.safe_load(rendered)
-    backup=_backup_file(path)
-    tmp=path+".v105.tmp"
-    try:
-        with open(tmp,"w",encoding="utf-8") as f:f.write(rendered)
-        os.replace(tmp,path)
-        if not _docker_restart_frigate() or not _wait_for_frigate():
-            shutil.copy2(backup,path)
-            _docker_restart_frigate()
-            _wait_for_frigate(30)
-            return False,"Frigate did not recover after update; previous configuration restored"
-        return True,backup
-    except Exception as e:
-        try:shutil.copy2(backup,path);_docker_restart_frigate()
-        except Exception:pass
-        return False,"Update failed; previous configuration restored"
-
 def _discover_same_camera(camera_name, expected_mac, old_url):
     user,pw,old_ip,port,old_stream=_camera_source_parts(old_url)
     if not user or pw is None:return None
@@ -8896,82 +8923,184 @@ def _discover_same_camera(camera_name, expected_mac, old_url):
         return {"ip":ip,"mac":neighbors.get(ip),"stream":old_stream,"adapter":adapter,"stream_ready":False}
     return None
 
-def _recover_camera(camera_name):
-    state=_load_recovery_state()
-    rec=state.setdefault("cameras",{}).setdefault(camera_name,{})
-    rec.update({"status":"checking","last_check":int(time.time())})
-    _save_recovery_state(state)
-    path=_frigate_config_path()
-    if not path:return {"ok":False,"state":"config_missing","message":"Frigate config.yaml/config.yml was not found"}
+def _rtsp_entry(src):
+    """(index, url) of a go2rtc stream's RTSP source, or (None, None)."""
+    items = src if isinstance(src, list) else [src]
+    for i, u in enumerate(items):
+        if isinstance(u, str) and u.lower().startswith("rtsp://"):
+            return i, u
+    return None, None
+
+
+def _lan_cameras(cfg):
+    """{name: (index, url)}: every camera and recorder channel fed straight from a device on the local network
+    (drones and this PC's own relays are left out)."""
+    out = {}
+    for name, src in ((cfg.get("go2rtc") or {}).get("streams") or {}).items():
+        name = str(name)
+        if _is_drone_name(name) or name.startswith(VIRTUAL_PREFIX):
+            continue
+        i, url = _rtsp_entry(src)
+        if url is None:
+            continue
+        try:
+            ip = ipaddress.ip_address(_camera_source_parts(url)[2])
+        except ValueError:
+            continue
+        if ip.is_private and not ip.is_loopback:
+            out[name] = (i, url)
+    return out
+
+
+def _safe_update_camera_hosts(updates):
+    """Point cameras at new addresses: updates = {name: (new_ip, new_path or None)}. Only the source host (and path)
+    change; one config write, one Frigate restart, and everything is put back if Frigate doesn't come back."""
+    path = _frigate_config_path()
+    if not path:
+        return False, "Frigate config not found"
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    from urllib.parse import quote
+    candidate = copy.deepcopy(cfg)
+    streams = (candidate.get("go2rtc") or {}).get("streams") or {}
+    for name, (new_ip, new_path) in updates.items():
+        i, old = _rtsp_entry(streams.get(name))
+        if old is None:
+            return False, f"Camera source not found: {name}"
+        user, pw, _host, port, stream = _camera_source_parts(old)
+        query = old.split("?", 1)[1] if "?" in old else ""  # recorder channels keep e.g. ?channel=2&subtype=0
+        auth = f"{quote(user, safe='')}:{quote(pw, safe='')}@" if user else ""
+        new = f"rtsp://{auth}{new_ip}:{port}{new_path or stream}" + (f"?{query}" if query and "?" not in (new_path or "") else "")
+        if isinstance(streams[name], list):
+            streams[name][i] = new
+        else:
+            streams[name] = new
+    rendered = yaml.safe_dump(candidate, sort_keys=False, allow_unicode=True)
+    yaml.safe_load(rendered)
+    backup = _backup_file(path)
+    tmp = path + ".recovery.tmp"
     try:
-        cfg=yaml.safe_load(open(path,encoding="utf-8")) or {}
-        source=((cfg.get("go2rtc") or {}).get("streams") or {}).get(camera_name)
-        url=source[0] if isinstance(source,list) and source else source
-        if not url:return {"ok":False,"state":"source_missing"}
-        user,pw,ip,port,stream=_camera_source_parts(url)
-        state=_load_recovery_state(); rec=state.setdefault("cameras",{}).setdefault(camera_name,rec)
-        # V10.9: detect LAN changes and never authenticate against a stale/reused IP.
-        current_net=_network_signature()
-        previous_net=rec.get("network") or {}
-        # Compare only values both checks actually read: under heavy CPU load the Windows
-        # network query can time out and return a blank gateway, which looked like a
-        # network change and triggered needless camera rediscovery and Frigate restarts.
-        def _changed(key):
-            a, b = previous_net.get(key), current_net.get(key)
-            return bool(a and b and a != b)
-        network_changed=bool(previous_net and (_changed("gateway") or _changed("network")))
-        expected_mac=(rec.get("mac") or "").lower()
-        current_mac=None
-        if _ip_on_active_lan(ip):
-            # Populate ARP first; this is safe and does not open RTSP.
-            try: run_background_command(["ping","-n","1","-w","120",ip],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=1)
-            except Exception: pass
-            current_mac=(_neighbor_mac(ip) or "").lower()
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(rendered)
+        os.replace(tmp, path)
+        if not _docker_restart_frigate() or not _wait_for_frigate():
+            shutil.copy2(backup, path)
+            _docker_restart_frigate()
+            _wait_for_frigate(30)
+            return False, "Frigate did not recover after the update; the previous configuration was restored"
+        return True, backup
+    except Exception:
+        try:
+            shutil.copy2(backup, path)
+            _docker_restart_frigate()
+        except Exception:
+            pass
+        return False, "Update failed; the previous configuration was restored"
 
-        identity_ok=(not expected_mac) or (current_mac and current_mac==expected_mac)
-        # Frigate receiving frames proves the stream works. Opening another RTSP session
-        # here often missed its 3 s window (Tapo is slow to start sessions and limits how
-        # many it allows), which sent every check into a full 254-address ping sweep.
-        stream_ok = frigate_camera_online() or _rtsp_auth_probe(url,6)
-        if (not network_changed) and _ip_on_active_lan(ip) and identity_ok and _port(ip,port,.5) and stream_ok:
-            rec.update({"last_ip":ip,"stream":stream,"status":"online","last_ok":int(time.time()),"network":current_net})
-            if current_mac:rec["mac"]=current_mac
-            _save_recovery_state(state)
-            return {"ok":True,"state":"online","ip":ip}
 
-        # Same camera, new Wi-Fi/router/DHCP address: discover by learned MAC and working credentials.
-        rec.update({"status":"network_changed" if network_changed else "recovering","network":current_net})
-        _save_recovery_state(state)
-        found=_discover_same_camera(camera_name,expected_mac or None,url)
-        if not found:
-            rec.update({"status":"offline","last_check":int(time.time())});_save_recovery_state(state)
-            return {"ok":False,"state":"offline"}
-        if not found.get("stream_ready",True):
-            rec.update({"last_ip":found["ip"],"mac":found["mac"],"status":"stream_unavailable","last_check":int(time.time())})
-            _save_recovery_state(state)
-            return {"ok":False,"state":"stream_unavailable","ip":found["ip"],"message":"Camera identified; RTSP video is unavailable. Enable RTSP and check the camera account."}
-        if found["ip"]==ip:
-            # Same camera at the same address: a probe just timed out (busy PC or network blip).
-            # Never rewrite the config or switch to another stream for that; keep the user's stream.
-            rec.update({"last_ip":ip,"mac":found.get("mac") or rec.get("mac"),"stream":stream,
-                        "status":"online","last_ok":int(time.time()),"network":_network_signature()})
-            _save_recovery_state(state)
-            return {"ok":True,"state":"online","ip":ip}
-        ok,msg=_safe_update_camera_host(camera_name,found["ip"],found["stream"])
-        if ok:
-            rec.update({"last_ip":found["ip"],"mac":found.get("mac") or rec.get("mac"),
-                        "stream":found["stream"],"status":"reconnected","last_ok":int(time.time()),
-                        "network":_network_signature()})
-            _save_recovery_state(state)
-            return {"ok":True,"state":"reconnected","ip":found["ip"],"stream":found["stream"]}
-        return {"ok":False,"state":"rollback","message":msg}
-    except Exception as e:
-        safe_type=type(e).__name__
-        safe_msg=str(e)
-        safe_msg=re.sub(r"rtsp://[^\\s]+","rtsp://[REDACTED]",safe_msg,flags=re.I)
-        safe_msg=re.sub(r"(?i)(password|passwd|token|secret)\\s*[=:]\\s*[^\\s,;]+",r"\\1=[REDACTED]",safe_msg)
-        print(f"[V10.5.2 recovery] {safe_type}: {safe_msg}")
-        return {"ok":False,"state":"error","error_type":safe_type,"message":safe_msg[:240]}
+def _safe_update_camera_host(camera_name, new_ip, new_stream=None):
+    return _safe_update_camera_hosts({camera_name: (new_ip, new_stream)})
+
+
+def _recover_all(only=None):
+    """One pass over every camera and recorder on the local network.
+
+    A device still at its address is marked online and its MAC (the network card's fixed id) is learned. A device that
+    moved (new Wi-Fi or router, new DHCP address) is found again by that MAC with one shared network sweep, checked,
+    and all moves are written in one config update with one Frigate restart. A device whose MAC was never learned is
+    not searched for: its password is never sent to unknown devices. Recorder channels share one address and move
+    together.
+    """
+    path = _frigate_config_path()
+    if not path:
+        return {"ok": False, "state": "config_missing", "message": "Frigate config.yaml/config.yml was not found", "cameras": {}}
+    with open(path, encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    cams = _lan_cameras(cfg)
+    if only:
+        cams = {n: v for n, v in cams.items() if n in only}
+    state = _load_recovery_state()
+    recs = state.setdefault("cameras", {})
+    now, net = int(time.time()), _network_signature()
+    groups = {}
+    for name, (_i, url) in cams.items():
+        groups.setdefault(_camera_source_parts(url)[2], []).append(name)
+    neighbors, sweeps, updates, results = None, 0, {}, {}
+
+    def mark(names, **fields):
+        for n in names:
+            recs.setdefault(n, {}).update(last_check=now, **fields)
+            results[n] = fields.get("status")
+
+    for ip, names in groups.items():
+        group = [recs.setdefault(n, {}) for n in names]
+        prev = next((r.get("network") for r in group if r.get("network")), None) or {}
+        changed = any(prev.get(k) and net.get(k) and prev[k] != net[k] for k in ("gateway", "network"))
+        mac = next((r.get("mac") for r in group if r.get("mac")), "").lower()
+        url = cams[names[0]][1]
+        _user, _pw, _h, port, stream = _camera_source_parts(url)
+        on_lan, cur_mac = _ip_on_active_lan(ip), None
+        if on_lan:
+            try:
+                run_background_command(["ping", "-n", "1", "-w", "120", ip], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            except Exception:
+                pass
+            cur_mac = (_neighbor_mac(ip) or "").lower()
+        same_device = (not mac) or cur_mac == mac
+        if not changed and on_lan and same_device and _port(ip, port, .5) and \
+                (any(frigate_camera_online(n) for n in names) or _rtsp_auth_probe(url, 6)):
+            mark(names, status="online", last_ip=ip, last_ok=now, network=net, **({"mac": cur_mac} if cur_mac else {}))
+            continue
+        if not mac:
+            mark(names, status="offline", network=net,
+                 note="Not seen online on this network yet, so it can't be found again automatically. Add it again in Devices.")
+            continue
+        new_ip = next((a for a, m in (neighbors or {}).items() if m.lower() == mac), None)
+        while new_ip is None and sweeps < 2:  # one shared sweep; a second one if Windows is still switching networks
+            neighbors = _arp_neighbors_on_active_lan()[1]
+            sweeps += 1
+            new_ip = next((a for a, m in neighbors.items() if m.lower() == mac), None)
+        if new_ip is None:
+            mark(names, status="offline", network=net)
+            continue
+        if new_ip == ip:  # same device, same address: a check just timed out (busy PC or network blip)
+            mark(names, status="online", last_ip=ip, last_ok=now, network=net)
+            continue
+        if not _port(new_ip, port, .5):
+            mark(names, status="stream_unavailable", last_ip=new_ip, network=net)
+            continue
+        from urllib.parse import quote
+        u, p = _camera_source_parts(url)[:2]
+        auth = f"{quote(u, safe='')}:{quote(p, safe='')}@" if u else ""
+        query = ("?" + url.split("?", 1)[1]) if "?" in url else ""
+        paths = [stream] + ([q for q in ("/stream1", "/stream2") if q != stream] if len(names) == 1 else [])
+        good = next((q for q in paths if _rtsp_auth_probe(f"rtsp://{auth}{new_ip}:{port}{q}{query}", 8 if q == stream else 4)), None)
+        if good is None:
+            mark(names, status="stream_unavailable", last_ip=new_ip, network=net,
+                 note="Found at its new address, but its video didn't answer. Check RTSP is on and the camera account.")
+            continue
+        for n in names:
+            updates[n] = (new_ip, good if len(names) == 1 else None)
+        mark(names, status="moving", last_ip=new_ip, network=net)
+    if updates:
+        ok, msg = _safe_update_camera_hosts(updates)
+        for n, (new_ip, _p) in updates.items():
+            recs[n].update(status="reconnected" if ok else "rollback", **({"last_ok": now} if ok else {"note": msg}))
+            results[n] = recs[n]["status"]
+    _save_recovery_state(state)
+    return {"ok": all(v in ("online", "reconnected") for v in results.values()), "state": "checked",
+            "cameras": results, "moved": sorted(updates)}
+
+
+def _recover_camera(camera_name):
+    """One camera (the older API and the Settings check); the recovery loop handles them all."""
+    r = _recover_all(only=[camera_name])
+    st = r.get("cameras", {}).get(camera_name)
+    if st is None:
+        return {"ok": False, "state": r.get("state") if not r.get("cameras") else "source_missing"}
+    rec = (_load_recovery_state().get("cameras") or {}).get(camera_name) or {}
+    return {"ok": st in ("online", "reconnected"), "state": st, "ip": rec.get("last_ip"), **({"message": rec["note"]} if rec.get("note") else {})}
+
 
 def _recovery_loop():
     # Delay startup so Flask/Frigate can settle.
@@ -8979,9 +9108,12 @@ def _recovery_loop():
     while not _recovery_stop.is_set():
         try:
             if _recovery_lock.acquire(blocking=False):
-                try:_recover_camera("tony")
-                finally:_recovery_lock.release()
-        except Exception:pass
+                try:
+                    _recover_all()
+                finally:
+                    _recovery_lock.release()
+        except Exception as e:
+            print("Camera recovery error:", type(e).__name__)
         _recovery_stop.wait(RECOVERY_INTERVAL_SECONDS)
 
 @app.route("/api/recovery/status")
@@ -8999,11 +9131,11 @@ def recovery_test_discovery():
     if not path:return jsonify({"ok":False,"state":"config_missing"}),404
     try:
         cfg=yaml.safe_load(open(path,encoding="utf-8")) or {}
-        source=((cfg.get("go2rtc") or {}).get("streams") or {}).get("tony")
+        source=((cfg.get("go2rtc") or {}).get("streams") or {}).get(CAMERA_NAME)
         url=source[0] if isinstance(source,list) and source else source
         if not url:return jsonify({"ok":False,"state":"source_missing"}),404
-        st=_load_recovery_state(); rec=(st.get("cameras") or {}).get("tony") or {}
-        found=_discover_same_camera("tony",rec.get("mac"),url)
+        st=_load_recovery_state(); rec=(st.get("cameras") or {}).get(CAMERA_NAME) or {}
+        found=_discover_same_camera(CAMERA_NAME,rec.get("mac"),url)
         if not found:return jsonify({"ok":False,"state":"not_found"}),404
         return jsonify({"ok":True,"state":"identified","ip":found["ip"],"mac":found.get("mac"),"stream":found["stream"],
                         "adapter":found.get("adapter")})
@@ -9020,14 +9152,14 @@ def recovery_simulate_ip_change():
     try:
         with open(path,"r",encoding="utf-8") as f:
             cfg=yaml.safe_load(f) or {}
-        source=((cfg.get("go2rtc") or {}).get("streams") or {}).get("tony")
+        source=((cfg.get("go2rtc") or {}).get("streams") or {}).get(CAMERA_NAME)
         old=source[0] if isinstance(source,list) and source else source
         if not old:
             return jsonify({"ok":False,"state":"source_missing"}),404
         user,pw,old_ip,port,old_stream=_camera_source_parts(old)
         st=_load_recovery_state()
-        rec=(st.get("cameras") or {}).get("tony") or {}
-        found=_discover_same_camera("tony",rec.get("mac"),old)
+        rec=(st.get("cameras") or {}).get(CAMERA_NAME) or {}
+        found=_discover_same_camera(CAMERA_NAME,rec.get("mac"),old)
         if not found:
             return jsonify({"ok":False,"state":"camera_not_identified"}),404
         from urllib.parse import quote
@@ -9035,9 +9167,9 @@ def recovery_simulate_ip_change():
         candidate=copy.deepcopy(cfg)
         fake=f"rtsp://{quote(user,safe='')}:{quote(pw,safe='')}@{simulated_ip}:{port}{found['stream']}"
         if isinstance(source,list):
-            candidate["go2rtc"]["streams"]["tony"][0]=fake
+            candidate["go2rtc"]["streams"][CAMERA_NAME][0]=fake
         else:
-            candidate["go2rtc"]["streams"]["tony"]=fake
+            candidate["go2rtc"]["streams"][CAMERA_NAME]=fake
         rendered=yaml.safe_dump(candidate,sort_keys=False,allow_unicode=True)
         yaml.safe_load(rendered)
         # Verify rollback source remains intact in memory. No disk write occurs.
@@ -9064,7 +9196,7 @@ def recovery_run():
     if not _recovery_lock.acquire(blocking=False):
         return jsonify({"ok":True,"state":"already_running","message":"Automatic recovery is already checking the camera."}),200
     try:
-        return jsonify(_recover_camera("tony")),200
+        return jsonify(_recover_all()),200
     finally:
         _recovery_lock.release()
 

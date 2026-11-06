@@ -46,6 +46,7 @@ def d(tmp_path_factory):
     sys.path.insert(0, APP)
     import dashboard
     dashboard.DRONE_LINK_PORT = _free_port()
+    dashboard.DRONE_DISCOVERY_PORT = _free_port()
     dashboard._frigate_camera_names = lambda: ["front", "drone"]
     dashboard.onprem_mode = lambda: True
     dashboard.drone_control_allowed = lambda: True
