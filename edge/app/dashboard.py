@@ -4958,13 +4958,22 @@ def discovery_answer(data, sender_ip, local_ip=None):
     return None
 
 
+discovery_state = {"bound": threading.Event(), "port": None, "error": ""}
+
+
 def _drone_discovery_server():
     try:
         srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if hasattr(socket, "SIO_UDP_CONNRESET"):
+            # Windows: a reply to a phone that has gone makes the next receive fail ("connection reset"); turn that off.
+            srv.ioctl(socket.SIO_UDP_CONNRESET, False)
         srv.bind(("0.0.0.0", DRONE_DISCOVERY_PORT))
     except OSError as e:
-        print(f"Drone discovery port {DRONE_DISCOVERY_PORT} unavailable: {e}")
+        discovery_state["error"] = f"Drone discovery port {DRONE_DISCOVERY_PORT} unavailable: {e}"
+        print(discovery_state["error"])
         return
+    discovery_state["port"] = DRONE_DISCOVERY_PORT
+    discovery_state["bound"].set()
     while True:
         try:
             data, addr = srv.recvfrom(2048)
