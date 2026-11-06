@@ -21,6 +21,12 @@ def _free_port():
         return s.getsockname()[1]
 
 
+def _free_udp_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind(("0.0.0.0", 0))
+        return s.getsockname()[1]
+
+
 def wait_until(fn, timeout=30.0, step=0.25):
     end = time.time() + timeout
     while time.time() < end:
@@ -46,7 +52,7 @@ def d(tmp_path_factory):
     sys.path.insert(0, APP)
     import dashboard
     dashboard.DRONE_LINK_PORT = _free_port()
-    dashboard.DRONE_DISCOVERY_PORT = _free_port()
+    dashboard.DRONE_DISCOVERY_PORT = _free_udp_port()
     dashboard._frigate_camera_names = lambda: ["front", "drone"]
     dashboard.onprem_mode = lambda: True
     dashboard.drone_control_allowed = lambda: True

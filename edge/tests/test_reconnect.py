@@ -106,8 +106,10 @@ def test_drone_phone_finds_the_pc_again(d):
     assert d.discovery_answer(b"not json", "1.2.3.4") is None
     assert d.discovery_answer(json.dumps({"t": "where", "id": tid}).encode(), "1.2.3.4") is None  # no nonce: no answer
     # the real UDP service started with the drone link answers over the network
+    assert d.discovery_state["bound"].wait(10), d.discovery_state["error"] or "discovery service not started"
+    assert d.discovery_state["port"] == d.DRONE_DISCOVERY_PORT
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.settimeout(3)
-        s.sendto(ask, ("127.0.0.1", d.DRONE_DISCOVERY_PORT))
+        s.sendto(ask, ("127.0.0.1", d.discovery_state["port"]))
         reply = json.loads(s.recvfrom(2048)[0])
     assert reply["t"] == "here" and reply["host"] == "127.0.0.1"
