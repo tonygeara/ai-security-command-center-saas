@@ -56,3 +56,10 @@ Then **Stop simulator** before real flights.
   returns to the pilot after 1.5 s. DJI's own Return-to-Home still applies on signal loss/low battery.
 - Limits enforced on the phone: 120 m height, 500 m from home, speed ≤ 50 %.
 - Lebanon: get permission before flying and always keep the drone in sight.
+
+## Changing Wi-Fi or router (app 1.1)
+Connect the phone to the same new Wi-Fi as the PC. If the PC has a new address, the app finds it by itself after
+two failed attempts (it asks the network on UDP port 8766; only the PC with this phone's pairing code answers, and
+signs the answer) and remembers it, so no new QR scan is needed. If it still can't find the PC (a network that
+blocks broadcasts, such as some guest Wi-Fi), scan the QR code on the Drone page again.
+

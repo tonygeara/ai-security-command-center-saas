@@ -114,7 +114,9 @@ class MainActivity : AppCompatActivity() {
         link?.stop()
         link = LinkClient(host, p.getInt("port", 8765), p.getString("token", "") ?: "",
             onStatus = { text, ok -> runOnUiThread { pcText = "PC: $text"; pcOk = ok; render() } },
-            onEvent = { msg -> runOnUiThread { log(msg) } }).also { it.start() }
+            onEvent = { msg -> runOnUiThread { log(msg) } },
+            // The PC moved (new Wi-Fi, router or address): remember where it is now, no new QR scan needed.
+            onHostChanged = { h, port -> prefs().edit().putString("host", h).putInt("port", port).apply() }).also { it.start() }
     }
 
     private fun render() {
