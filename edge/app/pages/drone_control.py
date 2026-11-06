@@ -364,16 +364,18 @@ let l4d=null;
 function storeGet(k){try{return localStorage.getItem(k)}catch(e){return null}}
 function storeSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 // 3D MAP: the 3D site-maps tool (plan an area, fly it, process, open the model) in place of the flat map.
+// Back on a view that was already open: go to the place last looked at (search, Locate me, moving any map or 4D).
+function goFocus(m){const f=window.mapFocus&&mapFocus.get();if(f&&m)m.setView([f.lat,f.lon],f.zoom||m.getZoom())}
 function toggle3d(on){$('m3dOn').checked=on;storeSet('m3d-on',on?'1':'0');
   if(on&&$('l4dOn').checked)toggle4d(false);
-  const f=$('m3d');if(on&&!f.src)f.src='/maps-embed';
+  const f=$('m3d');if(on&&!f.src)f.src='/maps-embed';else if(on)try{goFocus(f.contentWindow.map)}catch(e){}
   f.style.display=on?'block':'none';$('dcMap').style.display=on||$('l4dOn').checked?'none':'';
-  if(!on&&map)setTimeout(()=>map.invalidateSize(),50)}
+  if(!on&&map&&!$('l4dOn').checked)setTimeout(()=>{map.invalidateSize();goFocus(map)},50)}
 if(storeGet('m3d-on')==='1')setTimeout(()=>toggle3d(true),300);
 async function toggle4d(on){$('l4dOn').checked=on;storeSet('l4d-on',on?'1':'0');
   if(on&&$('m3dOn').checked)toggle3d(false);
   $('dcMap').style.display=on?'none':'';$('l4d').style.display=on?'block':'none';$('l4dBar').style.display=on?'flex':'none';
-  if(!on){if(l4d)l4d.stop();if(map)setTimeout(()=>map.invalidateSize(),50);return}
+  if(!on){if(l4d)l4d.stop();if(map&&!$('m3dOn').checked)setTimeout(()=>{map.invalidateSize();goFocus(map)},50);return}
   try{l4d=l4d||await import('/live4d.js');l4d.start($('l4d'),$('l4dBar'),DRONE,{click:mapClick,draft:()=>({route,alt:+$('rtAlt').value||30,zone:nfPts})})}
   catch(e){$('l4d').innerHTML='<p class="muted" style="padding:14px">The 3D view could not start in this browser: '+esc(e.message||e)+'</p>'}}
 if(storeGet('l4d-on')==='1'&&storeGet('m3d-on')!=='1')setTimeout(()=>toggle4d(true),300);
