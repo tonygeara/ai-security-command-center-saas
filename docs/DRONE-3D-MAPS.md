@@ -60,4 +60,8 @@ imported airspace show as volumes up to 120 m, crewed aircraft from Flight safet
 finished 3D map within 3 km is placed under the drones (maps processed from V11.3 on carry their position).
 
 Each drone has its own switch to show or hide it, and **Follow** keeps the camera on it; **Whole site** goes back.
-The page remembers the switches. Drag to turn, right-drag to move, scroll to zoom.
+Click a drone's name (or the drone in the scene) to fly the camera to it. The page remembers the switches.
+Drag to turn, right-drag to move, scroll to zoom.
+
+You can plan in 4D too: click the ground to add a route stop, or a no-fly zone corner after **Draw a zone**,
+exactly like clicking the flat map. The route being drawn shows at its flying height, the zone as red posts.

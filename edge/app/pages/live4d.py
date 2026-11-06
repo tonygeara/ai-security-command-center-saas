@@ -19,7 +19,7 @@ const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '
 
 let st = null;  // one running view
 
-export function start(box, bar, drone){
+export function start(box, bar, drone, hooks){
   if (st) return;
   const renderer = new THREE.WebGLRenderer({antialias: true});
   renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
@@ -38,13 +38,21 @@ export function start(box, bar, drone){
   camera.position.set(-120, 110, 160);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
-  const groups = {zones: new THREE.Group(), aircraft: new THREE.Group(), site: new THREE.Group()};
+  const groups = {zones: new THREE.Group(), aircraft: new THREE.Group(), site: new THREE.Group(), draft: new THREE.Group()};
   Object.values(groups).forEach(g => scene.add(g));
   st = {box, bar, drone, renderer, scene, camera, controls, groups, info, centre: null, drones: {}, follow: store.get('l4d-follow') || drone,
-        hidden: new Set(store.get('l4d-hidden') || []), zonesKey: '', siteKey: '', timer: null, raf: 0, alive: true, last: null};
+        hidden: new Set(store.get('l4d-hidden') || []), zonesKey: '', siteKey: '', timer: null, raf: 0, alive: true, last: null,
+        hooks: hooks || {}, anim: null, draftKey: ''};
+  // A click (not a drag): on a drone, go to it; on the ground, the same as clicking the flat map (route stop / zone corner).
+  let down = null;
+  renderer.domElement.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+  renderer.domElement.addEventListener('pointerup', e => {
+    if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5 || e.button !== 0) return;
+    pick(e);
+  });
   const size = () => { const w = box.clientWidth, h = box.clientHeight; renderer.setSize(w, h); camera.aspect = w / Math.max(1, h); camera.updateProjectionMatrix(); };
   st.size = size; window.addEventListener('resize', size); size();
-  const loop = () => { if (!st || !st.alive) return; st.raf = requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); };
+  const loop = () => { if (!st || !st.alive) return; st.raf = requestAnimationFrame(loop); animate(); controls.update(); renderer.render(scene, camera); };
   loop();
   poll();
   st.timer = setInterval(poll, 1000);
@@ -56,6 +64,73 @@ export function stop(){
   window.removeEventListener('resize', st.size);
   st.renderer.dispose(); st.box.innerHTML = ''; st.bar.innerHTML = '';
   st = null;
+}
+
+function latlon(v){
+  const c = st.centre;
+  return {lat: c.lat - v.z / M_LAT, lon: c.lon + v.x / (M_LON * Math.cos(c.lat * Math.PI / 180))};
+}
+
+function pick(e){
+  if (!st.centre) return;
+  const r = st.renderer.domElement.getBoundingClientRect(), ray = new THREE.Raycaster();
+  ray.setFromCamera(new THREE.Vector2((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1), st.camera);
+  const bodies = Object.entries(st.drones).filter(([, o]) => o.root.visible && o.body.visible).map(([slot, o]) => ({slot, body: o.body}));
+  const hit = ray.intersectObjects(bodies.map(b => b.body), true)[0];
+  if (hit) {
+    const b = bodies.find(x => { let n = hit.object; while (n) { if (n === x.body) return true; n = n.parent; } return false; });
+    if (b) { focus(b.slot); return; }
+  }
+  const p = new THREE.Vector3();
+  if (!ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), p)) return;
+  if (st.hooks.click) { const ll = latlon(p); st.hooks.click(ll.lat, ll.lon); setTimeout(draft, 50); }
+}
+
+// Fly the camera to a drone (clicking its name below the view, or the drone itself).
+function focus(slot){
+  const o = st.drones[slot];
+  if (!o || !o.body.visible) { st.info.textContent = (o && o.data ? o.data.label : 'That drone') + ' has no position yet.'; return; }
+  st.hidden.delete(slot); store.set('l4d-hidden', [...st.hidden]); o.root.visible = true;
+  if (st.follow && st.follow !== slot) { st.follow = ''; store.set('l4d-follow', ''); }
+  st.last = null; st.barKey = '';
+  const to = o.body.position.clone(), dir = st.camera.position.clone().sub(st.controls.target).setY(0);
+  if (dir.length() < 1) dir.set(-1, 0, 1);
+  dir.normalize().multiplyScalar(70);
+  st.anim = {t0: performance.now(), ms: 900, fromT: st.controls.target.clone(), toT: to,
+             fromC: st.camera.position.clone(), toC: to.clone().add(new THREE.Vector3(dir.x, 45, dir.z))};
+}
+
+function animate(){
+  const a = st.anim;
+  if (!a) return;
+  const k = Math.min(1, (performance.now() - a.t0) / a.ms), e = k < 0.5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+  st.controls.target.lerpVectors(a.fromT, a.toT, e); st.camera.position.lerpVectors(a.fromC, a.toC, e);
+  if (k >= 1) { st.anim = null; if (st.follow) st.last = st.drones[st.follow] ? st.drones[st.follow].body.position.clone() : null; }
+}
+
+// What is being drawn on the page: the route (not yet flown) at its height, and a no-fly zone's corners.
+function draft(){
+  if (!st || !st.centre || !st.hooks.draft) return;
+  const d = st.hooks.draft() || {}, key = JSON.stringify(d);
+  if (key === st.draftKey) return;
+  st.draftKey = key; st.groups.draft.clear();
+  const route = d.route || [], alt = d.alt || 30, zone = d.zone || [];
+  if (route.length) {
+    const pts = route.map(p => enu(p.lat, p.lon, alt));
+    if (pts.length > 1) st.groups.draft.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({color: 0xffd23f})));
+    pts.forEach((v, i) => {
+      const s = new THREE.Mesh(new THREE.SphereGeometry(2.2, 14, 10), new THREE.MeshBasicMaterial({color: 0xffd23f})); s.position.copy(v);
+      const post = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(v.x, 0, v.z), v]), new THREE.LineBasicMaterial({color: 0xffd23f, transparent: true, opacity: 0.4}));
+      const tag = label(`Stop ${i + 1} · ${Math.round(alt)} m`, 0xffd23f); tag.position.copy(v);
+      st.groups.draft.add(s, post, tag);
+    });
+  }
+  if (zone.length) {
+    const pts = zone.map(p => enu(p[0], p[1], 0.5));
+    st.groups.draft.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts.length > 2 ? [...pts, pts[0]] : pts), new THREE.LineBasicMaterial({color: 0xff4d6a})));
+    pts.forEach(v => { const post = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 30, 8), new THREE.MeshBasicMaterial({color: 0xff4d6a, transparent: true, opacity: 0.7}));
+      post.position.set(v.x, 15, v.z); st.groups.draft.add(post); });
+  }
 }
 
 function enu(lat, lon, alt){
@@ -73,10 +148,11 @@ async function poll(){
   site(d.maps || []);
   drones(d.drones || []);
   aircraft(d.aircraft || []);
+  draft();
   barUi(d.drones || []);
   const flying = (d.drones || []).filter(x => x.flying).length;
   st.info.innerHTML = `<b>4D LIVE</b> · ${d.drones.length} drone${d.drones.length === 1 ? '' : 's'}, ${flying} flying` +
-    (d.aircraft.length ? ` · ✈ ${d.aircraft.length} aircraft` : '') + ' · drag to turn, right-drag to move, scroll to zoom';
+    (d.aircraft.length ? ` · ✈ ${d.aircraft.length} aircraft` : '') + ' · click the ground to add a route stop (or a zone corner while drawing a zone), click a drone to go to it';
 }
 
 // ----- ground: satellite tiles round the centre (from the dashboard's offline tile cache) -----
@@ -210,7 +286,7 @@ function drones(list){
           s.position.copy(v); o.route.add(s); });
       }
     }
-    if (st.follow === d.slot && has && o.root.visible) followTo(o.body.position);
+    if (st.follow === d.slot && has && o.root.visible && !st.anim) followTo(o.body.position);
   });
   for (const k of Object.keys(st.drones)) if (!seen.has(k)) { st.scene.remove(st.drones[k].root); delete st.drones[k]; }
 }
@@ -247,21 +323,23 @@ function barUi(list){
   st.barKey = key;
   st.bar.innerHTML = list.map((d, i) => {
     const col = '#' + COLORS[i % COLORS.length].toString(16).padStart(6, '0'), on = !st.hidden.has(d.slot);
-    return `<span class="l4d-chip" style="border-color:${col}"><label><input type="checkbox" class="toggle" data-l4d-show="${esc(d.slot)}" ${on ? 'checked' : ''}>
-      <i style="background:${col}"></i>${esc(d.label)}${d.flying ? ' · flying' : ''}</label>
+    return `<span class="l4d-chip" style="border-color:${col}"><label title="Show or hide ${esc(d.label)}"><input type="checkbox" class="toggle" data-l4d-show="${esc(d.slot)}" ${on ? 'checked' : ''}></label>
+      <button type="button" class="l4d-go" data-l4d-go="${esc(d.slot)}" title="Go to ${esc(d.label)}"><i style="background:${col}"></i>${esc(d.label)}${d.flying ? ' · flying' : ''}</button>
       <button type="button" class="${st.follow === d.slot ? 'on' : ''}" data-l4d-follow="${esc(d.slot)}">${st.follow === d.slot ? 'Following' : 'Follow'}</button></span>`;
   }).join('') + `<button type="button" class="l4d-reset" data-l4d-reset="1">Whole site</button>`;
   st.bar.querySelectorAll('[data-l4d-show]').forEach(el => el.onchange = () => {
     const s = el.dataset.l4dShow; el.checked ? st.hidden.delete(s) : st.hidden.add(s);
     store.set('l4d-hidden', [...st.hidden]); st.barKey = '';
   });
+  st.bar.querySelectorAll('[data-l4d-go]').forEach(el => el.onclick = () => focus(el.dataset.l4dGo));
   st.bar.querySelectorAll('[data-l4d-follow]').forEach(el => el.onclick = () => {
     st.follow = st.follow === el.dataset.l4dFollow ? '' : el.dataset.l4dFollow; st.last = null;
     store.set('l4d-follow', st.follow); st.barKey = '';
   });
   st.bar.querySelector('[data-l4d-reset]').onclick = () => {
     st.follow = ''; st.last = null; store.set('l4d-follow', ''); st.barKey = '';
-    st.controls.target.set(0, 0, 0); st.camera.position.set(-120, 110, 160);
+    st.anim = {t0: performance.now(), ms: 900, fromT: st.controls.target.clone(), toT: new THREE.Vector3(),
+               fromC: st.camera.position.clone(), toC: new THREE.Vector3(-120, 110, 160)};
   };
 }
 """

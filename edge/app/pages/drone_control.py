@@ -42,6 +42,8 @@ BODY = r"""
 .l4d-chip i{width:9px;height:9px;border-radius:50%;display:inline-block}
 .l4d-chip button,.l4d-reset{border:1px solid #155879;background:#020a10;color:#9edfff;border-radius:10px;padding:3px 9px;font:bold 10px Arial;cursor:pointer}
 .l4d-chip button.on{background:#25c7ff;color:#02131d;border-color:#45d0ff}
+.l4d-chip button.l4d-go{display:flex;align-items:center;gap:6px;border:0;background:none;color:#cfeeff;font:12px Arial;padding:2px 2px;cursor:pointer}
+.l4d-chip button.l4d-go:hover{color:#fff;text-decoration:underline}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -251,7 +253,9 @@ document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
-  map.on('click',e=>nfPts?nfAdd(e.latlng.lat,e.latlng.lng):locFor?saveCamLoc(e.latlng.lat,e.latlng.lng):addPoint(e.latlng.lat,e.latlng.lng));drawNofly()}
+  map.on('click',e=>mapClick(e.latlng.lat,e.latlng.lng));drawNofly()}
+// A click on the flat map or on the ground in 4D live: a zone corner while drawing a zone, a camera's place, else a route stop.
+function mapClick(lat,lon){nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
@@ -353,7 +357,7 @@ function storeSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 async function toggle4d(on){$('l4dOn').checked=on;storeSet('l4d-on',on?'1':'0');
   $('dcMap').style.display=on?'none':'';$('l4d').style.display=on?'block':'none';$('l4dBar').style.display=on?'flex':'none';
   if(!on){if(l4d)l4d.stop();if(map)setTimeout(()=>map.invalidateSize(),50);return}
-  try{l4d=l4d||await import('/live4d.js');l4d.start($('l4d'),$('l4dBar'),DRONE)}
+  try{l4d=l4d||await import('/live4d.js');l4d.start($('l4d'),$('l4dBar'),DRONE,{click:mapClick,draft:()=>({route,alt:+$('rtAlt').value||30,zone:nfPts})})}
   catch(e){$('l4d').innerHTML='<p class="muted" style="padding:14px">The 3D view could not start in this browser: '+esc(e.message||e)+'</p>'}}
 if(storeGet('l4d-on')==='1')setTimeout(()=>toggle4d(true),300);
 let acMarks=[];
