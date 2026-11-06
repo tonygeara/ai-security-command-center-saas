@@ -63,7 +63,7 @@ BODY = r"""
 </div></section>
 </div></div>
 </main>
-<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
@@ -76,7 +76,7 @@ function msg(id,t,ok){const e=$(id);e.className='hud-msg '+(ok===true?'ok':ok===
 function initMap(){map=L.map('mpMap',{maxZoom:22}).setView([20,0],2);
   const sat=L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:22,maxNativeZoom:19,attribution:'Imagery © Esri'}).addTo(map);
   const osm=L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:22,maxNativeZoom:19,attribution:'© OpenStreetMap'});
-  L.control.layers({'Satellite':sat,'Street map':osm}).addTo(map);
+  L.control.layers({'Satellite':sat,'Street map':osm}).addTo(map);window.addMapSearch&&addMapSearch(map);
   drawLayer=L.layerGroup().addTo(map);planLayer=L.layerGroup().addTo(map);selLayer=L.layerGroup().addTo(map);
   map.on('click',e=>{if(!drawing)return;corners.push([e.latlng.lat,e.latlng.lng]);drawArea();replan()});
   fetch('/api/drone/links').then(r=>r.json()).then(d=>{const t=(d.drones||[]).find(x=>x.lat);if(t&&!centred){centred=true;map.setView([t.lat,t.lon],17)}}).catch(()=>{})}

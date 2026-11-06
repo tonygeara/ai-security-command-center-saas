@@ -54,7 +54,8 @@ BODY = r"""
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Drone</div><h1 class="page-title">Drone Control</h1>
 <div class="page-sub">Fly the drone from this PC through the Drone Link app on the controller's phone. Keep the drone in sight — the pilot's controller can take over at any time.</div></div>
-<div class="actions"><span class="state" id="linkState"><i class="dot bad"></i>PHONE NOT CONNECTED</span></div></div>
+<div class="actions"><span class="state" id="linkState"><i class="dot bad"></i>PHONE NOT CONNECTED</span>
+<button class="hud-btn danger" id="rmDrone" style="display:none" onclick="removeDrone()" title="Admins only">🗑 Remove this drone</button></div></div>
 <div class="dc-fleet" id="fleet"></div>
 <div class="fs-strip" id="fsStrip"><span class="fs-cell" id="fsVerdict"><i class="dot warn"></i>Flight safety: checking…</span>
 <span class="fs-cell" id="fsWx">☁ –</span><span class="fs-cell" id="fsAc">✈ –</span><span class="fs-cell" id="fsZones">🛇 –</span>
@@ -195,7 +196,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div id="events" class="muted" style="margin-top:12px;max-height:150px;overflow:auto"></div></div></section>
 </div></div>
 </main>
-<script src="/vendor/leaflet/leaflet.js"></script>
+<script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
 <script>
 const DRONE='drone';
 {const f=window.fetch.bind(window);
@@ -259,7 +260,7 @@ document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.
     if(control)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
 document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
-  L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);
+  L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);window.addMapSearch&&addMapSearch(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
   map.on('click',e=>mapClick(e.latlng.lat,e.latlng.lng));drawNofly()}
 // A click on the flat map or on the ground in 4D live: a zone corner while drawing a zone, a camera's place, else a route stop.
@@ -376,6 +377,16 @@ async function toggle4d(on){$('l4dOn').checked=on;storeSet('l4d-on',on?'1':'0');
   try{l4d=l4d||await import('/live4d.js');l4d.start($('l4d'),$('l4dBar'),DRONE,{click:mapClick,draft:()=>({route,alt:+$('rtAlt').value||30,zone:nfPts})})}
   catch(e){$('l4d').innerHTML='<p class="muted" style="padding:14px">The 3D view could not start in this browser: '+esc(e.message||e)+'</p>'}}
 if(storeGet('l4d-on')==='1'&&storeGet('m3d-on')!=='1')setTimeout(()=>toggle4d(true),300);
+// Admins can remove a drone: virtual drones are deleted, added drones removed from the plan, the first drone unpaired.
+if(typeof IS_ADMIN!=='undefined'&&IS_ADMIN){const b=$('rmDrone');b.style.display='';
+  b.textContent=DRONE==='drone'?'🗑 Unpair this drone':'🗑 Remove this drone'}
+async function removeDrone(){const name=document.title.split(' · ')[0];
+  const first=DRONE==='drone';
+  if(!confirm(first?`Unpair ${name}? Its phone is disconnected and gets a new pairing code (the first drone slot always stays).`
+    :`Remove ${name}? ${DRONE.startsWith('drone-v')?'The virtual drone is deleted.':'It is removed from this PC and its plan slot is freed; pairing it again needs a new QR scan.'}`))return;
+  const d=await fetch('/api/drone/remove',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({drone:DRONE})}).then(async r=>{try{return await r.json()}catch(e){return {ok:false,error:'HTTP '+r.status}}});
+  if(!d.ok){alert(d.error||'Could not remove it.');return}
+  alert(d.message);location.href=d.removed?'/drone-control':location.href}
 let acMarks=[];
 // The one-row flight-safety strip: verdict, weather, aircraft, airspace (full settings on Flight safety).
 function renderStrip(d){const c=d.conditions,v=$('fsVerdict'),w=d.weather||{},r=w.reading,t=d.traffic||{},s=d.settings||{};

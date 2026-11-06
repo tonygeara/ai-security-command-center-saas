@@ -141,7 +141,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.3.2"
+APP_VERSION = "V11.3.3"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2317,7 +2317,7 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d  # noqa: E401
+import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch  # noqa: E401
 import users as user_accounts
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
@@ -5014,6 +5014,46 @@ def api_drone_link_pair_reset():
     return jsonify({"ok": True})
 
 
+@app.route("/api/drone/remove", methods=["POST"])
+def api_drone_remove():
+    """Remove a drone (admins; the sign-in rules keep operators out). A virtual drone is deleted, an added drone is
+    removed from the cameras and the plan, and the first drone, which always stays, is unpaired instead."""
+    slot = (request.get_json(silent=True) or {}).get("drone")
+    if slot not in drone_slots():
+        return jsonify({"ok": False, "error": "Unknown drone."}), 404
+    tel = get_link(slot)["telemetry"] if link_fresh(slot, 5) else {}
+    if tel.get("flying"):
+        return jsonify({"ok": False, "error": f"{drone_label(slot)} is flying. Land it first."}), 409
+    if _drone_busy(slot):
+        return jsonify({"ok": False, "error": f"{drone_label(slot)} is on a mission (route, response or backup). Stop it first."}), 409
+    label = drone_label(slot)
+    if is_virtual(slot):
+        with app.test_request_context(method="DELETE"):
+            r = api_virtual_drone(slot)
+        resp = r[0] if isinstance(r, tuple) else r
+        if not resp.get_json().get("ok", True):
+            return resp, (r[1] if isinstance(r, tuple) else 400)
+        drone_trails.pop(slot, None)
+        return jsonify({"ok": True, "removed": True, "message": f"{label} removed."})
+    if slot == DRONE_CAMERA_NAME:
+        drone_link_token(reset=True, slot=slot)
+        link = get_link(slot)
+        with link["lock"]:
+            if link["conn"] is not None:
+                _drone_drop(link["conn"], "drone removed (unpaired)", slot)
+        link.update(telemetry={}, tel_at=0.0, device="")
+        drone_trails.pop(slot, None)
+        return jsonify({"ok": True, "removed": False,
+                        "message": f"{label} unpaired: its phone was disconnected and it has a new pairing code. "
+                                   "The first drone slot always stays; pair another phone when you need it."})
+    try:
+        r = _remove_source(slot)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"Could not update the camera settings file ({e.strerror or e}). Try again."}), 409
+    drone_trails.pop(slot, None)
+    return jsonify({**r.get_json(), "removed": True, "message": f"{label} removed."})
+
+
 LAND_ASSIST_SECONDS = 120
 
 
@@ -5336,8 +5376,10 @@ def drone_control_page():
         page = page.replace('<div class="live-slot" data-live-camera="drone"></div>',
                             '<div id="vcam" style="position:absolute;inset:0"></div><div class="vcam-x"></div>'
                             '<div class="vcam-tag">VIRTUAL CAMERA · SIMULATED VIEW</div>')
+    user = getattr(g, "user", None)
+    admin = user is None or user.get("role") == "admin"  # sign-in off: whoever is at the PC is the admin
     return (page.replace('data-live-camera="drone"', f'data-live-camera="{slot}"')
-            .replace("const DRONE='drone';", f"const DRONE={json.dumps(slot)};")
+            .replace("const DRONE='drone';", f"const DRONE={json.dumps(slot)};const IS_ADMIN={json.dumps(admin)};")
             .replace("<title>", f"<title>{drone_label(slot)} · ", 1)
             .replace('<h1 class="page-title">Drone Control</h1>', f'<h1 class="page-title">Drone Control · {drone_label(slot)}</h1>', 1))
 
@@ -7611,6 +7653,47 @@ def api_live4d():
                     "maps": maps[:1]})
 
 
+GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
+_geocode_cache = {}
+_geocode_last = [0.0]
+_geocode_lock = threading.Lock()
+
+
+def _geocode_fetch(q):
+    """Places matching q from OpenStreetMap's Nominatim (its rules: at most one request a second, a named app)."""
+    with _geocode_lock:
+        wait = 1.0 - (time.time() - _geocode_last[0])
+        if wait > 0:
+            time.sleep(wait)
+        _geocode_last[0] = time.time()
+    r = requests.get(GEOCODE_URL, params={"q": q, "format": "jsonv2", "limit": 5}, timeout=8,
+                     headers={"User-Agent": f"AI-Security-Command-Center/{APP_VERSION}", "Accept-Language": "en"})
+    r.raise_for_status()
+    return [{"name": str(x.get("display_name") or "")[:160], "lat": float(x["lat"]), "lon": float(x["lon"])} for x in r.json()]
+
+
+@app.route("/api/geocode")
+def api_geocode():
+    """Search by address for the maps' search box (cached, so repeated searches stay offline-friendly)."""
+    q = " ".join(str(request.args.get("q") or "").split())[:200]
+    if len(q) < 3:
+        return jsonify({"ok": False, "error": "Type at least 3 letters."}), 400
+    key = q.lower()
+    if key not in _geocode_cache:
+        try:
+            _geocode_cache[key] = _geocode_fetch(q)
+        except Exception:
+            return jsonify({"ok": False, "error": "Address search needs internet. You can type coordinates instead, like 33.89, 35.50."}), 502
+        while len(_geocode_cache) > 500:
+            _geocode_cache.pop(next(iter(_geocode_cache)))
+    return jsonify({"ok": True, "results": _geocode_cache[key]})
+
+
+@app.route("/mapsearch.js")
+def mapsearch_js():
+    return Response(pages.mapsearch.JS, mimetype="text/javascript", headers={"Cache-Control": "no-cache"})
+
+
 @app.route("/live4d.js")
 def live4d_js():
     return Response(pages.live4d.JS, mimetype="text/javascript", headers={"Cache-Control": "no-cache"})
@@ -7997,6 +8080,59 @@ PAGE = (PAGE.replace("<title>\nAI Security Command Center\n</title>", f"<title>\
             .replace('<div class="brand-sub">\nCOMMAND CENTER\n</div>', f'<div class="brand-sub">\n{BRAND_SUB_HTML}\n</div>')
             .replace('<div class="rec-title">\nAI SECURITY CONTROLS\n</div>', f'<div class="rec-title">\n{edition.BRAND_TOP} CONTROLS\n</div>'))
 _body_end = PAGE.rfind("</body>")
+# Settings → Events / People / Vehicles: the dashboard's own screens for them, each on its own page (without the
+# dashboard's columns or live video), so every button keeps working as before.
+SETTINGS_SECTIONS = {
+    "events": ("Events", "Detections and alerts: unknown faces and vehicles, drone responses.", "openEventHistory()",
+               "#eventHistoryOverlay", "closeEventHistory", ""),
+    "people": ("People", "Known faces: add, check and remove the people the cameras recognise.",
+               "document.getElementById('openFaceLibrary').click()", "#faceLibraryOverlay", "closeFaceLibrary",
+               '<button class="sp-add" onclick="document.getElementById(\'openFaceEnroll\').click()">＋ Add person</button>'),
+    "vehicles": ("Vehicles", "Known vehicles and their plates.", "document.getElementById('openVehicleLibrary').click()",
+                 "#vehicleLibraryOverlay", "closeVehicleLibrary",
+                 '<button class="sp-add" onclick="document.getElementById(\'openVehicleEnroll\').click()">＋ Add vehicle</button>'),
+}
+
+
+def _section_page(key):
+    title, sub, opener, overlay, close_id, extra = SETTINGS_SECTIONS[key]
+    tabs = "".join(f'<a href="/settings/{k}" class="{"on" if k == key else ""}">{v[0]}</a>' for k, v in SETTINGS_SECTIONS.items())
+    block = f"""<style>
+.left-column,.center-column,.right-column{{display:none!important}}
+.sp-head{{position:relative;z-index:5;max-width:1180px;margin:18px auto 0;padding:0 18px;display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap}}
+.sp-head h1{{margin:4px 0 2px;color:#5bd9ff;font-size:24px;letter-spacing:2px;text-transform:uppercase}}
+.sp-head .kick{{color:#6d8b9d;font-size:10px;letter-spacing:2.5px;text-transform:uppercase}}
+.sp-head .kick a{{color:#5bd9ff;text-decoration:none}}.sp-head p{{margin:0;color:#8ba9b8;font-size:12px}}
+.sp-tabs{{display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap}}
+.sp-tabs a{{padding:8px 14px;border:1px solid #155879;border-radius:4px;color:#9edfff;text-decoration:none;font:bold 10px Arial;letter-spacing:1.5px;text-transform:uppercase;background:#05131d}}
+.sp-tabs a.on{{background:#25c7ff;color:#02131d;border-color:#45d0ff}}
+.sp-add{{margin-right:10px;padding:8px 16px;border:1px solid #45d0ff;border-radius:4px;background:#25c7ff;color:#02131d;font:bold 10px Arial;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;box-shadow:0 0 16px rgba(37,199,255,.25)}}
+.sp-add:hover{{background:#5bd9ff}}
+/* the screen is the page here, not a pop-up over the dashboard */
+{overlay}{{position:relative!important;inset:auto!important;display:flex!important;background:none!important;min-height:auto!important;padding:14px 18px 40px!important;
+  max-width:1180px;margin:0 auto;opacity:1!important;visibility:visible!important;pointer-events:auto!important}}
+{overlay}>*{{max-width:none!important;width:100%!important;max-height:none!important;margin:0!important}}
+#{close_id}{{display:none!important}}
+</style>
+<div class="sp-head"><div><div class="kick"><a href="/settings">Settings</a> › {title}</div><h1>{title}</h1><p>{sub}</p></div>
+<div class="sp-tabs">{extra}{tabs}</div></div>
+<script>(function(){{try{{{opener}}}catch(e){{}}
+  const o=document.querySelector('{overlay}'),h=document.querySelector('.sp-head');
+  if(o&&h)h.after(o);  // show the screen right under the page title
+}})();</script>"""
+    page = PAGE.replace(hud_subnav("dashboard"), hud_subnav("settings"), 1).replace(
+        f"<title>\n{edition.PRODUCT_NAME}\n</title>", f"<title>\n{title} — {edition.PRODUCT_NAME}\n</title>", 1)
+    end = page.rfind("</body>")
+    return page[:end] + block + page[end:]
+
+
+SECTION_PAGES = {k: _section_page(k) for k in SETTINGS_SECTIONS}
+# On the dashboard itself, events, people and vehicles now live under Settings.
+_hide_moved = ("<style>#historyPanel,#openFaceEnroll,#openVehicleEnroll,#openFaceLibrary,#openVehicleLibrary"
+               "{display:none!important}</style>")
+_body_end = PAGE.rfind("</body>")
+PAGE = PAGE[:_body_end] + _hide_moved + PAGE[_body_end:]
+_body_end = PAGE.rfind("</body>")
 PAGE = PAGE[:_body_end] + LIVE_PLAYER_HTML + PAGE[_body_end:]
 
 PAIRING_PAGE = hud_page("Pair Device", """
@@ -8095,9 +8231,9 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 .set-hub a:hover{border-color:#36cfff;box-shadow:0 0 12px rgba(53,203,255,.16)}
 .set-hub b{font-size:13px;letter-spacing:.5px}.set-hub span{font-size:20px;color:#5bd9ff}.set-hub small{color:#6d8b9d;font-size:11px}</style>
 <nav class="set-hub">
-<a href="/#history"><span>◷</span><b>Events</b><small>Detections and alerts</small></a>
-<a href="/#face-library"><span>◎</span><b>People</b><small>Known faces</small></a>
-<a href="/#vehicle-library"><span>▱</span><b>Vehicles</b><small>Known plates</small></a>
+<a href="/settings/events"><span>◷</span><b>Events</b><small>Detections and alerts</small></a>
+<a href="/settings/people"><span>◎</span><b>People</b><small>Known faces</small></a>
+<a href="/settings/vehicles"><span>▱</span><b>Vehicles</b><small>Known plates</small></a>
 <a href="/license"><span>⚿</span><b>Licence</b><small>This PC's licence</small></a>
 <a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
@@ -8433,6 +8569,16 @@ def dashboard():
         page = (page.replace('<div id="cameraFeedPanel">', '<div id="cameraFeedPanel" hidden style="display:none">', 1)
                 .replace(CAMERA_FEED_SWITCH, "", 1))
     return render_template_string(page, events=events, history_events=history_events)
+
+@app.route("/settings/<section>")
+def settings_section_page(section):
+    if section not in SECTION_PAGES:
+        return redirect("/settings")
+    if not onprem_mode() and not str(load_edge_agent_config().get("device_token") or "").strip():
+        return redirect("/")  # not paired yet: the dashboard shows the pairing page
+    events, history_events = _dashboard_context()
+    return render_template_string(SECTION_PAGES[section], events=events, history_events=history_events)
+
 
 @app.route("/api/license", methods=["GET", "POST"])
 def api_license():
