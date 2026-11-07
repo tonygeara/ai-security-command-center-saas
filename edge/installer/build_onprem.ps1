@@ -46,6 +46,7 @@ New-Item -ItemType Directory -Force $Stage | Out-Null
 Copy-Item (Join-Path $App 'launcher.pyw') $Stage
 Copy-Item (Join-Path $App 'dashboard.py') $Stage
 Copy-Item (Join-Path $App 'licensing.py') $Stage
+Copy-Item (Join-Path $App 'browser_mode.py') $Stage
 foreach ($m in 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf') { Copy-Item (Join-Path $App "$m.py") $Stage }
 Copy-Item (Join-Path $App 'pages') $Stage -Recurse
 Copy-Item (Join-Path $App 'static') $Stage -Recurse  # map + 3D viewer libraries (data, not code)

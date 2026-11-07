@@ -141,7 +141,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.3.5"
+APP_VERSION = "V11.3.6"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -7945,6 +7945,79 @@ def api_assistant_briefing():
 @app.route("/healthz")
 def healthz():
     return jsonify({"ok": True, "service": "ai-security-command-center", "version": APP_VERSION})
+
+# ---------------- Browser presence ----------------
+# Every page in the browser checks in here (script added by _browser_presence_script). The
+# launcher asks how many are open; when none are, the browser was closed and it stops the system.
+BROWSER_PAGE_TIMEOUT = 150  # a page that stopped checking in (killed browser); hidden tabs check in once a minute
+_browser_pages = {}  # page id -> {"seen": time, "asleep": bool}
+_browser_lock = threading.Lock()
+
+
+def _browser_page_id():
+    raw = request.get_data(cache=False, as_text=True)[:200]
+    try:
+        raw = json.loads(raw).get("page", "")
+    except Exception:
+        pass
+    raw = str(raw or "")
+    return raw if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", raw) else ""
+
+
+@app.route("/api/browser/<action>", methods=["POST"])
+def api_browser_presence(action):
+    page = _browser_page_id()
+    if not page or action not in ("ping", "sleep", "bye"):
+        return jsonify({"ok": False}), 400
+    with _browser_lock:
+        if action == "bye":
+            _browser_pages.pop(page, None)
+        else:
+            # A browser that freezes a background tab to save power keeps it in its tab bar: still open.
+            _browser_pages[page] = {"seen": time.time(), "asleep": action == "sleep"}
+    return jsonify({"ok": True})
+
+
+@app.route("/api/browser/presence")
+def api_browser_open_pages():
+    now = time.time()
+    with _browser_lock:
+        for page, info in list(_browser_pages.items()):
+            if not info["asleep"] and now - info["seen"] > BROWSER_PAGE_TIMEOUT:
+                del _browser_pages[page]
+        return jsonify({"ok": True, "open_pages": len(_browser_pages)})
+
+
+_BROWSER_PRESENCE_SCRIPT = """<script>(function(){
+if(window.top!==window||window.__aiPresence)return;window.__aiPresence=1;
+var id=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
+function send(a,b){try{if(b&&navigator.sendBeacon){navigator.sendBeacon('/api/browser/'+a,JSON.stringify({page:id}));return;}
+fetch('/api/browser/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:id}),keepalive:true}).catch(function(){});}catch(e){}}
+try{var prev=sessionStorage.getItem('aiPresenceAsleep');sessionStorage.removeItem('aiPresenceAsleep');
+if(prev&&document.wasDiscarded)fetch('/api/browser/bye',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:prev})}).catch(function(){});}catch(e){}
+send('ping');setInterval(function(){send('ping');},20000);
+document.addEventListener('visibilitychange',function(){if(!document.hidden)send('ping');});
+document.addEventListener('freeze',function(){try{sessionStorage.setItem('aiPresenceAsleep',id);}catch(e){}send('sleep',1);});
+document.addEventListener('resume',function(){send('ping');});
+addEventListener('pageshow',function(e){if(e.persisted)send('ping');});
+addEventListener('pagehide',function(){send('bye',1);});
+})();</script>"""
+
+
+@app.after_request
+def _browser_presence_script(resp):
+    """Add the presence check-in to every page."""
+    if resp.mimetype == "text/html" and not resp.direct_passthrough:
+        try:
+            html = resp.get_data(as_text=True)
+            i = html.rfind("</body>")
+            if i != -1 and "__aiPresence" not in html:
+                resp.set_data(html[:i] + _BROWSER_PRESENCE_SCRIPT + html[i:])
+        except Exception:
+            pass
+    return resp
+# ---------------- END browser presence ----------------
+
 
 @app.route("/api/system/readiness")
 def api_system_readiness():

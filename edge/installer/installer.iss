@@ -56,6 +56,9 @@ Source: "..\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesu
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+; Normal start opens the system in the web browser (no window) and stops it when the browser closes.
+; This one shows the control window (Start / Stop System, Diagnostics) and never stops on its own.
+Name: "{autoprograms}\{#MyAppName} - Control window"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--window"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; Check: not AppWasRunning
