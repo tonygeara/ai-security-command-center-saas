@@ -13,3 +13,7 @@ holds these rules and writes every change to `audit_logs`. New users get a tempo
 made it; they must choose their own at first sign-in (`/account/password`). Database rules:
 `supabase/migrations/20261108130000_roles_and_users.sql`.
 
+Self-signup is off: only the super admin creates companies (Admin → Clients → + New online client), and
+`create_my_organization` can no longer be called (`supabase/migrations/20261108140000_disable_self_signup.sql`).
+`/signup` and `/onboarding` now explain that accounts come from the provider.
+
