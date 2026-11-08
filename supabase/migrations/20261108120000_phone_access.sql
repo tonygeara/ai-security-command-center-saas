@@ -47,12 +47,7 @@ alter table public.remote_incidents enable row level security;
 alter table public.remote_cameras enable row level security;
 alter table public.live_requests enable row level security;
 
-create or replace function private.is_org_member(org uuid)
-returns boolean language sql stable security definer set search_path to '' as $$
-  select exists (select 1 from public.organization_members m where m.organization_id = org and m.user_id = auth.uid())
-$$;
-revoke execute on function private.is_org_member(uuid) from public, anon;
-grant execute on function private.is_org_member(uuid) to authenticated;
+-- private.is_org_member(target_org) and private.is_super_admin() already exist in the project.
 
 create policy remote_incidents_select on public.remote_incidents
   for select using (private.is_org_member(organization_id) or private.is_super_admin());
@@ -65,13 +60,13 @@ create policy live_requests_select on public.live_requests
 create policy live_requests_insert on public.live_requests
   for insert with check (
     private.is_org_member(organization_id)
-    and requested_by = auth.uid()
+    and requested_by = (select auth.uid())
     and active_until <= now() + interval '2 minutes 5 seconds'
-    and exists (select 1 from public.edge_devices d where d.id = device_id and d.organization_id = live_requests.organization_id));
+    and exists (select 1 from public.edge_devices d where d.id = live_requests.device_id and d.organization_id = live_requests.organization_id));
 -- ...and keep watching (extend their own request, again at most 2 minutes ahead).
 create policy live_requests_update on public.live_requests
-  for update using (requested_by = auth.uid() and private.is_org_member(organization_id))
-  with check (requested_by = auth.uid() and active_until <= now() + interval '2 minutes 5 seconds');
+  for update using (requested_by = (select auth.uid()) and private.is_org_member(organization_id))
+  with check (requested_by = (select auth.uid()) and active_until <= now() + interval '2 minutes 5 seconds');
 
 -- Columns a phone may change on its own request: only active_until.
 revoke update on public.live_requests from authenticated;
@@ -86,5 +81,13 @@ create policy edge_pictures_read on storage.objects
   for select using (
     bucket_id = 'edge-pictures'
     and ((storage.foldername(name))[1] in (select m.organization_id::text from public.organization_members m
-                                            where m.user_id = auth.uid())
+                                            where m.user_id = (select auth.uid()))
          or private.is_super_admin()));
+
+-- Signed-out visitors never need these tables (RLS already denies them; this removes the privileges too).
+revoke all on public.remote_incidents, public.remote_cameras, public.live_requests from anon;
+-- Phones only read incidents/cameras and ask for live pictures; the edge agent writes via edge-sync.
+revoke insert, update, delete on public.remote_incidents, public.remote_cameras from authenticated;
+revoke delete on public.live_requests from authenticated;
+-- TRUNCATE skips row level security: signed-in users must not have it (nor TRIGGER/REFERENCES) on these tables.
+revoke truncate, trigger, references on public.remote_incidents, public.remote_cameras, public.live_requests from authenticated;
