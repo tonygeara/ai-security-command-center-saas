@@ -12,15 +12,28 @@ import requests
 from flask import Blueprint, Response, g, has_request_context, jsonify, request
 
 import audit
+import edition
+import evidence
 
 bp = Blueprint("records", __name__)
 STORE = INCIDENTS = hud_page = load_settings = None  # set by setup()
+DATA_FOLDER = EVENT_FOLDER = VERSION = ""
+_evidence_key = None
 
 
-def setup(app, store, incidents, hud_page_fn, load_settings_fn):
-    global STORE, INCIDENTS, hud_page, load_settings
+def setup(app, store, incidents, hud_page_fn, load_settings_fn, data_folder="", event_folder="", version=""):
+    global STORE, INCIDENTS, hud_page, load_settings, DATA_FOLDER, EVENT_FOLDER, VERSION
     STORE, INCIDENTS, hud_page, load_settings = store, incidents, hud_page_fn, load_settings_fn
+    DATA_FOLDER, EVENT_FOLDER, VERSION = data_folder, event_folder, version
     app.register_blueprint(bp)
+
+
+def evidence_key():
+    """This PC's evidence signing key (made on first use)."""
+    global _evidence_key
+    if _evidence_key is None:
+        _evidence_key = evidence.load_or_create_key(DATA_FOLDER)
+    return _evidence_key
 
 
 # ---------------- Audit log ----------------
@@ -150,6 +163,40 @@ def api_incident(inc_id):
     return (jsonify({"ok": True, "incident": inc}) if inc else (jsonify({"ok": False, "error": "No such incident."}), 404))
 
 
+@bp.route("/api/incidents/<int:inc_id>/evidence.zip")
+def api_incident_evidence(inc_id):
+    INCIDENTS.close_stale()
+    inc = INCIDENTS.get(inc_id)
+    if not inc:
+        return jsonify({"ok": False, "error": "No such incident."}), 404
+    u = getattr(g, "user", None)
+    data, manifest, mhash = evidence.build(inc, INCIDENTS.track(inc_id), EVENT_FOLDER, evidence_key(),
+                                           made_by=u["username"] if u else "", product=edition.PRODUCT_NAME, version=VERSION)
+    audit_record("evidence pack made", target=f"incident {inc_id}",
+                 detail={"manifest_sha256": mhash, "files": len(manifest["files"]), "fingerprint": manifest["key_fingerprint"]})
+    name = f"evidence-incident-{inc_id}-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    return Response(data, mimetype="application/zip", headers={"Content-Disposition": f"attachment; filename={name}"})
+
+
+@bp.route("/api/evidence/key")
+def api_evidence_key():
+    pub = evidence.public_key_b64(evidence_key())
+    return jsonify({"ok": True, "public_key": pub, "fingerprint": evidence.fingerprint(pub)})
+
+
+@bp.route("/api/evidence/verify", methods=["POST"])
+def api_evidence_verify():
+    f = request.files.get("pack")
+    data = f.read(512 * 1024 * 1024) if f else request.get_data(cache=False)[:512 * 1024 * 1024]
+    if not data:
+        return jsonify({"ok": False, "error": "Choose an evidence pack (.zip)."}), 400
+    mine = evidence.fingerprint(evidence.public_key_b64(evidence_key()))
+    ok, problems, manifest = evidence.verify(data)
+    signer = (manifest or {}).get("key_fingerprint") or ""
+    return jsonify({"ok": True, "valid": ok, "problems": problems, "signed_here": bool(manifest) and signer == mine,
+                    "fingerprint": signer, "incident": (manifest or {}).get("incident"), "made": (manifest or {}).get("made")})
+
+
 INCIDENTS_PAGE = r"""
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Security</div><h1 class="page-title">Incidents</h1>
@@ -162,7 +209,11 @@ INCIDENTS_PAGE = r"""
 <div class="actions" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">
 <select id="days"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option></select>
 <select id="min"><option value="1">All activity</option><option value="2" selected>Unknown faces/plates and drone responses</option><option value="3">Drone responses only</option></select></div>
-<div id="list"></div></div></section></main>
+<div id="list"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">✔ Evidence packs</div></div><div class="panel-body">
+<p class="muted" style="margin-top:0">Open an incident and choose <b>Download evidence pack</b>: one signed file with the timeline, snapshots, the drone's photo, video and GPS track. Anyone can check it was not changed. This PC's signing key fingerprint (give it to whoever receives packs): <b id="fp" style="font-family:monospace;color:#9edfff">…</b></p>
+<div class="actions" style="gap:8px;flex-wrap:wrap"><input type="file" id="pack" accept=".zip"><button class="hud-btn" onclick="check()">Check an evidence pack</button></div>
+<div id="vmsg" class="hud-msg"></div></div></section></main>
 <script>
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
@@ -177,7 +228,16 @@ async function load(){const d=await fetch(`/api/incidents?days=${$('days').value
 async function fill(id){const d=await fetch('/api/incidents/'+id).then(r=>r.json());if(!d.ok)return;const i=d.incident;
   const imgs=i.events.filter(e=>e.snapshot).map(e=>`<img src="/events/${esc(e.snapshot.split(/[\\/]/).pop())}" alt="">`).join('');
   $('b'+id).innerHTML=i.items.map(x=>`<div class="it"><time>${tm(x.t)}</time><span>${esc(x.text)}</span></div>`).join('')+imgs+
-   `<div class="actions" style="margin-top:8px"><button class="hud-btn" onclick="mark(${id},'reviewed')">Mark reviewed</button></div>`}
+   `<div class="actions" style="margin-top:8px"><button class="hud-btn" onclick="mark(${id},'reviewed')">Mark reviewed</button>
+    <a class="hud-btn primary" href="/api/incidents/${id}/evidence.zip">Download evidence pack</a></div>`}
+async function check(){const f=$('pack').files[0],m=$('vmsg');if(!f){m.className='hud-msg bad';m.textContent='Choose a .zip first.';return}
+  const fd=new FormData();fd.append('pack',f);m.className='hud-msg';m.textContent='Checking…';
+  const d=await fetch('/api/evidence/verify',{method:'POST',body:fd}).then(r=>r.json());
+  if(!d.ok){m.className='hud-msg bad';m.textContent=d.error;return}
+  m.className='hud-msg '+(d.valid?'ok':'bad');
+  m.textContent=d.valid?`✔ Valid: nothing changed since ${d.made}. Incident ${d.incident.id} at ${d.incident.camera}. `+(d.signed_here?'Signed by this PC.':`Signed by another PC (key ${d.fingerprint}).`)
+   :'✖ Not valid: '+d.problems.join(' ')}
+fetch('/api/evidence/key').then(r=>r.json()).then(d=>{$('fp').textContent=d.fingerprint});
 function tog(id){const e=$('i'+id);e.classList.toggle('open');if(e.classList.contains('open')){opened.add(id);fill(id)}else opened.delete(id)}
 async function mark(id,status){await fetch('/api/incidents/'+id,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({status})});load()}
 $('days').onchange=load;$('min').onchange=load;load();setInterval(load,15000);

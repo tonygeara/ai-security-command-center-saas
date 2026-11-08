@@ -1,6 +1,7 @@
 """The edge app's database: one SQLite file (ai_security.db in the data folder).
 
-Holds the event history, the sightings of known faces and plates, the audit log and the incidents.
+Holds the event history, the sightings of faces and plates, the audit log, the incidents and the
+drones' GPS tracks during responses.
 It replaces event_history.csv, sightings.jsonl and audit_log.jsonl: on first start those are
 imported once and renamed to *.migrated (kept, never deleted).
 
@@ -37,6 +38,9 @@ CREATE INDEX IF NOT EXISTS incidents_updated ON incidents(updated);
 CREATE TABLE IF NOT EXISTS incident_items (
     id INTEGER PRIMARY KEY, incident INTEGER NOT NULL, t REAL NOT NULL, kind TEXT, text TEXT, data TEXT);
 CREATE INDEX IF NOT EXISTS incident_items_incident ON incident_items(incident);
+CREATE TABLE IF NOT EXISTS tracks (
+    id INTEGER PRIMARY KEY, incident INTEGER NOT NULL, t REAL NOT NULL, drone TEXT, lat REAL, lon REAL, alt REAL);
+CREATE INDEX IF NOT EXISTS tracks_incident ON tracks(incident);
 """
 
 

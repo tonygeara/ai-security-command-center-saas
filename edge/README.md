@@ -11,7 +11,9 @@ edge/
   app/store.py            the database (SQLite): events, sightings, audit log, incidents
   app/bus.py              the event pipeline; app/incidents.py groups it into incidents
   app/web_access.py       sign-in, first admin, users (Flask blueprint)
-  app/web_records.py      audit log, incidents, browser presence, shut down (Flask blueprint)
+  app/web_records.py      audit log, incidents, evidence packs, browser presence, shut down (Flask blueprint)
+  app/evidence.py         signed evidence packs (build and check)
+  app/patterns.py         casing and unusual-activity warnings
   app/dashboard.py        dashboard web app (http://127.0.0.1:8080)
   runtime/                the ONLY Docker setup (versions pinned)
   installer/              build.ps1 -> Setup.exe
@@ -45,6 +47,20 @@ database, `ai_security.db` in the data folder (WAL mode). On first start of V11.
 Detections (MQTT), saved events, sightings and drone actions are published once on the pipeline
 (`bus.py`); subscribers are the incident tracker and auto-dispatch. An incident is everything at one
 camera with no more than 5 minutes of quiet in between (Settings → Incidents).
+
+## Evidence packs and patterns
+
+Settings → Incidents → an incident → **Download evidence pack**: a ZIP with the timeline, snapshots, the
+drone's photo/video and GPS track (recorded every 2 s during a response), a readable report, and
+`manifest.json` listing every file's SHA-256, signed with this PC's Ed25519 key (`evidence_signing.key`
+in the data folder, made on first use; never leaves the PC). The pack carries its own checker
+(`verify_evidence.py`, also hashed); the Incidents page can check packs too and shows the key fingerprint.
+
+`patterns.py` listens on the pipeline: the same unknown plate on N separate visits within H hours
+(casing), and far more people/vehicles than usual for a camera's hour of the week (after two weeks of
+history). Warnings go to Telegram and into the camera's incident. Settings → Patterns.
+
+All Telegram alerts (unknown/known faces and plates, patterns) now go through the pipeline ("alert").
 
 ## Sign-in and audit log
 

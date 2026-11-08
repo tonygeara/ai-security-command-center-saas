@@ -21,7 +21,7 @@ class Incidents:
         self._seen_objects = {}  # object id -> time (a tracked object counts once)
 
     def attach(self, bus):
-        for kind in ("detection", "event", "sighting", "dispatch", "drone"):
+        for kind in ("detection", "event", "sighting", "dispatch", "drone", "alert"):
             bus.subscribe(kind, self.on_message)
 
     # ---- pipeline ----
@@ -58,6 +58,9 @@ class Incidents:
         elif kind == "dispatch":
             self.add(camera, t, kind, f"{m.get('drone_label') or m.get('drone')} sent ({m.get('by')})", 3,
                      {"drone": m.get("drone"), "by": m.get("by")})
+        elif kind == "alert":
+            if m.get("pattern"):  # casing / unusual activity warnings (patterns.py)
+                self.add(camera, t, "pattern", m.get("text") or "", 2, {"alert": m.get("alert")})
         elif kind == "drone":
             self.add(camera, t, kind, f"{m.get('drone_label') or m.get('drone')}: {m.get('text')}", 1,
                      {"drone": m.get("drone")}, open_only=True)
@@ -125,7 +128,17 @@ class Incidents:
         return {"id": r["id"], "started": r["started"], "updated": r["updated"], "camera": r["camera"], "title": r["title"],
                 "severity": r["severity"], "level": SEVERITY.get(r["severity"], "activity"), "status": r["status"]}
 
+    def add_track_point(self, camera, t, drone, lat, lon, alt=None):
+        inc = self.current(camera, t)
+        if inc:
+            self.store.x("INSERT INTO tracks(incident, t, drone, lat, lon, alt) VALUES(?,?,?,?,?,?)",
+                         (inc["id"], t, drone, lat, lon, alt))
+
+    def track(self, inc_id):
+        return [dict(r) for r in self.store.q("SELECT t, drone, lat, lon, alt FROM tracks WHERE incident=? ORDER BY t", (inc_id,))]
+
     def prune(self, before):
         with self.store.lock:
+            self.store.x("DELETE FROM tracks WHERE incident IN (SELECT id FROM incidents WHERE updated < ?)", (before,))
             self.store.x("DELETE FROM incident_items WHERE incident IN (SELECT id FROM incidents WHERE updated < ?)", (before,))
             self.store.x("DELETE FROM incidents WHERE updated < ?", (before,))

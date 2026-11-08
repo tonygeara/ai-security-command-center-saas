@@ -97,6 +97,7 @@ EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")  # before V11.5; impo
 DATA_FOLDER = os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER)
 # Events, sightings, audit log and incidents: one SQLite database (store.py).
 import store as _store_mod
+import audit  # needed early: the retention worker (started below) prunes the audit log
 STORE = _store_mod.Store(os.path.join(DATA_FOLDER, "ai_security.db"))
 STORE.migrate(event_csv=EVENT_LOG, sightings_jsonl=os.path.join(BASE_FOLDER, "sightings.jsonl"),
               audit_jsonl=os.path.join(DATA_FOLDER, "audit_log.jsonl"))
@@ -107,6 +108,9 @@ import incidents as _incidents_mod
 PIPELINE = _bus_mod.Bus("pipeline")
 INCIDENTS = _incidents_mod.Incidents(STORE)
 INCIDENTS.attach(PIPELINE)
+import patterns as _patterns_mod
+PATTERNS = _patterns_mod.Patterns(STORE, lambda: _load_customer_settings(), PIPELINE.publish)
+PATTERNS.attach(PIPELINE)
 PLATE_FILE = os.path.join(BASE_FOLDER, "known_plates.json")
 TELEGRAM_CONFIG_FILE = os.path.join(BASE_FOLDER, "telegram_config.json")
 EDGE_AGENT_CONFIG_FILE = os.path.join(BASE_FOLDER, "edge_agent_config.json")
@@ -155,7 +159,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.5.0"
+APP_VERSION = "V11.6.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -345,6 +349,15 @@ def telegram_ready(config=None):
         and str(config.get("bot_token") or "").strip()
         and str(config.get("chat_id") or "").strip()
     )
+
+
+def _alert_to_telegram(m):
+    """Pipeline subscriber: every "alert" (unknown/known faces and plates, casing, unusual activity) goes to Telegram."""
+    queue_telegram_alert(m.get("alert") or "alert", m.get("text") or "", m.get("key") or m.get("text") or "",
+                         snapshot_bytes=m.get("snapshot"), buttons=m.get("buttons"))
+
+
+PIPELINE.subscribe("alert", _alert_to_telegram)
 
 
 def queue_telegram_alert(kind, text, key, snapshot_bytes=None, buttons=None):
@@ -852,21 +865,19 @@ def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_b
         # Unknown alerts are queued only after the event was actually saved,
         # so the existing object-ID de-duplication also prevents Telegram spam.
         if event_type.upper() == "UNKNOWN FACE":
-            queue_telegram_alert(
-                "unknown_face",
-                f"⚠️ UNKNOWN PERSON detected at {CAMERA_NAME}\n{date_text} {time_text}",
-                f"unknown_face:{object_id or identifier or name}",
-                snapshot_bytes=snapshot_bytes,
-                buttons=alert_buttons(CAMERA_NAME),
+            PIPELINE.publish(
+                "alert", alert="unknown_face", camera=CAMERA_NAME,
+                text=f"⚠️ UNKNOWN PERSON detected at {CAMERA_NAME}\n{date_text} {time_text}",
+                key=f"unknown_face:{object_id or identifier or name}",
+                snapshot=snapshot_bytes, buttons=alert_buttons(CAMERA_NAME),
             )
         elif event_type.upper() in {"UNKNOWN PLATE", "UNKNOWN VEHICLE"}:
             plate_text = identifier or "Plate unavailable"
-            queue_telegram_alert(
-                "unknown_vehicle",
-                f"⚠️ UNKNOWN VEHICLE detected at {CAMERA_NAME}\nPlate: {plate_text}\n{date_text} {time_text}",
-                f"unknown_vehicle:{object_id or plate_text}",
-                snapshot_bytes=snapshot_bytes,
-                buttons=alert_buttons(CAMERA_NAME),
+            PIPELINE.publish(
+                "alert", alert="unknown_vehicle", camera=CAMERA_NAME,
+                text=f"⚠️ UNKNOWN VEHICLE detected at {CAMERA_NAME}\nPlate: {plate_text}\n{date_text} {time_text}",
+                key=f"unknown_vehicle:{object_id or plate_text}",
+                snapshot=snapshot_bytes, buttons=alert_buttons(CAMERA_NAME),
             )
 
         return True
@@ -1958,10 +1969,10 @@ def on_message(
             set_face_overlay(True, display_name, payload_box(data), object_id=face_object_id)
             detection_beep("face_" + display_name.lower(), True)
             record_sighting("face", display_name, "", CAMERA_NAME, face_object_id)
-            queue_telegram_alert(
-                "known_face",
-                f"✅ {display_name} detected at {CAMERA_NAME}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
-                "known_face:" + display_name.lower(),
+            PIPELINE.publish(
+                "alert", alert="known_face", camera=CAMERA_NAME,
+                text=f"✅ {display_name} detected at {CAMERA_NAME}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                key="known_face:" + display_name.lower(),
             )
 
             first_name = (
@@ -2071,10 +2082,10 @@ def on_message(
             record_sighting("plate", vehicle if known else "", plate, CAMERA_NAME, vehicle_object_id, known=known)
 
             if known:
-                queue_telegram_alert(
-                    "known_vehicle",
-                    f"✅ Authorized vehicle detected at {CAMERA_NAME}\n{vehicle}\nPlate: {plate}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
-                    "known_vehicle:" + plate,
+                PIPELINE.publish(
+                    "alert", alert="known_vehicle", camera=CAMERA_NAME,
+                    text=f"✅ Authorized vehicle detected at {CAMERA_NAME}\n{vehicle}\nPlate: {plate}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    key="known_vehicle:" + plate,
                 )
                 speak(
                     (
@@ -2311,7 +2322,6 @@ import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch  # noqa: E401
 import users as user_accounts
-import audit
 import web_access
 import web_records
 
@@ -4809,6 +4819,24 @@ def _drone_event(msg, slot=None):
 _drone_event_audited = {}
 
 
+TRACK_EVERY_S = 2  # one GPS point every 2 s while a drone responds (for the incident's evidence pack)
+_track_last = {}
+
+
+def _record_track(slot, tel):
+    try:
+        if not (drone_response.get("active") and drone_response.get("drone") == slot and tel.get("lat") is not None):
+            return
+        now = time.time()
+        if now - _track_last.get(slot, 0) < TRACK_EVERY_S:
+            return
+        _track_last[slot] = now
+        INCIDENTS.add_track_point(drone_response.get("camera"), now, slot, float(tel["lat"]), float(tel["lon"]),
+                                  tel.get("altitude"))
+    except Exception as e:
+        print("Track error:", e)
+
+
 def _drone_session(conn, addr):
     import hashlib, hmac, secrets
     conn.settimeout(10)
@@ -4854,6 +4882,7 @@ def _drone_session(conn, addr):
             if kind == "tel":
                 msg.pop("t", None)
                 link["telemetry"], link["tel_at"] = msg, time.time()
+                _record_track(slot, msg)
             elif kind == "ack":
                 with drone_ack_cond:
                     link["acks"][int(msg.get("id") or 0)] = msg
@@ -8201,7 +8230,8 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False}
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,
+                           **_patterns_mod.DEFAULTS}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
     except Exception:return dict(DEFAULT_CUSTOMER_SETTINGS)
@@ -8229,6 +8259,12 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/incidents"><span>⚑</span><b>Incidents</b><small>Each camera's events as one story</small></a>
 <a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
 </nav>
+<section class="panel"><div class="panel-head"><div class="panel-title">🔎 Patterns</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Casing warnings</b><div class="muted">The same unknown plate coming by several times: burglars often check a place before they come back.</div></div><input class="toggle" type="checkbox" data-key="casing_alerts" onchange="save()"></div>
+<div class="hud-row"><div><b>Warn after this many visits</b></div><input id="casingVisits" type="number" min="2" max="20" style="width:120px" onchange="save()"></div>
+<div class="hud-row"><div><b>…within this many hours</b></div><input id="casingHours" type="number" min="1" max="336" style="width:120px" onchange="save()"></div>
+<div class="hud-row"><div><b>Unusual activity warnings</b><div class="muted">Far more people or vehicles at a camera than usual for that hour and weekday (learns for two weeks first).</div></div><input class="toggle" type="checkbox" data-key="unusual_alerts" onchange="save()"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
 <div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
@@ -8260,7 +8296,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <button class="hud-btn" onclick="location.href='/setup/discover'">Add camera or drone</button>
 </div></section>
 </main>
-<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
+<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
 async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to shut down';setTimeout(()=>{delete b.dataset.arm;b.textContent='Shut down system'},4000);return}
   b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Shutting down…';
   const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));
@@ -8354,7 +8390,8 @@ def map_cache_stats():
 app.secret_key = user_accounts.secret_key(os.path.join(DATA_FOLDER, "session.key"))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=12 * 3600)
 web_access.setup(app, DATA_FOLDER, hud_page)
-web_records.setup(app, STORE, INCIDENTS, hud_page, _load_customer_settings)
+web_records.setup(app, STORE, INCIDENTS, hud_page, _load_customer_settings,
+                  data_folder=DATA_FOLDER, event_folder=EVENT_FOLDER, version=APP_VERSION)
 USERS_FILE = web_access.USERS_FILE
 current_user = web_access.current_user
 html_escape = web_access.html_escape

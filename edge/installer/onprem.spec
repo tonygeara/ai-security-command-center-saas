@@ -10,7 +10,7 @@ STAGE = os.environ['AI_CC_STAGE']
 SLUG = os.environ.get('AI_CC_SLUG', 'AI-Command-Centre-Lebanon')
 
 # The compiled modules hide their imports from PyInstaller, so list what they use.
-hidden = ['dashboard', 'browser_mode', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'licensing', 'edition', 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'pages', 'werkzeug.security',
+hidden = ['dashboard', 'browser_mode', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'licensing', 'edition', 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'pages', 'werkzeug.security',
           'flask', 'werkzeug', 'jinja2', 'markupsafe', 'itsdangerous', 'click', 'blinker',
           'cv2', 'numpy', 'requests', 'urllib3', 'certifi', 'idna', 'charset_normalizer',
           'paho.mqtt.client', 'paho.mqtt.publish', 'yaml', 'pyttsx3', 'comtypes', 'win32com.client',
