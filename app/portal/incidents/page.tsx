@@ -10,6 +10,7 @@ export default async function Incidents() {
   const supabase = await createClient();
   const {data: {user}} = await supabase.auth.getUser();
   if (!user) redirect("/login");
+  if (user.user_metadata?.must_change_password) redirect("/account/password");
   const {data: member} = await supabase.from("organization_members").select("organization_id").eq("user_id", user.id).limit(1).maybeSingle();
   if (!member) redirect("/onboarding");
   const org = member.organization_id as string;

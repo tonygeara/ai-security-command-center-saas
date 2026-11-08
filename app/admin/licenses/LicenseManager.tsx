@@ -9,7 +9,7 @@ const DEFAULT_FEATURES = ["camera_ai","face_ai","lpr","drone_live","drone_ai","d
 const inYear = () => { const d = new Date(); d.setFullYear(d.getFullYear() + 1); return d.toISOString().slice(0, 10); };
 const blank = (): Lic => ({edition:"onprem", client_name:"", company:"", location:"", address:"", contact_name:"", phone:"", email:"", notes:"",
   price:"", currency:"USD", billing_period:"yearly", next_payment_date:"", payment_status:"pending", machine_id:"", plan:"on-prem",
-  cameras:1, drones:1, features:DEFAULT_FEATURES, expires_on:inYear(), organization_id:""});
+  cameras:1, drones:1, max_users:5, features:DEFAULT_FEATURES, expires_on:inYear(), organization_id:""});
 const daysLeft = (d?: string) => d ? Math.ceil((new Date(d).getTime() - Date.now()) / 86400000) : null;
 
 function download(l: Lic){
@@ -71,7 +71,8 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
       } else {
         if(!f.organization_id) throw new Error("Choose the client's portal account.");
         const org = orgs.find(o => o.id === f.organization_id);
-        const row = {...details, edition: "saas", organization_id: f.organization_id, plan: org?.plan_code ?? f.plan, cameras, drones, features: f.features,
+        const max_users = Math.min(1000, Math.max(1, Math.trunc(Number(f.max_users) || 5)));
+        const row = {...details, edition: "saas", organization_id: f.organization_id, plan: org?.plan_code ?? f.plan, cameras, drones, max_users, features: f.features,
           expires_on: f.expires_on || null, issued_on: f.issued_on || new Date().toISOString().slice(0, 10), status: f.status || "active"};
         const {error} = f.id ? await sb.from("client_licenses").update(row).eq("id", f.id) : await sb.from("client_licenses").insert(row);
         if(error) throw error;
@@ -135,6 +136,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
               {orgs.map(o => <option key={o.id} value={o.id}>{o.name} ({String(o.plan_code).toUpperCase()})</option>)}</select></label>}
         {F("cameras", "Cameras (max) *", {type: "number", min: 1, disabled: lockedFile})}
         {F("drones", "Drones (max, 0 = none)", {type: "number", min: 0, disabled: lockedFile})}
+        {form.edition === "saas" && F("max_users", "Portal users (max)", {type: "number", min: 1, max: 1000})}
         {F("expires_on", form.edition === "onprem" ? "Expires *" : "Contract ends", {type: "date", disabled: lockedFile})}
         {form.edition === "onprem" && F("plan", "Plan label", {disabled: lockedFile})}
       </div>

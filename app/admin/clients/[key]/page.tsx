@@ -6,6 +6,7 @@ import SubscriptionControls from "../../SubscriptionControls";
 import FeatureToggle from "../../FeatureToggle";
 import DownloadLicense from "./DownloadLicense";
 import RemoveButton from "../../RemoveButton";
+import UserManager from "../../../components/UserManager";
 
 const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"]];
 const FEATURE_LABEL = Object.fromEntries(FEATURES);
@@ -66,9 +67,8 @@ It can be paired again later with a new code.`}/></td></tr>; })}
         {sources.filter(s => !s.edge_device_id).map(s => <tr key={s.id}><td colSpan={3} className="muted">Not linked to a PC</td><td>{s.source_type === "drone" ? "✈" : "▣"} {s.name}</td></tr>)}
       </tbody></table></div>
       <h2>Users</h2>
-      <div className="card tableWrap"><table className="adminTable"><tbody>{users.map(u => <tr key={u.user_id}><td><b>{u.full_name || u.email}</b><div className="muted">{u.email}</div></td><td>{u.role}</td>
-        <td className="muted">{u.last_sign_in_at ? "last sign-in " + new Date(u.last_sign_in_at).toLocaleString() : "never signed in"}</td></tr>)}
-        {!users.length && <tr><td className="muted">No users.</td></tr>}</tbody></table></div>
+      <p className="muted">You can add an Admin (manages this company), Editors and Viewers, change roles, reset passwords and remove anyone. Their admin can manage Editors and Viewers within the user places on their licence.</p>
+      <div className="card"><UserManager orgId={o.id}/></div>
     </>;
   }
 
