@@ -14,6 +14,9 @@ edge/
   app/web_records.py      audit log, incidents, evidence packs, browser presence, shut down (Flask blueprint)
   app/evidence.py         signed evidence packs (build and check)
   app/patterns.py         casing and unusual-activity warnings
+  app/coverage.py         camera views on the ground, blind spots, suggested camera (Coverage page)
+  app/handoff.py          camera-to-drone handoff (off by default)
+  app/cloud_sync.py       phone access: incidents and live pictures to the portal (off by default)
   app/dashboard.py        dashboard web app (http://127.0.0.1:8080)
   runtime/                the ONLY Docker setup (versions pinned)
   installer/              build.ps1 -> Setup.exe
@@ -61,6 +64,24 @@ in the data folder, made on first use; never leaves the PC). The pack carries it
 history). Warnings go to Telegram and into the camera's incident. Settings → Patterns.
 
 All Telegram alerts (unknown/known faces and plates, patterns) now go through the pipeline ("alert").
+
+## Coverage, handoff and phone access
+
+**Coverage** (Settings → Coverage): each camera placed on the Drone page gets a view here (facing,
+width, range). The page draws the views, a coverage heat map over the site outline, the share of blind
+spots and the best place for one more camera; clicking a spot shows which cameras see it and can send a
+drone there. 4D LIVE draws the views too. Geometry only: walls and trees are not taken into account.
+
+**Handoff** (off by default; Drone page → Drone response, or the Coverage page): every tracked object's
+boxes go on the pipeline ("track"); when Frigate ends an object at a camera with a view, the spot just
+past where it left (`coverage.exit_point`) gets the nearest ready drone, with the auto-dispatch rules
+(people/vehicles, hours, cooldown). The drone hovers there; it does not chase.
+
+**Phone access** (cloud edition, off by default; Settings → System): incidents at "unknown" and above
+go to the portal with one snapshot each, through the `edge-sync` function (device token). The portal's
+Incidents page can ask for live pictures of a camera: the PC then uploads one every 3 s for as long as
+the page is open (requests last 2 minutes and are renewed). Backend: `supabase/migrations/
+20261108120000_phone_access.sql`, `supabase/functions/edge-sync`; portal: `app/portal/incidents`.
 
 ## Sign-in and audit log
 

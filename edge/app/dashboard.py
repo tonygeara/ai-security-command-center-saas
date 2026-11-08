@@ -97,6 +97,7 @@ EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")  # before V11.5; impo
 DATA_FOLDER = os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER)
 # Events, sightings, audit log and incidents: one SQLite database (store.py).
 import store as _store_mod
+import coverage
 import audit  # needed early: the retention worker (started below) prunes the audit log
 STORE = _store_mod.Store(os.path.join(DATA_FOLDER, "ai_security.db"))
 STORE.migrate(event_csv=EVENT_LOG, sightings_jsonl=os.path.join(BASE_FOLDER, "sightings.jsonl"),
@@ -159,7 +160,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.6.0"
+APP_VERSION = "V11.7.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -1866,6 +1867,11 @@ def on_message(
                         identity_label=drone_label,
                     )
             return
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update", "end"):
+            after_t = data.get("after") if isinstance(data.get("after"), dict) else {}
+            PIPELINE.publish("track", camera=camera, type=data.get("type"), object_id=str(after_t.get("id") or ""),
+                             label=str(after_t.get("label") or "").lower(), box=payload_box(after_t),
+                             stationary=bool(after_t.get("stationary")), false_positive=after_t.get("false_positive"))
         if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update"):
             after_auto = data.get("after") if isinstance(data.get("after"), dict) else {}
             if after_auto.get("false_positive") is False:
@@ -2320,7 +2326,7 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch  # noqa: E401
+import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -5482,7 +5488,11 @@ RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "h
                      "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": [],
                      # Auto-send the nearest drone when a camera sees someone at night (off until the owner turns it on).
                      "auto_dispatch": False, "auto_person": True, "auto_vehicle": True, "auto_from": "19:00", "auto_to": "06:00",
-                     "auto_cooldown_min": 10}
+                     "auto_cooldown_min": 10,
+                     # Digital twin (coverage.py): where each camera looks, and the site's outline.
+                     "camera_views": {}, "site_outline": [],
+                     # Camera-to-drone handoff: off until the owner turns it on (Drone page / Coverage).
+                     "handoff": False}
 sightings_lock = threading.Lock()
 _sighting_last = {}
 
@@ -5545,7 +5555,13 @@ def save_response_settings(data):
             lo, hi = {"altitude_m": (10, DRONE_LIMITS["max_altitude_m"]), "speed_ms": (1, 8), "hover_seconds": (10, 600), "min_battery": (20, 90),
                       "auto_cooldown_min": (1, 120)}[k]
             v = max(lo, min(hi, float(v)))
-        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle"):
+        elif k == "camera_views" and isinstance(v, dict):
+            v = {str(cam)[:60]: coverage.clean_view(view) for cam, view in list(v.items())[:64]}
+        elif k == "site_outline":
+            v = [[float(p[0]), float(p[1])] for p in (v or [])[:200]
+                 if isinstance(p, (list, tuple)) and len(p) == 2 and -90 <= float(p[0]) <= 90 and -180 <= float(p[1]) <= 180]
+            v = v if len(v) >= 3 else []
+        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle", "handoff"):
             v = bool(v)
         elif k in ("auto_from", "auto_to"):
             v = str(v) if re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(v)) else RESPONSE_DEFAULTS[k]
@@ -5637,15 +5653,23 @@ def _nearest_ready(camera):
     return min(ready, key=far), ""
 
 
-def dispatch_drone(camera, by="dashboard", drone=None):
+def dispatch_drone(camera, by="dashboard", drone=None, target=None):
+    """Send a drone to a camera (or, with target=(lat, lon), to a spot near that camera)."""
     if drone_response["active"]:
         return {"ok": False, "error": f"{drone_label(drone_response['drone'])} is already responding to {drone_response['camera']}."}
     slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d), drone) if drone else _nearest_ready(camera)
     if problem:
         return {"ok": False, "error": problem}
     cfg = load_response_settings()
-    loc = cfg["camera_locations"][camera]
+    loc = {"lat": float(target[0]), "lon": float(target[1])} if target else cfg["camera_locations"][camera]
     tel = get_link(slot)["telemetry"]
+    if target:
+        home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
+        if None not in home and _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
+            return {"ok": False, "error": f"That spot is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."}
+        z = nofly.zone_at(nofly_zones(), loc["lat"], loc["lon"])
+        if z:
+            return {"ok": False, "error": f"That spot is inside no-fly zone “{z['name']}”."}
     via = nofly.detour(nofly_zones(), (tel["lat"], tel["lon"]), (loc["lat"], loc["lon"])) if tel.get("lat") else []
     if via is None:
         z = nofly.zone_at(nofly_zones(), loc["lat"], loc["lon"])
@@ -5659,7 +5683,8 @@ def dispatch_drone(camera, by="dashboard", drone=None):
     who = drone_label(slot) if len(drone_slots()) > 1 else "Drone"
     drone_response.update(active=True, drone=slot, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
                           message=f"{who} on its way to {camera}", routing=bool(via),
-                          began=time.time(), log_pending=True, cam_snap=None, drone_snap=None)
+                          began=time.time(), log_pending=True, cam_snap=None, drone_snap=None,
+                          target=loc if target else None)
     # The camera's view when the drone was sent, for the event record (fetched in the background).
     threading.Thread(target=lambda: drone_response.update(cam_snap=_camera_snapshot(camera)), daemon=True).start()
     if via:
@@ -5676,6 +5701,41 @@ def dispatch_drone(camera, by="dashboard", drone=None):
     _drone_event(f"Drone response to {camera} started ({by})", slot)
     PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by)
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
+
+
+def send_drone_to_point(lat, lon, by="dashboard", drone=None):
+    """Send the nearest ready drone to any spot (Coverage page, handoff). The response is filed under the
+    nearest located camera, whose incident it joins."""
+    locs = load_response_settings()["camera_locations"]
+    if not locs:
+        return {"ok": False, "error": "Set at least one camera's place on the map first."}
+    camera = min(locs, key=lambda c: _distance_m(lat, lon, locs[c]["lat"], locs[c]["lon"]))
+    return dispatch_drone(camera, by=by, drone=drone, target=(lat, lon))
+
+
+def site_cameras():
+    """{camera: {"lat", "lon", "view"}} for the cameras placed on the map."""
+    cfg = load_response_settings()
+    return {n: {**p, "view": coverage.clean_view((cfg.get("camera_views") or {}).get(n))} for n, p in cfg["camera_locations"].items()}
+
+
+_frame_size_cache = {"mtime": None, "sizes": {}}
+
+
+def _camera_frame_size(camera):
+    """The camera's detection picture size from the Frigate config (Frigate's boxes are in it)."""
+    path = _frigate_config_path()
+    try:
+        mtime = os.path.getmtime(path) if path else None
+        if mtime != _frame_size_cache["mtime"]:
+            with open(path, encoding="utf-8") as f:
+                cams = (yaml.safe_load(f) or {}).get("cameras") or {}
+            _frame_size_cache.update(mtime=mtime, sizes={n: ((c.get("detect") or {}).get("width"), (c.get("detect") or {}).get("height"))
+                                                         for n, c in cams.items() if isinstance(c, dict)})
+    except Exception:
+        pass
+    w, h = _frame_size_cache["sizes"].get(camera, (None, None))
+    return (w or 1280, h or 720)
 
 
 def _in_window(start, end, now=None):
@@ -5696,6 +5756,11 @@ def _auto_dispatch_from_pipeline(m):
 
 
 PIPELINE.subscribe("detection", _auto_dispatch_from_pipeline)
+import handoff as _handoff_mod
+HANDOFF = _handoff_mod.Handoff(lambda: load_response_settings(), lambda: site_cameras(), lambda cam: _camera_frame_size(cam),
+                               lambda lat, lon, by: send_drone_to_point(lat, lon, by=by), PIPELINE.publish,
+                               lambda a, b: _in_window(a, b), lambda: drone_control_allowed())
+HANDOFF.attach(PIPELINE)
 
 
 def auto_dispatch_check(camera, label, object_id="", stationary=False):
@@ -5829,7 +5894,7 @@ def _drone_response_worker():
                 continue  # still flying round a no-fly zone
             if drone_response["phase"] == "flying":
                 if not mission and drone_response["started"] and time.time() - drone_response["started"] > 5:
-                    loc = cfg["camera_locations"].get(cam) or {}
+                    loc = drone_response.get("target") or cfg["camera_locations"].get(cam) or {}
                     near = tel.get("lat") and loc and _distance_m(tel["lat"], tel["lon"], loc["lat"], loc["lon"]) < 8
                     if near:
                         drone_response.update(phase="hovering", arrived=time.time(), stay_until=time.time() + cfg["hover_seconds"],
@@ -7707,7 +7772,8 @@ def api_live4d():
                     "zones": [{"id": z["id"], "name": z["name"], "source": z.get("source", ""), "points": z["points"]} for z in nofly_zones()],
                     "aircraft": [{**{k: a[k] for k in ("hex", "call", "lat", "lon", "height_ft", "track", "dist_m")}, "threat": a["hex"] in threats}
                                  for a in (t["aircraft"] if fresh else [])][:40],
-                    "maps": maps[:1]})
+                    "maps": maps[:1],
+                    "cameras": [{"name": n, "lat": c["lat"], "lon": c["lon"], "view": c["view"]} for n, c in site_cameras().items()]})
 
 
 GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
@@ -7762,6 +7828,39 @@ def maps_embed_page():
     return Response('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                     '<base target="_top"><link rel="stylesheet" href="/hud.css"><style>body{background:#020a10}.hud-main{padding:12px}'
                     '.page-head{display:none}</style></head><body>' + pages.maps.BODY + '</body></html>', mimetype="text/html")
+
+
+@app.route("/coverage")
+def coverage_page():
+    return Response(COVERAGE_PAGE, mimetype="text/html")
+
+
+@app.route("/api/coverage")
+def api_coverage():
+    return jsonify(coverage.analyse(site_cameras(), load_response_settings().get("site_outline") or None))
+
+
+@app.route("/api/coverage/at")
+def api_coverage_at():
+    try:
+        lat, lon = float(request.args["lat"]), float(request.args["lon"])
+    except (KeyError, ValueError):
+        return jsonify({"ok": False, "error": "lat and lon needed"}), 400
+    return jsonify({"ok": True, "cameras": coverage.who_sees(site_cameras(), lat, lon)})
+
+
+@app.route("/api/coverage/send", methods=["POST"])
+def api_coverage_send():
+    data = request.get_json(silent=True) or {}
+    try:
+        lat, lon = float(data["lat"]), float(data["lon"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"ok": False, "error": "lat and lon needed"}), 400
+    r = send_drone_to_point(lat, lon, by="dashboard: send to spot")
+    return jsonify(r), (200 if r.get("ok") else 409)
+
+
+COVERAGE_PAGE = hud_page("Coverage", pages.coverage.BODY, active="settings")
 
 
 @app.route("/safety")
@@ -8230,7 +8329,7 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,"cloud_incidents":False,
                            **_patterns_mod.DEFAULTS}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
@@ -8257,6 +8356,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
 <a href="/incidents"><span>⚑</span><b>Incidents</b><small>Each camera's events as one story</small></a>
+<a href="/coverage"><span>◔</span><b>Coverage</b><small>What cameras see, blind spots</small></a>
 <a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
 </nav>
 <section class="panel"><div class="panel-head"><div class="panel-title">🔎 Patterns</div></div><div class="panel-body">
@@ -8266,6 +8366,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <div class="hud-row"><div><b>Unusual activity warnings</b><div class="muted">Far more people or vehicles at a camera than usual for that hour and weekday (learns for two weeks first).</div></div><input class="toggle" type="checkbox" data-key="unusual_alerts" onchange="save()"></div>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
+<div class="hud-row" id="cloudRow"><div><b>Phone access</b><div class="muted">Off: nothing leaves this PC. On: incidents (unknown faces and plates, drone responses) with one snapshot each go to your portal account, and the portal can ask for live pictures of a camera while you watch on your phone. Cloud edition only.</div><div class="muted" id="cloudState"></div></div><input class="toggle" type="checkbox" data-key="cloud_incidents" onchange="save()"></div>
 <div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
 <div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
 <div id="offMsg" class="hud-msg"></div>
@@ -8297,6 +8398,8 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 </div></section>
 </main>
 <script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
+fetch('/api/cloud/sync').then(r=>r.json()).then(c=>{if(c.onprem){cloudRow.style.display='none';return}
+  cloudState.textContent=!c.paired?'This PC is not paired with the portal yet.':c.synced===false?'Last sync failed: '+c.error:c.synced?`Synced ${new Date(c.last*1000).toLocaleTimeString()} · ${c.incidents_sent} incident updates sent`+(c.watching?` · ${c.watching} watching live`:''):''});
 async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to shut down';setTimeout(()=>{delete b.dataset.arm;b.textContent='Shut down system'},4000);return}
   b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Shutting down…';
   const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));
@@ -9014,6 +9117,38 @@ def _start_v105_recovery():
     return t
 # ---------------- END V10.5 LOCAL CAMERA AUTO-RECOVERY ----------------
 
+# ---------------- Phone access through the cloud (cloud_sync.py) ----------------
+import cloud_sync as _cloud_sync_mod
+EDGE_SYNC_URL = CLOUD_CONTROL_URL.rsplit("/", 1)[0] + "/edge-sync"
+
+
+def _cloud_sync_enabled():
+    return (edition.EDITION != "onprem" and not onprem_mode() and bool(_load_customer_settings().get("cloud_incidents")))
+
+
+def _event_file(snapshot):
+    path = os.path.join(EVENT_FOLDER, os.path.basename(str(snapshot or "").replace("\\", "/")))
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+CLOUD_SYNC = _cloud_sync_mod.CloudSync(
+    EDGE_SYNC_URL, lambda: str(load_edge_agent_config().get("device_token") or "").strip(), _cloud_sync_enabled, INCIDENTS,
+    _event_file, lambda cam: _camera_snapshot(cam), lambda: [n for n in _frigate_camera_names() if not _is_drone_name(n)])
+
+
+@app.route("/api/cloud/sync")
+def api_cloud_sync():
+    st = dict(CLOUD_SYNC.state)
+    return jsonify({**st, "ok": True, "synced": st.pop("ok", None), "enabled": _cloud_sync_enabled(),
+                    "onprem": edition.EDITION == "onprem" or onprem_mode(),
+                    "paired": bool(str(load_edge_agent_config().get("device_token") or "").strip()),
+                    "watching": len(CLOUD_SYNC.live)})
+
+
 def main():
     """Start the dashboard web server. Called by `python dashboard.py` and by the packaged
     launcher (which imports this module, also when it is compiled to native code)."""
@@ -9022,6 +9157,7 @@ def main():
     start_virtual_drones()
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     start_assistant()
+    CLOUD_SYNC.start()
     print()
     print(
         "======================================"

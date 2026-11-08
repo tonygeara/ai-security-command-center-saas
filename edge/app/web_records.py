@@ -42,7 +42,7 @@ def evidence_key():
 _audit_actor = threading.local()  # .source for work done outside a web request (e.g. "telegram")
 AUDITED_WRITES = re.compile(r"^/api/(drone/|routes|response/|maps/[a-f0-9]{12}/(fly|stop)|maps/plan|virtual-drones|nofly"
                             r"|gps-dispatch/request|users|customer/settings|safety/settings|response/settings|airspace/"
-                            r"|system/|license|cloud/pair|sources/|incidents/)")
+                            r"|system/|license|cloud/pair|sources/|incidents/|coverage/)")
 STICK_AUDIT_GAP = 30  # stick input arrives many times a second: log when a stick session starts
 _stick_audit_last = {}
 

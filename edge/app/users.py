@@ -33,6 +33,7 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/(routes/optimize|rf/check)$",  # planning helpers (they change nothing)
     r"^/api/incidents/\d+$",  # mark an incident reviewed
     r"^/api/evidence/verify$",  # check a pack (changes nothing)
+    r"^/api/coverage/send$",  # send a drone to a spot on the Coverage page
 )]
 
 _cache = {"path": None, "mtime": None, "users": []}
