@@ -47,6 +47,13 @@ ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 CloseApplications=yes
 
+[Tasks]
+; Guarding should not depend on someone opening the program: start in the background at Windows sign-in.
+Name: "autostart"; Description: "Start guarding automatically when I sign in to Windows (recommended)"
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppSlug}"; ValueData: """{app}\{#MyAppExeName}"" --background"; Flags: uninsdeletevalue; Tasks: autostart
+
 [Files]
 Source: "dist\{#MyAppSlug}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Offline install: if the AI services package sits next to Setup.exe (USB stick), copy it in.
@@ -56,8 +63,8 @@ Source: "..\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesu
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-; Normal start opens the system in the web browser (no window) and stops it when the browser closes.
-; This one shows the control window (Start / Stop System, Diagnostics) and never stops on its own.
+; Normal start opens the system in the web browser (no window); it keeps guarding when the browser closes.
+; This one shows the control window (Start / Stop System, Diagnostics).
 Name: "{autoprograms}\{#MyAppName} - Control window"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--window"
 
 [Run]

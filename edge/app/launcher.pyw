@@ -5,7 +5,7 @@ from tkinter import ttk, messagebox
 import edition
 import browser_mode as browser_mode_lib
 
-APP_VERSION = 'V11.3.6'
+APP_VERSION = 'V11.4.0'
 PRODUCT_NAME = edition.PRODUCT_NAME
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 FROZEN = getattr(sys, 'frozen', False)
@@ -128,7 +128,7 @@ class App(tk.Tk):
     """browser_mode (the normal start): no window; the system opens in the web browser and stops when
     the browser is closed. `--window` shows this control window instead and nothing stops on its own."""
 
-    def __init__(self, browser_mode=True):
+    def __init__(self, browser_mode=True, background=False):
         super().__init__()
         self.title(f'{PRODUCT_NAME} {APP_VERSION}')
         self.geometry('820x610')
@@ -141,6 +141,7 @@ class App(tk.Tk):
         self.error = ''
         self.window_shown = not browser_mode
         self.quitting = False
+        self.background = background  # started with Windows: run without opening the browser
         self._build()
         self.start_page = browser_mode_lib.StartPage(self, PRODUCT_NAME)
         if not self.start_page.start():
@@ -148,7 +149,8 @@ class App(tk.Tk):
         self.browser_mode = browser_mode and self.start_page is not None
         if self.browser_mode:
             self.withdraw()
-            webbrowser.open(browser_mode_lib.SPLASH_URL)
+            if not background:
+                webbrowser.open(browser_mode_lib.SPLASH_URL)
             threading.Thread(target=self._browser_watch, name='browser-watch', daemon=True).start()
         else:
             self.window_shown = True
@@ -161,7 +163,16 @@ class App(tk.Tk):
                 'url': self.ready_url, 'error': self.error}
 
     def on_action(self, name):
-        self.emit(name)
+        if name == 'shutdown':  # Settings → System → Shut down (the dashboard asks, admins only)
+            threading.Thread(target=self._shutdown, daemon=True).start()
+        else:
+            self.emit(name)
+
+    def _shutdown(self):
+        self.emit('log', 'Shut down asked from the dashboard: stopping the system.')
+        time.sleep(1)  # let the dashboard answer its page first
+        self._stop_services()
+        self.emit('quit')
 
     def show_window(self):
         """From now on the person drives the system from the window; closing the browser stops nothing."""
@@ -177,15 +188,14 @@ class App(tk.Tk):
             if self.window_shown:
                 return
             now = time.time()
+            presence = browser_mode_lib.dashboard_presence(DASHBOARD_PORT)
             page_open = True if self.start_page.is_open(now) else None
-            if page_open is None:
-                pages = browser_mode_lib.dashboard_open_pages(DASHBOARD_PORT)
-                if pages is not None:
-                    page_open = pages > 0
-                elif not self.busy and not self.ready_url:
-                    page_open = False  # nothing started and no start page: the browser is gone
+            if page_open is None and presence is not None:
+                # Normally the system keeps guarding with the browser closed; it only stops with the
+                # browser when Settings → System → "Stop the system when the browser closes" is on.
+                page_open = presence['open_pages'] > 0 or not presence['stop_with_browser']
             decision = watch.step(now, page_open, busy=self.busy,
-                                  splash_ever_seen=self.start_page.last_seen > 0)
+                                  splash_ever_seen=self.background or self.start_page.last_seen > 0)
             if decision == 'show-window':
                 self.emit('log', 'The browser did not open the start page; showing the control window.')
                 self.emit('show')
@@ -497,6 +507,9 @@ if __name__=='__main__':
         run_dashboard_in_process()
     else:
         window = '--window' in sys.argv
+        background = '--background' in sys.argv  # Windows sign-in: start guarding, no browser
+        if background and browser_mode_lib.notify_running_instance('ping'):
+            sys.exit(0)
         # Already running: bring up the browser (or the control window) and leave it at that.
-        if not browser_mode_lib.notify_running_instance('show' if window else 'open'):
-            App(browser_mode=not window).mainloop()
+        if background or not browser_mode_lib.notify_running_instance('show' if window else 'open'):
+            App(browser_mode=not window, background=background and not window).mainloop()

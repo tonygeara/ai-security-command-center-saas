@@ -1,9 +1,11 @@
 """Browser mode: the app runs without its control window.
 
 Starting the app opens a start page in the web browser (served here on port 8089) that shows
-progress and then moves on to the dashboard. While the system runs, every dashboard page tells
-the dashboard it is open (see dashboard.py, /api/browser/*). When no page has been open for a
-short while, the browser was closed: the launcher stops the system and exits.
+progress and then moves on to the dashboard. Closing the browser leaves the system guarding;
+Settings → System → Shut down stops it (the dashboard asks the launcher here: POST /shutdown).
+If "Stop the system when the browser closes" is switched on, every dashboard page tells the
+dashboard it is open (see dashboard.py, /api/browser/*), and when none has been open for a short
+while the launcher stops the system and exits.
 
 The start page's port also makes the app single-instance: a second start finds the first one
 here and asks it to open the browser (or show its window) instead of starting again.
@@ -63,17 +65,18 @@ class BrowserWatch:
         return 'stop' if now - self.closed_since >= self.grace else None
 
 
-def dashboard_open_pages(port, timeout=2):
-    """How many dashboard pages are open in a browser, or None if the dashboard doesn't answer."""
+def dashboard_presence(port, timeout=2):
+    """{'open_pages': n, 'stop_with_browser': bool}, or None if the dashboard doesn't answer."""
     try:
         with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/browser/presence', timeout=timeout) as r:
-            return int(json.loads(r.read().decode('utf-8')).get('open_pages', 0))
+            d = json.loads(r.read().decode('utf-8'))
+        return {'open_pages': int(d.get('open_pages', 0)), 'stop_with_browser': bool(d.get('stop_with_browser'))}
     except Exception:
         return None
 
 
 def notify_running_instance(action, timeout=2):
-    """Ask an already running launcher to 'open' the browser or 'show' its window.
+    """Ask an already running launcher to 'open' the browser or 'show' its window ('ping': just ask).
     True if one answered, so this start should just exit."""
     try:
         req = urllib.request.Request(SPLASH_URL + action, data=b'{}', method='POST',
@@ -140,7 +143,9 @@ class StartPage:
                     self.rfile.read(min(length, 4096))
                 if path == 'bye':
                     page.open = False
-                elif path in ('show', 'open', 'retry'):
+                elif path == 'ping':
+                    pass
+                elif path in ('show', 'open', 'retry', 'shutdown'):
                     page.owner.on_action(path)
                 else:
                     return self._send(404, '{"ok": false}')
@@ -195,7 +200,7 @@ button:hover{background:#114a6e}
   <div id="msg">Starting...</div>
   <div id="err"></div>
   <div class="actions" id="actions"><button id="retry">Try again</button><button id="show">Show control window</button></div>
-  <div class="note">Closing the browser stops the system.</div>
+  <div class="note">The system keeps guarding when you close the browser. To stop it: Settings → System → Shut down.</div>
 </div>
 <script>
 (function(){

@@ -97,7 +97,7 @@ def start_page(monkeypatch):
 def test_start_page_shows_progress_and_is_single_instance(start_page):
     page, owner, url = start_page
     html = urllib.request.urlopen(url, timeout=3).read().decode()
-    assert "Test &lt;Center&gt;" in html and "Closing the browser stops the system" in html
+    assert "Test &lt;Center&gt;" in html and "keeps guarding when you close the browser" in html
     assert json.loads(urllib.request.urlopen(url + "status", timeout=3).read())["message"] == "Starting Frigate..."
     assert page.is_open(page.last_seen + 1)
     assert not bm.StartPage(Owner(), "x", port=page.port).start()  # second copy can't take the port

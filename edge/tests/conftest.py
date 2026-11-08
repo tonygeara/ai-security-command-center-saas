@@ -55,6 +55,7 @@ def d(tmp_path_factory):
     dashboard.DRONE_DISCOVERY_PORT = _free_udp_port()
     dashboard._frigate_camera_names = lambda: ["front", "drone"]
     dashboard.onprem_mode = lambda: True
+    dashboard.REQUIRE_FIRST_ADMIN = False  # most tests use the dashboard without signing in; test_users checks the gate
     dashboard.drone_control_allowed = lambda: True
     dashboard._sources_over_limit = lambda names=None: set()
     dashboard.telegram_ready = lambda cfg=None: True

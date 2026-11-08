@@ -6,7 +6,8 @@ local AI services (Frigate, MQTT, MediaMTX in Docker). The cloud portal lives at
 ```
 edge/
   app/launcher.pyw        launcher; starts Docker services + dashboard
-  app/browser_mode.py     start page in the browser; stops the system when the browser closes
+  app/browser_mode.py     start page in the browser; shut down; optional stop with the browser
+  app/audit.py            tamper-evident audit log
   app/dashboard.py        dashboard web app (http://127.0.0.1:8080)
   runtime/                the ONLY Docker setup (versions pinned)
   installer/              build.ps1 -> Setup.exe
@@ -23,11 +24,19 @@ Upgrading or uninstalling the program never touches the data folder.
 
 ## How it starts and stops
 
-The program has no window by default: it opens the browser on a start page (`http://127.0.0.1:8089`), which
-moves on to the dashboard when the system is ready. Each dashboard page checks in (`/api/browser/*`); when no
-page has been open for 15 seconds the launcher stops the dashboard and the Docker services and exits.
-`AI-Security-Command-Center.exe --window` (Start menu: "… - Control window") shows the control window instead
-and never stops on its own. A start error also opens the window.
+The program has no window by default. Setup adds it to Windows sign-in (`--background`), so it starts
+guarding without opening anything. Opening it from the desktop icon opens the browser on a start page
+(`http://127.0.0.1:8089`), which moves on to the dashboard when the system is ready; if it already runs,
+the dashboard just opens. Closing the browser leaves the system running. **Settings → System → Shut down**
+(admins) asks the launcher (`POST :8089/shutdown`) to stop the dashboard and the Docker services. Stopping
+with the browser is an option (Settings → System), using the pages' check-ins (`/api/browser/*`).
+`--window` (Start menu: "… - Control window") shows the classic control window.
+
+## Sign-in and audit log
+
+The first visit asks for an admin account (`/welcome`); nothing else answers until it exists. Every drone
+action and every change to users, safety and system settings is written to `audit_log.jsonl` in the data
+folder, each line chained to the one before (`app/audit.py`); Settings → Audit log shows and checks it.
 
 ## Build the installer
 

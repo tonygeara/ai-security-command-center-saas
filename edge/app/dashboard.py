@@ -44,6 +44,7 @@ from flask import (
     redirect,
     session,
     g,
+    has_request_context,
 )
 
 
@@ -141,7 +142,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.3.6"
+APP_VERSION = "V11.4.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2319,6 +2320,7 @@ import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch  # noqa: E401
 import users as user_accounts
+import audit
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
 BRAND_FLAGS = {
@@ -4826,6 +4828,13 @@ def _drone_drop(conn, why, slot=None):
 def _drone_event(msg, slot=None):
     link = get_link(slot)
     link["events"] = (link["events"] + [{"at": time.time(), "msg": str(msg)[:200]}])[-30:]
+    key, now = (slot, str(msg)[:110]), time.time()
+    if now - _drone_event_audited.get(key, 0) > 10:  # a message repeated many times a second is logged once
+        _drone_event_audited[key] = now
+        audit_record("drone: " + key[1], target=slot or DRONE_CAMERA_NAME)
+
+
+_drone_event_audited = {}
 
 
 def _drone_session(conn, addr):
@@ -6184,6 +6193,7 @@ def telegram_assistant_worker():
         for upd in res.get("result", []):
             offset = max(offset, upd["update_id"] + 1)
             try:
+                _audit_actor.source = "telegram"
                 if "callback_query" in upd:
                     cq = upd["callback_query"]
                     _tg("answerCallbackQuery", callback_query_id=cq["id"])
@@ -7985,7 +7995,10 @@ def api_browser_open_pages():
         for page, info in list(_browser_pages.items()):
             if not info["asleep"] and now - info["seen"] > BROWSER_PAGE_TIMEOUT:
                 del _browser_pages[page]
-        return jsonify({"ok": True, "open_pages": len(_browser_pages)})
+        pages = len(_browser_pages)
+    # The launcher only stops the system with the browser when this is switched on (Settings → System).
+    return jsonify({"ok": True, "open_pages": pages,
+                    "stop_with_browser": bool(_load_customer_settings().get("stop_with_browser"))})
 
 
 _BROWSER_PRESENCE_SCRIPT = """<script>(function(){
@@ -8358,7 +8371,7 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False}
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
     except Exception:return dict(DEFAULT_CUSTOMER_SETTINGS)
@@ -8383,7 +8396,13 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/license"><span>⚿</span><b>Licence</b><small>This PC's licence</small></a>
 <a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
+<a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
 </nav>
+<section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
+<div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
+<div id="offMsg" class="hud-msg"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Camera live feed on the dashboard</b><div class="muted">Off: the main camera's live video is not shown (or streamed) on the dashboard.</div></div><input class="toggle" type="checkbox" data-key="dashboard_camera_feed" onchange="save()"></div>
 </div></section>
@@ -8410,7 +8429,13 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <button class="hud-btn" onclick="location.href='/setup/discover'">Add camera or drone</button>
 </div></section>
 </main>
-<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}load()</script>""", active="settings")
+<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
+async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to shut down';setTimeout(()=>{delete b.dataset.arm;b.textContent='Shut down system'},4000);return}
+  b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Shutting down…';
+  const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));
+  if(d.ok){document.body.innerHTML='<main class="hud-main narrow"><h1 class="page-title">System stopped</h1><p class="muted">Cameras and drones are no longer guarded. Start the program again from the desktop icon. You can close this window.</p></main>'}
+  else{b.disabled=false;offMsg.className='hud-msg bad';offMsg.textContent=d.error||'Could not shut down.'}}
+load()</script>""", active="settings")
 @app.route("/settings")
 def customer_settings_page():return Response(SETTINGS_PAGE,mimetype="text/html")
 @app.route("/api/customer/settings",methods=["GET","POST"])
@@ -8496,6 +8521,9 @@ def map_cache_stats():
 # SIGN-IN AND ROLES (off until the first admin is created on the Users page)
 # ============================================================
 USERS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "users.json")
+AUDIT_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "audit_log.jsonl")
+# Before the first admin exists, everything asks for one (/welcome). Tests turn this off.
+REQUIRE_FIRST_ADMIN = True
 app.secret_key = user_accounts.secret_key(os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "session.key"))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=12 * 3600)
 _login_fails = {}
@@ -8508,12 +8536,162 @@ def current_user():
     return u if u and session.get("stamp") == u.get("stamp") else None
 
 
+# ---------------- Audit log ----------------
+# Every drone event (from a person, a Telegram command or the system itself) and every change made
+# through the dashboard to drones, users, safety and system settings. See audit.py.
+_audit_actor = threading.local()  # .source for work done outside a web request (e.g. "telegram")
+AUDITED_WRITES = re.compile(r"^/api/(drone/|routes|response/|maps/[a-f0-9]{12}/(fly|stop)|maps/plan|virtual-drones|nofly"
+                            r"|gps-dispatch/request|users|customer/settings|safety/settings|response/settings|airspace/"
+                            r"|system/|license|cloud/pair|sources/)")
+STICK_AUDIT_GAP = 30  # stick input arrives many times a second: log when a stick session starts
+_stick_audit_last = {}
+
+
+def audit_record(action, target="", detail=None, result="ok", user=None, source=None):
+    """Write one audit record; never lets a logging problem break the action itself."""
+    try:
+        if has_request_context():
+            u = getattr(g, "user", None)
+            user = user if user is not None else (u["username"] if u else "")
+            source = source or "dashboard"
+        else:
+            source = source or getattr(_audit_actor, "source", None) or "system"
+        audit.record(AUDIT_FILE, action, user=user or "", source=source, target=target, detail=detail, result=result)
+    except Exception as e:
+        print("Audit log error:", e)
+
+
+@app.after_request
+def _audit_request(resp):
+    path = request.path
+    if request.method in ("GET", "HEAD", "OPTIONS") or not AUDITED_WRITES.match(path):
+        return resp
+    target = request.args.get("drone") or ""
+    if path == "/api/drone/stick":
+        u = getattr(g, "user", None)
+        key = ((u or {}).get("username", ""), target)
+        now = time.time()
+        quiet = now - _stick_audit_last.get(key, 0) > STICK_AUDIT_GAP
+        _stick_audit_last[key] = now
+        if not quiet:
+            return resp
+        audit_record("manual stick control", target=target, result=str(resp.status_code))
+        return resp
+    body = request.get_json(silent=True)
+    if body is None and request.form:
+        body = request.form.to_dict()
+    audit_record(f"{request.method} {path}", target=target, detail=body if isinstance(body, dict) else {},
+                 result="ok" if resp.status_code < 400 else f"refused ({resp.status_code})")
+    return resp
+
+
+@app.route("/audit")
+def audit_page():
+    return Response(hud_page("Audit log", AUDIT_PAGE, active="settings"), mimetype="text/html")
+
+
+@app.route("/api/audit")
+def api_audit():
+    days = min(max(float(request.args.get("days") or 7), 0.01), 3650)
+    rows = audit.read(AUDIT_FILE, limit=int(request.args.get("limit") or 1000), since=time.time() - days * 86400)
+    if request.args.get("format") == "csv":
+        return Response(audit.to_csv(rows), mimetype="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename=audit-{time.strftime('%Y%m%d')}.csv"})
+    ok, checked, broken = audit.verify(AUDIT_FILE)
+    return jsonify({"ok": True, "rows": rows, "chain": {"ok": ok, "checked": checked, "broken_line": broken}})
+
+
+AUDIT_PAGE = r"""
+<main class="hud-main">
+<div class="page-head"><div><div class="page-kicker">Security</div><h1 class="page-title">Audit log</h1>
+<div class="page-sub">Every drone action, who asked for it (a person, Telegram, or the system by itself), and every change to users, safety and system settings. Each line is chained to the one before, so an edited or deleted line shows up here.</div></div></div>
+<section class="panel"><div class="panel-body">
+<div class="actions" style="align-items:center;flex-wrap:wrap;gap:8px">
+<select id="days"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="365">Last year</option></select>
+<input id="q" placeholder="Filter: user, drone, action" style="flex:1;min-width:180px">
+<button class="hud-btn" onclick="dl()">Download CSV</button>
+<span id="chain" class="hud-msg" style="margin:0"></span></div>
+<div style="overflow-x:auto;margin-top:12px"><table style="width:100%;border-collapse:collapse;font-size:12px">
+<thead><tr style="text-align:left;color:#5bd9ff"><th>Time</th><th>Who</th><th>From</th><th>Action</th><th>Drone / target</th><th>Result</th></tr></thead>
+<tbody id="rows"></tbody></table></div>
+</div></section></main>
+<style>#rows td{padding:6px 8px;border-top:1px solid #123447;vertical-align:top}#rows tr:hover td{background:#071c29}</style>
+<script>
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+let all=[];
+function show(){const q=$('q').value.toLowerCase();
+  $('rows').innerHTML=all.filter(r=>!q||JSON.stringify(r).toLowerCase().includes(q)).map(r=>`<tr title="${esc(JSON.stringify(r.detail||{}))}">
+  <td>${new Date(r.t*1000).toLocaleString()}</td><td>${esc(r.user)||'<span class="muted">system</span>'}</td><td>${esc(r.source)}</td>
+  <td>${esc(r.action)}</td><td>${esc(r.target)}</td><td>${esc(r.result)}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">Nothing in this period.</td></tr>'}
+async function load(){const d=await fetch('/api/audit?days='+$('days').value).then(r=>r.json());all=d.rows||[];
+  const c=$('chain');c.className='hud-msg '+(d.chain.ok?'ok':'bad');
+  c.textContent=d.chain.ok?`✔ Log intact (${d.chain.checked} records)`:`⚠ The log was changed at line ${d.chain.broken_line}`;show()}
+function dl(){location.href='/api/audit?format=csv&days='+$('days').value}
+$('days').onchange=load;$('q').oninput=show;load();setInterval(load,15000);
+</script>"""
+
+
+# ---------------- System: shut down ----------------
+LAUNCHER_URL = "http://127.0.0.1:8089/"  # the launcher's start page server (browser_mode.py)
+
+
+@app.route("/api/system/shutdown", methods=["POST"])
+def api_system_shutdown():
+    """Stop the dashboard and the AI services. The launcher does it, since it started them."""
+    try:
+        r = requests.post(LAUNCHER_URL + "shutdown", json={}, timeout=5)
+        if r.ok and r.json().get("app") == "ai-security-launcher":
+            return jsonify({"ok": True})
+    except Exception:
+        pass
+    return jsonify({"ok": False, "error": "The program's launcher isn't running, so it can't stop the system from here. "
+                                          "Use Stop System in the control window."}), 503
+
+
+WELCOME_PAGE = r"""
+<main class="hud-main" style="max-width:460px;margin:50px auto">
+<div class="page-head"><div><div class="page-kicker">First start</div><h1 class="page-title">Create the admin account</h1>
+<div class="page-sub">This account protects the cameras and the drones. You'll sign in with it, and can add viewers and operators later under Settings → Users.</div></div></div>
+<section class="panel"><div class="panel-body">
+<label for="u">User name</label><input id="u" autocomplete="username" autofocus>
+<label for="p1" style="margin-top:10px">Password (8+ characters)</label><input id="p1" type="password" autocomplete="new-password">
+<label for="p2" style="margin-top:10px">Password again</label><input id="p2" type="password" autocomplete="new-password">
+<div class="actions" style="margin-top:14px"><button class="hud-btn primary" id="go">Create and sign in</button></div>
+<div id="msg" class="hud-msg"></div>
+</div></section></main>
+<script>
+const $=id=>document.getElementById(id);
+async function go(){const m=$('msg');m.className='hud-msg';
+  if($('p1').value!==$('p2').value){m.className='hud-msg bad';m.textContent='The two passwords are different.';return}
+  const d=await fetch('/api/users',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:$('u').value,password:$('p1').value,role:'admin'})}).then(r=>r.json());
+  if(!d.ok){m.className='hud-msg bad';m.textContent=d.error;return}location.href='/'}
+$('go').onclick=go;$('p2').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+</script>"""
+FIRST_RUN_PATHS = ("/welcome", "/hud.css")
+
+
+@app.route("/welcome")
+def welcome_page():
+    if user_accounts.load(USERS_FILE):
+        return redirect("/")
+    return Response(hud_page("Create the admin account", WELCOME_PAGE, nav=False), mimetype="text/html")
+
+
 @app.before_request
 def _require_sign_in():
     g.user = None
-    if not user_accounts.load(USERS_FILE):
-        return None  # sign-in not set up yet: open as before
     path = request.path
+    if not user_accounts.load(USERS_FILE):
+        if not REQUIRE_FIRST_ADMIN:
+            return None
+        if path in user_accounts.OPEN_PATHS or path in FIRST_RUN_PATHS or \
+                any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")) or \
+                (path == "/api/users" and request.method == "POST"):
+            return None
+        if path.startswith("/api/"):
+            return jsonify({"ok": False, "error": "Create the admin account first (open the dashboard)."}), 401
+        return redirect("/welcome")
     if path in user_accounts.OPEN_PATHS or any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")):
         return None
     g.user = current_user()
@@ -8570,7 +8748,7 @@ def login_page():
     if not nxt.startswith("/") or nxt.startswith("//"):
         nxt = "/"
     if not user_accounts.load(USERS_FILE):
-        return redirect("/users")
+        return redirect("/welcome" if REQUIRE_FIRST_ADMIN else "/users")
     err = ""
     if request.method == "POST":
         ip = request.remote_addr or ""
@@ -8596,7 +8774,7 @@ def login_page():
 @app.route("/logout")
 def logout_page():
     session.clear()
-    return redirect("/login" if user_accounts.load(USERS_FILE) else "/")
+    return redirect("/login" if user_accounts.load(USERS_FILE) or REQUIRE_FIRST_ADMIN else "/")
 
 
 USERS_PAGE = r"""

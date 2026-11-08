@@ -1,7 +1,6 @@
 """Dashboard sign-in and roles.
 
-Sign-in is off until the first user (always an admin) is created on the Users page; existing installs keep
-working as before until then. Roles:
+Until the first user (always an admin) exists, every page asks for one to be created (/welcome). Roles:
     viewer    watches live video, events and maps; changes nothing
     operator  also flies: drone controls, routes, drone responses, live-feed switches
     admin     everything, including setup, licences, no-fly zones and users
@@ -21,7 +20,7 @@ ROLE_NAMES = {"viewer": "Viewer: watch only", "operator": "Operator: watch and f
 # Paths anyone may open without signing in (the app also calls can-add-source on itself).
 OPEN_PATHS = ("/login", "/logout", "/healthz", "/favicon.ico", "/api/cloud/can-add-source/", "/api/browser/")
 # Read-only pages that still need an admin (they show secrets or manage users).
-ADMIN_ONLY_READ = ("/users", "/api/users", "/api/drone/link/pair")
+ADMIN_ONLY_READ = ("/users", "/api/users", "/api/drone/link/pair", "/audit", "/api/audit")
 # What an operator may change: flying, routes, responses, which live feeds are shown.
 OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/drone/(?!add$|remove$|link/pair)",  # adding, removing and pairing drones: admins
