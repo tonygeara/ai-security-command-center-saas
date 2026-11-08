@@ -1,6 +1,7 @@
 """A drone response is saved as one event: camera snapshot + the drone's view + its video clip."""
-import csv
+
 import os
+import time
 
 from conftest import offset, wait_until
 
@@ -17,16 +18,16 @@ def test_response_event_has_both_views(d, client, fleet, monkeypatch):
     monkeypatch.setattr(d, "CLIP_DELAY_S", 0)
     client.post("/api/response/settings", json={"camera_locations": {"front": offset(25, 0)}, "min_battery": 20, "hover_seconds": 10,
                                                 "auto_return": True})
-    if os.path.exists(d.EVENT_LOG):
-        os.remove(d.EVENT_LOG)
+    d.STORE.clear_events()
+    t0 = int(time.time())  # a response from an earlier test may still be saving its event: ignore it
     r = d.dispatch_drone("front", by="test")
     assert r["ok"], r
     # flies there, hovers 10 s, comes home and lands; then the event is written
     assert wait_until(lambda: d.drone_response["phase"] == "hovering", 60)
     assert wait_until(lambda: not d.drone_response["active"], 90)
-    assert wait_until(lambda: os.path.exists(d.EVENT_LOG), 15)
-    rows = list(csv.DictReader(open(d.EVENT_LOG, encoding="utf-8")))
-    row = rows[-1]
+    mine = lambda: [e for e in d.STORE.events() if e["Type"] == "DRONE RESPONSE" and e["t"] >= t0]
+    assert wait_until(mine, 15)
+    row = mine()[0]
     assert row["Type"] == "DRONE RESPONSE" and "front" in row["Name"]
     stem = os.path.splitext(row["Snapshot"])[0]
     assert open(row["Snapshot"], "rb").read() == JPG_CAM

@@ -21,7 +21,7 @@ def login(d, name, pw):
 
 
 def test_first_start_asks_for_an_admin(d, signin, monkeypatch):
-    monkeypatch.setattr(d, "REQUIRE_FIRST_ADMIN", True)
+    monkeypatch.setattr(d.web_access, "REQUIRE_FIRST_ADMIN", True)
     c = d.app.test_client()
     for path in ("/", "/drone-control", "/settings", "/login"):
         r = c.get(path)

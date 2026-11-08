@@ -8,6 +8,10 @@ edge/
   app/launcher.pyw        launcher; starts Docker services + dashboard
   app/browser_mode.py     start page in the browser; shut down; optional stop with the browser
   app/audit.py            tamper-evident audit log
+  app/store.py            the database (SQLite): events, sightings, audit log, incidents
+  app/bus.py              the event pipeline; app/incidents.py groups it into incidents
+  app/web_access.py       sign-in, first admin, users (Flask blueprint)
+  app/web_records.py      audit log, incidents, browser presence, shut down (Flask blueprint)
   app/dashboard.py        dashboard web app (http://127.0.0.1:8080)
   runtime/                the ONLY Docker setup (versions pinned)
   installer/              build.ps1 -> Setup.exe
@@ -32,11 +36,22 @@ the dashboard just opens. Closing the browser leaves the system running. **Setti
 with the browser is an option (Settings → System), using the pages' check-ins (`/api/browser/*`).
 `--window` (Start menu: "… - Control window") shows the classic control window.
 
+## Data and the event pipeline
+
+Events, sightings of known faces and plates, the audit log and incidents are kept in one SQLite
+database, `ai_security.db` in the data folder (WAL mode). On first start of V11.5 the older
+`event_history.csv`, `sightings.jsonl` and `audit_log.jsonl` are imported once and renamed `*.migrated`.
+
+Detections (MQTT), saved events, sightings and drone actions are published once on the pipeline
+(`bus.py`); subscribers are the incident tracker and auto-dispatch. An incident is everything at one
+camera with no more than 5 minutes of quiet in between (Settings → Incidents).
+
 ## Sign-in and audit log
 
 The first visit asks for an admin account (`/welcome`); nothing else answers until it exists. Every drone
-action and every change to users, safety and system settings is written to `audit_log.jsonl` in the data
-folder, each line chained to the one before (`app/audit.py`); Settings → Audit log shows and checks it.
+action and every change to users, safety and system settings is written to the database's `audit` table,
+each record chained to the one before (`app/audit.py`); Settings → Audit log shows and checks it. Records
+are kept a year.
 
 ## Build the installer
 

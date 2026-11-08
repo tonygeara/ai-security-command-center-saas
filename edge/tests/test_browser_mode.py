@@ -138,7 +138,7 @@ def test_silent_pages_expire_but_sleeping_tabs_stay_open(d, client):
     client.post("/api/browser/ping", json={"page": "awake0001"})
     client.post("/api/browser/sleep", json={"page": "asleep001"})
     for info in d._browser_pages.values():
-        info["seen"] -= d.BROWSER_PAGE_TIMEOUT + 5
+        info["seen"] -= d.web_records.BROWSER_PAGE_TIMEOUT + 5
     assert client.get("/api/browser/presence").get_json()["open_pages"] == 1
     assert "asleep001" in d._browser_pages
     d._browser_pages.clear()

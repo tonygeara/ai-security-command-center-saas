@@ -31,6 +31,7 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/virtual-drones/[^/]+$",
     r"^/api/maps(/plan|/[a-f0-9]{12}/(fly|stop|photos|process|cancel))?$",  # 3D maps: plan, fly, add photos, process
     r"^/api/(routes/optimize|rf/check)$",  # planning helpers (they change nothing)
+    r"^/api/incidents/\d+$",  # mark an incident reviewed
 )]
 
 _cache = {"path": None, "mtime": None, "users": []}

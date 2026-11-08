@@ -93,7 +93,20 @@ BASE_FOLDER = os.environ.get(
 )
 os.makedirs(BASE_FOLDER, exist_ok=True)
 EVENT_FOLDER = os.path.join(BASE_FOLDER, "events")
-EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")
+EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")  # before V11.5; imported into the database once
+DATA_FOLDER = os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER)
+# Events, sightings, audit log and incidents: one SQLite database (store.py).
+import store as _store_mod
+STORE = _store_mod.Store(os.path.join(DATA_FOLDER, "ai_security.db"))
+STORE.migrate(event_csv=EVENT_LOG, sightings_jsonl=os.path.join(BASE_FOLDER, "sightings.jsonl"),
+              audit_jsonl=os.path.join(DATA_FOLDER, "audit_log.jsonl"))
+# The event pipeline (bus.py): detections, events, sightings and drone actions are published once;
+# incidents and auto-dispatch subscribe.
+import bus as _bus_mod
+import incidents as _incidents_mod
+PIPELINE = _bus_mod.Bus("pipeline")
+INCIDENTS = _incidents_mod.Incidents(STORE)
+INCIDENTS.attach(PIPELINE)
 PLATE_FILE = os.path.join(BASE_FOLDER, "known_plates.json")
 TELEGRAM_CONFIG_FILE = os.path.join(BASE_FOLDER, "telegram_config.json")
 EDGE_AGENT_CONFIG_FILE = os.path.join(BASE_FOLDER, "edge_agent_config.json")
@@ -142,7 +155,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.4.0"
+APP_VERSION = "V11.5.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -830,22 +843,10 @@ def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_b
         "Camera": CAMERA_NAME,
         "Snapshot": snapshot_path,
     }
-    fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
-
     try:
-        with event_log_lock:
-            os.makedirs(os.path.dirname(EVENT_LOG), exist_ok=True)
-            file_exists = os.path.exists(EVENT_LOG) and os.path.getsize(EVENT_LOG) > 0
-            if file_exists:
-                with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                    existing_fields = csv.DictReader(f).fieldnames or []
-                if existing_fields:
-                    fieldnames = existing_fields
-            with open(EVENT_LOG, "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow({key: row.get(key, "") for key in fieldnames})
+        event_id = STORE.add_event_row(row)
+        PIPELINE.publish("event", camera=CAMERA_NAME, type=event_type, name=name, identifier=identifier,
+                         snapshot=snapshot_path, event_id=event_id)
         print(f"Saved unknown event: {event_type} {identifier or name}")
 
         # Unknown alerts are queued only after the event was actually saved,
@@ -1005,22 +1006,9 @@ def prune_old_events(days=None, now=None):
         return 0, 0
     cutoff = (now or time.time()) - days * 86400
     cutoff_date = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-    removed_rows = removed_files = 0
-    with event_log_lock:
-        if os.path.exists(EVENT_LOG):
-            with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                fieldnames = reader.fieldnames
-                rows = list(reader)
-            keep = [r for r in rows if not r.get("Date") or r["Date"] >= cutoff_date]
-            removed_rows = len(rows) - len(keep)
-            if removed_rows and fieldnames:
-                tmp = EVENT_LOG + ".tmp"
-                with open(tmp, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(keep)
-                os.replace(tmp, EVENT_LOG)
+    removed_files = 0
+    # Whole days, as before: everything from the cutoff day on is kept.
+    removed_rows = STORE.prune_events(time.mktime(time.strptime(cutoff_date, "%Y-%m-%d")))
     if os.path.isdir(EVENT_FOLDER):
         for name in os.listdir(EVENT_FOLDER):
             path = os.path.join(EVENT_FOLDER, name)
@@ -1039,6 +1027,10 @@ def event_retention_worker():
     while True:
         try:
             prune_old_events()
+            audit.prune(STORE)
+            INCIDENTS.close_stale()
+            if EVENT_RETENTION_DAYS > 0:
+                INCIDENTS.prune(time.time() - EVENT_RETENTION_DAYS * 86400)
         except Exception as e:
             print("Event retention error:", e)
         time.sleep(6 * 3600)
@@ -1866,9 +1858,8 @@ def on_message(
         if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update"):
             after_auto = data.get("after") if isinstance(data.get("after"), dict) else {}
             if after_auto.get("false_positive") is False:
-                threading.Thread(target=auto_dispatch_check, daemon=True,
-                                 args=(camera, str(after_auto.get("label") or "").lower(), str(after_auto.get("id") or ""),
-                                       bool(after_auto.get("stationary")))).start()
+                PIPELINE.publish("detection", camera=camera, label=str(after_auto.get("label") or "").lower(),
+                                 object_id=str(after_auto.get("id") or ""), stationary=bool(after_auto.get("stationary")))
         if camera and camera != CAMERA_NAME:
             return
 
@@ -2321,6 +2312,8 @@ from virtual_drone import VirtualDrone  # noqa: E402
 import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch  # noqa: E401
 import users as user_accounts
 import audit
+import web_access
+import web_records
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
 BRAND_FLAGS = {
@@ -2458,34 +2451,11 @@ threading.Thread(target=cloud_control_worker, daemon=True).start()
 # ============================================================
 
 def get_events(limit=8):
-    if not os.path.exists(
-        EVENT_LOG
-    ):
-        return []
-
+    """Newest first, in the old CSV row shape (Date, Time, Type, Name, Identifier, Camera, Snapshot)."""
     try:
-        with open(
-            EVENT_LOG,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            rows = list(
-                csv.DictReader(f)
-            )
-
-        rows.reverse()
-
-        if limit is None:
-            return rows
-
-        return rows[:limit]
-
+        return STORE.events(limit)
     except Exception as e:
-        print(
-            "History error:",
-            e
-        )
-
+        print("History error:", e)
         return []
 
 
@@ -4832,6 +4802,8 @@ def _drone_event(msg, slot=None):
     if now - _drone_event_audited.get(key, 0) > 10:  # a message repeated many times a second is logged once
         _drone_event_audited[key] = now
         audit_record("drone: " + key[1], target=slot or DRONE_CAMERA_NAME)
+        if drone_response.get("active") and drone_response.get("drone") == (slot or DRONE_CAMERA_NAME):
+            PIPELINE.publish("drone", camera=drone_response.get("camera"), drone=slot, text=key[1])
 
 
 _drone_event_audited = {}
@@ -5476,7 +5448,6 @@ DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_C
 # ============================================================
 # Sightings: known faces and plates (unknown faces are already in event_history.csv), kept 30 days,
 # so the assistant can answer "who came today?" and build the morning briefing offline.
-SIGHTINGS_FILE = os.path.join(BASE_FOLDER, "sightings.jsonl")
 RESPONSE_SETTINGS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "response_settings.json")
 RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "hover_seconds": 60, "auto_return": True,
                      "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": [],
@@ -5494,57 +5465,29 @@ def record_sighting(kind, name, identifier, camera, object_id="", known=True):
     if now - _sighting_last.get(key, 0) < 120:
         return
     _sighting_last[key] = now
-    row = {"t": round(now), "kind": kind, "name": str(name or ""), "id": str(identifier or ""), "camera": str(camera or ""), "known": bool(known)}
     try:
-        with sightings_lock, open(SIGHTINGS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        STORE.add_sighting(kind, name, identifier, camera, known=known, t=round(now))
+        PIPELINE.publish("sighting", camera=camera, sighting=kind, name=name, identifier=identifier, known=known)
     except Exception as e:
         print("Sighting log error:", e)
 
 
 def load_sightings(since, until=None):
-    """Known faces/plates from the sightings log plus unknown faces from the event history."""
+    """Known faces/plates from the sightings plus unknown faces and plates from the event history."""
     until = until or time.time() + 60
-    rows = []
-    try:
-        with sightings_lock, open(SIGHTINGS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if since <= r.get("t", 0) <= until:
-                    rows.append(r)
-    except FileNotFoundError:
-        pass
-    try:
-        with event_log_lock, open(EVENT_LOG, "r", encoding="utf-8") as f:
-            for r in csv.DictReader(f):
-                try:
-                    t = time.mktime(time.strptime(f"{r.get('Date')} {r.get('Time')}", "%Y-%m-%d %H:%M:%S"))
-                except Exception:
-                    continue
-                if since <= t <= until:
-                    kind = "face" if "FACE" in str(r.get("Type", "")).upper() else "plate"
-                    rows.append({"t": t, "kind": kind, "name": "", "id": r.get("Identifier", "") if kind == "plate" else "",
-                                 "camera": r.get("Camera") or CAMERA_NAME, "known": False, "snapshot": r.get("Snapshot", "")})
-    except FileNotFoundError:
-        pass
+    rows = STORE.sightings(since, until)
+    for r in STORE.events(since=since, until=until):
+        typ = str(r["Type"]).upper()
+        if "FACE" not in typ and "PLATE" not in typ:
+            continue  # drone responses and other events are not sightings
+        kind = "face" if "FACE" in typ else "plate"
+        rows.append({"t": r["t"], "kind": kind, "name": "", "id": r["Identifier"] if kind == "plate" else "",
+                     "camera": r["Camera"] or CAMERA_NAME, "known": False, "snapshot": r["Snapshot"]})
     return sorted(rows, key=lambda r: r["t"])
 
 
 def prune_sightings(days=30):
-    cutoff = time.time() - days * 86400
-    try:
-        with sightings_lock:
-            with open(SIGHTINGS_FILE, "r", encoding="utf-8") as f:
-                keep = [line for line in f if (json.loads(line).get("t", 0) if line.strip() else 0) >= cutoff]
-            with open(SIGHTINGS_FILE, "w", encoding="utf-8") as f:
-                f.writelines(keep)
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print("Sightings prune error:", e)
+    STORE.prune_sightings(time.time() - days * 86400)
 
 
 def load_response_settings():
@@ -5702,6 +5645,7 @@ def dispatch_drone(camera, by="dashboard", drone=None):
         threading.Thread(target=round_zones, daemon=True).start()
         _drone_event(f"Flying round the no-fly zones to {camera} ({len(via)} turn{'s' if len(via) > 1 else ''})", slot)
     _drone_event(f"Drone response to {camera} started ({by})", slot)
+    PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by)
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
 
 
@@ -5714,6 +5658,15 @@ def _in_window(start, end, now=None):
 
 
 _auto_seen, _auto_last = set(), {}
+
+
+def _auto_dispatch_from_pipeline(m):
+    # Dispatching waits for the drone's answers: never hold up the pipeline for it.
+    threading.Thread(target=auto_dispatch_check, daemon=True,
+                     args=(m["camera"], m.get("label") or "", m.get("object_id") or "", bool(m.get("stationary")))).start()
+
+
+PIPELINE.subscribe("detection", _auto_dispatch_from_pipeline)
 
 
 def auto_dispatch_check(camera, label, object_id="", stationary=False):
@@ -5766,18 +5719,10 @@ def _fetch_clip(slot, start, end):
 
 
 def _append_event_row(row):
-    with event_log_lock:
-        os.makedirs(os.path.dirname(EVENT_LOG), exist_ok=True)
-        fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
-        exists = os.path.exists(EVENT_LOG) and os.path.getsize(EVENT_LOG) > 0
-        if exists:
-            with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                fieldnames = csv.DictReader(f).fieldnames or fieldnames
-        with open(EVENT_LOG, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            if not exists:
-                w.writeheader()
-            w.writerow({k: row.get(k, "") for k in fieldnames})
+    event_id = STORE.add_event_row(row)
+    PIPELINE.publish("event", camera=row.get("Camera") or "", type=row.get("Type"), name=row.get("Name"),
+                     identifier=row.get("Identifier"), snapshot=row.get("Snapshot"), event_id=event_id)
+    return event_id
 
 
 def save_response_event(resp, ended):
@@ -7956,80 +7901,6 @@ def api_assistant_briefing():
 def healthz():
     return jsonify({"ok": True, "service": "ai-security-command-center", "version": APP_VERSION})
 
-# ---------------- Browser presence ----------------
-# Every page in the browser checks in here (script added by _browser_presence_script). The
-# launcher asks how many are open; when none are, the browser was closed and it stops the system.
-BROWSER_PAGE_TIMEOUT = 150  # a page that stopped checking in (killed browser); hidden tabs check in once a minute
-_browser_pages = {}  # page id -> {"seen": time, "asleep": bool}
-_browser_lock = threading.Lock()
-
-
-def _browser_page_id():
-    raw = request.get_data(cache=False, as_text=True)[:200]
-    try:
-        raw = json.loads(raw).get("page", "")
-    except Exception:
-        pass
-    raw = str(raw or "")
-    return raw if re.fullmatch(r"[A-Za-z0-9_-]{6,64}", raw) else ""
-
-
-@app.route("/api/browser/<action>", methods=["POST"])
-def api_browser_presence(action):
-    page = _browser_page_id()
-    if not page or action not in ("ping", "sleep", "bye"):
-        return jsonify({"ok": False}), 400
-    with _browser_lock:
-        if action == "bye":
-            _browser_pages.pop(page, None)
-        else:
-            # A browser that freezes a background tab to save power keeps it in its tab bar: still open.
-            _browser_pages[page] = {"seen": time.time(), "asleep": action == "sleep"}
-    return jsonify({"ok": True})
-
-
-@app.route("/api/browser/presence")
-def api_browser_open_pages():
-    now = time.time()
-    with _browser_lock:
-        for page, info in list(_browser_pages.items()):
-            if not info["asleep"] and now - info["seen"] > BROWSER_PAGE_TIMEOUT:
-                del _browser_pages[page]
-        pages = len(_browser_pages)
-    # The launcher only stops the system with the browser when this is switched on (Settings → System).
-    return jsonify({"ok": True, "open_pages": pages,
-                    "stop_with_browser": bool(_load_customer_settings().get("stop_with_browser"))})
-
-
-_BROWSER_PRESENCE_SCRIPT = """<script>(function(){
-if(window.top!==window||window.__aiPresence)return;window.__aiPresence=1;
-var id=Date.now().toString(36)+Math.random().toString(36).slice(2,10);
-function send(a,b){try{if(b&&navigator.sendBeacon){navigator.sendBeacon('/api/browser/'+a,JSON.stringify({page:id}));return;}
-fetch('/api/browser/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:id}),keepalive:true}).catch(function(){});}catch(e){}}
-try{var prev=sessionStorage.getItem('aiPresenceAsleep');sessionStorage.removeItem('aiPresenceAsleep');
-if(prev&&document.wasDiscarded)fetch('/api/browser/bye',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({page:prev})}).catch(function(){});}catch(e){}
-send('ping');setInterval(function(){send('ping');},20000);
-document.addEventListener('visibilitychange',function(){if(!document.hidden)send('ping');});
-document.addEventListener('freeze',function(){try{sessionStorage.setItem('aiPresenceAsleep',id);}catch(e){}send('sleep',1);});
-document.addEventListener('resume',function(){send('ping');});
-addEventListener('pageshow',function(e){if(e.persisted)send('ping');});
-addEventListener('pagehide',function(){send('bye',1);});
-})();</script>"""
-
-
-@app.after_request
-def _browser_presence_script(resp):
-    """Add the presence check-in to every page."""
-    if resp.mimetype == "text/html" and not resp.direct_passthrough:
-        try:
-            html = resp.get_data(as_text=True)
-            i = html.rfind("</body>")
-            if i != -1 and "__aiPresence" not in html:
-                resp.set_data(html[:i] + _BROWSER_PRESENCE_SCRIPT + html[i:])
-        except Exception:
-            pass
-    return resp
-# ---------------- END browser presence ----------------
 
 
 @app.route("/api/system/readiness")
@@ -8101,19 +7972,8 @@ def event_key(row):
 
 
 def delete_history_event(event_index, key=""):
-    if not os.path.exists(EVENT_LOG):
-        raise RuntimeError("Event history file does not exist.")
-
     with event_log_lock:
-        with open(EVENT_LOG, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-
-        if not fieldnames:
-            raise RuntimeError("Event history has no headers.")
-
-        newest_first = list(reversed(rows))
+        newest_first = STORE.events()
         if key:
             matches = [row for row in newest_first if event_key(row) == key]
             if not matches:
@@ -8124,22 +7984,7 @@ def delete_history_event(event_index, key=""):
                 raise RuntimeError("Event could not be found.")
             event_to_delete = newest_first[event_index]
         snapshot = event_to_delete.get("Snapshot", "") or ""
-
-        removed = False
-        new_rows = []
-        for row in rows:
-            if not removed and row == event_to_delete:
-                removed = True
-                continue
-            new_rows.append(row)
-
-        if not removed:
-            raise RuntimeError("Event could not be deleted.")
-
-        with open(EVENT_LOG, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(new_rows)
+        STORE.delete_event(event_to_delete["id"])
 
     if snapshot:
         snapshot_name = os.path.basename(snapshot.replace("\\", "/"))
@@ -8166,24 +8011,9 @@ def api_delete_event(event_index):
 
 def clear_all_history_events():
     """Remove all event-history rows and their locally saved snapshots."""
-    deleted_count = 0
-    snapshots = []
-    fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
-
     with event_log_lock:
-        if os.path.exists(EVENT_LOG):
-            with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                if reader.fieldnames:
-                    fieldnames = reader.fieldnames
-                rows = list(reader)
-
-            deleted_count = len(rows)
-            snapshots = [row.get("Snapshot", "") or "" for row in rows]
-
-            with open(EVENT_LOG, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
+        snapshots = STORE.clear_events()
+    deleted_count = len(snapshots)
 
     for snapshot in snapshots:
         if not snapshot:
@@ -8396,6 +8226,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/license"><span>⚿</span><b>Licence</b><small>This PC's licence</small></a>
 <a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
+<a href="/incidents"><span>⚑</span><b>Incidents</b><small>Each camera's events as one story</small></a>
 <a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
 </nav>
 <section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
@@ -8518,340 +8349,20 @@ def map_cache_stats():
     return {"tiles": _tile_stats["tiles"], "mb": _tile_stats["mb"]}
 
 # ============================================================
-# SIGN-IN AND ROLES (off until the first admin is created on the Users page)
+# SIGN-IN, USERS, AUDIT LOG, INCIDENTS, SHUTDOWN (web_access.py, web_records.py)
 # ============================================================
-USERS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "users.json")
-AUDIT_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "audit_log.jsonl")
-# Before the first admin exists, everything asks for one (/welcome). Tests turn this off.
-REQUIRE_FIRST_ADMIN = True
-app.secret_key = user_accounts.secret_key(os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "session.key"))
+app.secret_key = user_accounts.secret_key(os.path.join(DATA_FOLDER, "session.key"))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=12 * 3600)
-_login_fails = {}
+web_access.setup(app, DATA_FOLDER, hud_page)
+web_records.setup(app, STORE, INCIDENTS, hud_page, _load_customer_settings)
+USERS_FILE = web_access.USERS_FILE
+current_user = web_access.current_user
+html_escape = web_access.html_escape
+audit_record = web_records.audit_record
+_audit_actor = web_records._audit_actor
+_browser_pages = web_records._browser_pages
+_login_fails = web_access._login_fails
 
-
-def current_user():
-    """The signed-in user, or None (also None while sign-in is off)."""
-    users = user_accounts.load(USERS_FILE)
-    u = user_accounts.find(users, session.get("user")) if users else None
-    return u if u and session.get("stamp") == u.get("stamp") else None
-
-
-# ---------------- Audit log ----------------
-# Every drone event (from a person, a Telegram command or the system itself) and every change made
-# through the dashboard to drones, users, safety and system settings. See audit.py.
-_audit_actor = threading.local()  # .source for work done outside a web request (e.g. "telegram")
-AUDITED_WRITES = re.compile(r"^/api/(drone/|routes|response/|maps/[a-f0-9]{12}/(fly|stop)|maps/plan|virtual-drones|nofly"
-                            r"|gps-dispatch/request|users|customer/settings|safety/settings|response/settings|airspace/"
-                            r"|system/|license|cloud/pair|sources/)")
-STICK_AUDIT_GAP = 30  # stick input arrives many times a second: log when a stick session starts
-_stick_audit_last = {}
-
-
-def audit_record(action, target="", detail=None, result="ok", user=None, source=None):
-    """Write one audit record; never lets a logging problem break the action itself."""
-    try:
-        if has_request_context():
-            u = getattr(g, "user", None)
-            user = user if user is not None else (u["username"] if u else "")
-            source = source or "dashboard"
-        else:
-            source = source or getattr(_audit_actor, "source", None) or "system"
-        audit.record(AUDIT_FILE, action, user=user or "", source=source, target=target, detail=detail, result=result)
-    except Exception as e:
-        print("Audit log error:", e)
-
-
-@app.after_request
-def _audit_request(resp):
-    path = request.path
-    if request.method in ("GET", "HEAD", "OPTIONS") or not AUDITED_WRITES.match(path):
-        return resp
-    target = request.args.get("drone") or ""
-    if path == "/api/drone/stick":
-        u = getattr(g, "user", None)
-        key = ((u or {}).get("username", ""), target)
-        now = time.time()
-        quiet = now - _stick_audit_last.get(key, 0) > STICK_AUDIT_GAP
-        _stick_audit_last[key] = now
-        if not quiet:
-            return resp
-        audit_record("manual stick control", target=target, result=str(resp.status_code))
-        return resp
-    body = request.get_json(silent=True)
-    if body is None and request.form:
-        body = request.form.to_dict()
-    audit_record(f"{request.method} {path}", target=target, detail=body if isinstance(body, dict) else {},
-                 result="ok" if resp.status_code < 400 else f"refused ({resp.status_code})")
-    return resp
-
-
-@app.route("/audit")
-def audit_page():
-    return Response(hud_page("Audit log", AUDIT_PAGE, active="settings"), mimetype="text/html")
-
-
-@app.route("/api/audit")
-def api_audit():
-    days = min(max(float(request.args.get("days") or 7), 0.01), 3650)
-    rows = audit.read(AUDIT_FILE, limit=int(request.args.get("limit") or 1000), since=time.time() - days * 86400)
-    if request.args.get("format") == "csv":
-        return Response(audit.to_csv(rows), mimetype="text/csv",
-                        headers={"Content-Disposition": f"attachment; filename=audit-{time.strftime('%Y%m%d')}.csv"})
-    ok, checked, broken = audit.verify(AUDIT_FILE)
-    return jsonify({"ok": True, "rows": rows, "chain": {"ok": ok, "checked": checked, "broken_line": broken}})
-
-
-AUDIT_PAGE = r"""
-<main class="hud-main">
-<div class="page-head"><div><div class="page-kicker">Security</div><h1 class="page-title">Audit log</h1>
-<div class="page-sub">Every drone action, who asked for it (a person, Telegram, or the system by itself), and every change to users, safety and system settings. Each line is chained to the one before, so an edited or deleted line shows up here.</div></div></div>
-<section class="panel"><div class="panel-body">
-<div class="actions" style="align-items:center;flex-wrap:wrap;gap:8px">
-<select id="days"><option value="1">Last 24 hours</option><option value="7" selected>Last 7 days</option><option value="30">Last 30 days</option><option value="365">Last year</option></select>
-<input id="q" placeholder="Filter: user, drone, action" style="flex:1;min-width:180px">
-<button class="hud-btn" onclick="dl()">Download CSV</button>
-<span id="chain" class="hud-msg" style="margin:0"></span></div>
-<div style="overflow-x:auto;margin-top:12px"><table style="width:100%;border-collapse:collapse;font-size:12px">
-<thead><tr style="text-align:left;color:#5bd9ff"><th>Time</th><th>Who</th><th>From</th><th>Action</th><th>Drone / target</th><th>Result</th></tr></thead>
-<tbody id="rows"></tbody></table></div>
-</div></section></main>
-<style>#rows td{padding:6px 8px;border-top:1px solid #123447;vertical-align:top}#rows tr:hover td{background:#071c29}</style>
-<script>
-const $=id=>document.getElementById(id);
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
-let all=[];
-function show(){const q=$('q').value.toLowerCase();
-  $('rows').innerHTML=all.filter(r=>!q||JSON.stringify(r).toLowerCase().includes(q)).map(r=>`<tr title="${esc(JSON.stringify(r.detail||{}))}">
-  <td>${new Date(r.t*1000).toLocaleString()}</td><td>${esc(r.user)||'<span class="muted">system</span>'}</td><td>${esc(r.source)}</td>
-  <td>${esc(r.action)}</td><td>${esc(r.target)}</td><td>${esc(r.result)}</td></tr>`).join('')||'<tr><td colspan="6" class="muted">Nothing in this period.</td></tr>'}
-async function load(){const d=await fetch('/api/audit?days='+$('days').value).then(r=>r.json());all=d.rows||[];
-  const c=$('chain');c.className='hud-msg '+(d.chain.ok?'ok':'bad');
-  c.textContent=d.chain.ok?`✔ Log intact (${d.chain.checked} records)`:`⚠ The log was changed at line ${d.chain.broken_line}`;show()}
-function dl(){location.href='/api/audit?format=csv&days='+$('days').value}
-$('days').onchange=load;$('q').oninput=show;load();setInterval(load,15000);
-</script>"""
-
-
-# ---------------- System: shut down ----------------
-LAUNCHER_URL = "http://127.0.0.1:8089/"  # the launcher's start page server (browser_mode.py)
-
-
-@app.route("/api/system/shutdown", methods=["POST"])
-def api_system_shutdown():
-    """Stop the dashboard and the AI services. The launcher does it, since it started them."""
-    try:
-        r = requests.post(LAUNCHER_URL + "shutdown", json={}, timeout=5)
-        if r.ok and r.json().get("app") == "ai-security-launcher":
-            return jsonify({"ok": True})
-    except Exception:
-        pass
-    return jsonify({"ok": False, "error": "The program's launcher isn't running, so it can't stop the system from here. "
-                                          "Use Stop System in the control window."}), 503
-
-
-WELCOME_PAGE = r"""
-<main class="hud-main" style="max-width:460px;margin:50px auto">
-<div class="page-head"><div><div class="page-kicker">First start</div><h1 class="page-title">Create the admin account</h1>
-<div class="page-sub">This account protects the cameras and the drones. You'll sign in with it, and can add viewers and operators later under Settings → Users.</div></div></div>
-<section class="panel"><div class="panel-body">
-<label for="u">User name</label><input id="u" autocomplete="username" autofocus>
-<label for="p1" style="margin-top:10px">Password (8+ characters)</label><input id="p1" type="password" autocomplete="new-password">
-<label for="p2" style="margin-top:10px">Password again</label><input id="p2" type="password" autocomplete="new-password">
-<div class="actions" style="margin-top:14px"><button class="hud-btn primary" id="go">Create and sign in</button></div>
-<div id="msg" class="hud-msg"></div>
-</div></section></main>
-<script>
-const $=id=>document.getElementById(id);
-async function go(){const m=$('msg');m.className='hud-msg';
-  if($('p1').value!==$('p2').value){m.className='hud-msg bad';m.textContent='The two passwords are different.';return}
-  const d=await fetch('/api/users',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:$('u').value,password:$('p1').value,role:'admin'})}).then(r=>r.json());
-  if(!d.ok){m.className='hud-msg bad';m.textContent=d.error;return}location.href='/'}
-$('go').onclick=go;$('p2').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
-</script>"""
-FIRST_RUN_PATHS = ("/welcome", "/hud.css")
-
-
-@app.route("/welcome")
-def welcome_page():
-    if user_accounts.load(USERS_FILE):
-        return redirect("/")
-    return Response(hud_page("Create the admin account", WELCOME_PAGE, nav=False), mimetype="text/html")
-
-
-@app.before_request
-def _require_sign_in():
-    g.user = None
-    path = request.path
-    if not user_accounts.load(USERS_FILE):
-        if not REQUIRE_FIRST_ADMIN:
-            return None
-        if path in user_accounts.OPEN_PATHS or path in FIRST_RUN_PATHS or \
-                any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")) or \
-                (path == "/api/users" and request.method == "POST"):
-            return None
-        if path.startswith("/api/"):
-            return jsonify({"ok": False, "error": "Create the admin account first (open the dashboard)."}), 401
-        return redirect("/welcome")
-    if path in user_accounts.OPEN_PATHS or any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")):
-        return None
-    g.user = current_user()
-    if not g.user:
-        if path.startswith("/api/"):
-            return jsonify({"ok": False, "error": "Sign in first."}), 401
-        return redirect("/login?next=" + urllib.parse.quote(request.full_path.rstrip("?")))
-    if not user_accounts.allowed(g.user["role"], request.method, path):
-        msg = f"Your role ({g.user['role']}) can't do that. Ask an admin."
-        return (jsonify({"ok": False, "error": msg}), 403) if path.startswith("/api/") or request.method != "GET" else \
-            Response(hud_page("Not allowed", f'<main class="hud-main"><h1 class="page-title">Not allowed</h1><p class="muted">{msg}</p>'
-                                              '<a class="hud-btn" href="/">Back to the dashboard</a></main>'), status=403, mimetype="text/html")
-    return None
-
-
-@app.after_request
-def _user_badge(resp):
-    """Who is signed in, with Sign out, on every page."""
-    u = getattr(g, "user", None)
-    if u and resp.mimetype == "text/html" and not resp.direct_passthrough:
-        try:
-            html = resp.get_data(as_text=True)
-            i = html.rfind("</body>")
-            if i != -1:
-                badge = ('<div id="userBadge" style="position:fixed;left:10px;bottom:10px;z-index:9999;background:rgba(3,16,26,.92);'
-                         'border:1px solid #155879;border-radius:4px;padding:5px 9px;font:12px Arial;color:#9edfff">👤 '
-                         f'{html_escape(u["username"])} · {u["role"]} · <a href="/logout" style="color:#5bd9ff">Sign out</a></div>')
-                resp.set_data(html[:i] + badge + html[i:])
-        except Exception:
-            pass
-    return resp
-
-
-def html_escape(v):
-    return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-
-LOGIN_PAGE = r"""
-<main class="hud-main" style="max-width:420px;margin:60px auto">
-<div class="page-head"><div><div class="page-kicker">AI Security</div><h1 class="page-title">Sign in</h1></div></div>
-<section class="panel"><div class="panel-body">
-<form method="post">
-<input type="hidden" name="next" value="__NEXT__">
-<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required>
-<label for="pw" style="margin-top:10px">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required>
-<div class="actions" style="margin-top:14px"><button class="hud-btn primary" type="submit">Sign in</button></div>
-<div class="hud-msg bad" style="__ERRSTYLE__">__ERR__</div>
-</form></div></section></main>"""
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login_page():
-    nxt = request.values.get("next") or "/"
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
-    if not user_accounts.load(USERS_FILE):
-        return redirect("/welcome" if REQUIRE_FIRST_ADMIN else "/users")
-    err = ""
-    if request.method == "POST":
-        ip = request.remote_addr or ""
-        fails = [t for t in _login_fails.get(ip, []) if time.time() - t < 300]
-        if len(fails) >= 5:
-            err = "Too many wrong tries. Wait 5 minutes."
-        else:
-            u = user_accounts.authenticate(USERS_FILE, request.form.get("username"), request.form.get("password"))
-            if u:
-                session.clear()
-                session.permanent = True
-                session.update(user=u["username"], stamp=u.get("stamp"))
-                _login_fails.pop(ip, None)
-                return redirect(nxt)
-            time.sleep(1)
-            _login_fails[ip] = fails + [time.time()]
-            err = "Wrong user name or password."
-    body = (LOGIN_PAGE.replace("__NEXT__", html_escape(nxt)).replace("__ERR__", html_escape(err))
-            .replace("__ERRSTYLE__", "" if err else "display:none"))
-    return Response(hud_page("Sign in", body, nav=False), mimetype="text/html")
-
-
-@app.route("/logout")
-def logout_page():
-    session.clear()
-    return redirect("/login" if user_accounts.load(USERS_FILE) or REQUIRE_FIRST_ADMIN else "/")
-
-
-USERS_PAGE = r"""
-<main class="hud-main">
-<div class="page-head"><div><div class="page-kicker">Access</div><h1 class="page-title">Users &amp; roles</h1>
-<div class="page-sub">Who can use this dashboard. <b>Viewer</b>: watches live video, events and maps. <b>Operator</b>: also flies drones, routes and drone responses. <b>Admin</b>: everything, including setup, licences, no-fly zones and users.</div></div></div>
-<section class="panel"><div class="panel-body">
-<div id="firstNote" class="hud-msg" style="display:none">Sign-in is <b>off</b>: anyone at this PC can use everything. Create the first user below (an admin) to turn it on; you will be signed in as that user.</div>
-<div id="userList"></div>
-<div style="margin-top:14px;border-top:1px solid #123447;padding-top:12px"><b style="color:#5bd9ff;font-size:11px;letter-spacing:1.5px">ADD A USER</b>
-<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 10px">
-<div><label for="nu">User name</label><input id="nu" autocomplete="off"></div>
-<div><label for="np">Password (8+ characters)</label><input id="np" type="password" autocomplete="new-password"></div>
-<div><label for="nr">Role</label><select id="nr"><option value="viewer">Viewer: watch only</option><option value="operator">Operator: watch and fly</option><option value="admin">Admin: everything</option></select></div></div>
-<div class="actions" style="margin-top:10px"><button class="hud-btn primary" onclick="addUser()">Add user</button></div>
-<div id="umsg" class="hud-msg"></div></div>
-</div></section></main>
-<script>
-const $=id=>document.getElementById(id);
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
-const ROLES={viewer:'Viewer: watch only',operator:'Operator: watch and fly',admin:'Admin: everything'};
-let me='',arm='';
-function umsg(t,ok){const e=$('umsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
-async function call(url,method,body){const r=await fetch(url,{method,headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});return r.json()}
-async function load(){const d=await call('/api/users','GET');if(!d.ok){umsg(d.error,false);return}me=d.me||'';
-  $('firstNote').style.display=d.users.length?'none':'';if(!d.users.length){$('nr').value='admin'}
-  $('userList').innerHTML=d.users.map(u=>`<div class="hud-row"><div><b>${esc(u.username)}</b>${u.username===me?' <span class="muted">(you)</span>':''}<div class="muted">${ROLES[u.role]}</div></div>
-    <div class="actions"><select onchange="setRole('${esc(u.username)}',this.value)">${Object.keys(ROLES).map(r=>`<option value="${r}" ${r===u.role?'selected':''}>${r}</option>`).join('')}</select>
-    <button class="hud-btn" onclick="resetPw('${esc(u.username)}')">New password</button>
-    <button class="hud-btn danger" onclick="delUser('${esc(u.username)}',this)">${arm===u.username?'Click again to delete':'Delete'}</button></div></div>`).join('')||'<p class="muted">No users yet.</p>'}
-async function addUser(){const first=!$('userList').querySelector('.hud-row');
-  const d=await call('/api/users','POST',{username:$('nu').value,password:$('np').value,role:$('nr').value});
-  if(!d.ok){umsg(d.error,false);return}$('nu').value=$('np').value='';umsg('User '+d.username+' added.'+(first?' Sign-in is now on.':''),true);if(first)location.reload();else load()}
-async function setRole(n,r){const d=await call('/api/users/'+encodeURIComponent(n),'POST',{role:r});umsg(d.ok?n+' is now '+r+'.':d.error,d.ok);load()}
-async function resetPw(n){const pw=prompt('New password for '+n+' (8+ characters):');if(!pw)return;const d=await call('/api/users/'+encodeURIComponent(n),'POST',{password:pw});
-  umsg(d.ok?'Password changed. '+n+' is signed out on other devices.':d.error,d.ok);if(d.ok&&n===me)location.href='/login'}
-async function delUser(n){if(arm!==n){arm=n;load();setTimeout(()=>{if(arm===n){arm='';load()}},4000);return}arm='';
-  const d=await call('/api/users/'+encodeURIComponent(n),'DELETE');umsg(d.ok?n+' deleted.':d.error,d.ok);if(d.ok&&n===me)location.href='/login';else load()}
-load();
-</script>"""
-
-
-@app.route("/users")
-def users_page():
-    return Response(hud_page("Users", USERS_PAGE, active="users"), mimetype="text/html")
-
-
-@app.route("/api/users", methods=["GET", "POST"])
-def api_users():
-    all_users = user_accounts.load(USERS_FILE)
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        try:
-            name = user_accounts.add(USERS_FILE, data.get("username"), data.get("password"), data.get("role"))
-        except ValueError as e:
-            return jsonify({"ok": False, "error": str(e)}), 400
-        if not all_users:  # the first admin is signed in straight away
-            u = user_accounts.find(user_accounts.load(USERS_FILE), name)
-            session.clear()
-            session.permanent = True
-            session.update(user=u["username"], stamp=u.get("stamp"))
-        return jsonify({"ok": True, "username": name})
-    me = current_user()
-    return jsonify({"ok": True, "users": [user_accounts.public(u) for u in all_users], "me": me["username"] if me else ""})
-
-
-@app.route("/api/users/<name>", methods=["POST", "DELETE"])
-def api_user(name):
-    try:
-        if request.method == "DELETE":
-            user_accounts.delete(USERS_FILE, name)
-        else:
-            data = request.get_json(silent=True) or {}
-            user_accounts.update(USERS_FILE, name, role=data.get("role"), password=data.get("password"))
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True})
 
 # ============================================================
 # WEB ROUTES

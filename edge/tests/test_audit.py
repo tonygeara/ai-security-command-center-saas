@@ -11,36 +11,58 @@ sys.path.insert(0, os.path.abspath(APP))
 import audit  # noqa: E402
 
 
+import store  # noqa: E402
+
+
 @pytest.fixture
 def fresh_log(d, tmp_path, monkeypatch):
-    path = str(tmp_path / "audit_log.jsonl")
-    monkeypatch.setattr(d, "AUDIT_FILE", path)
-    audit._last.pop(path, None)
-    return path
+    db = store.Store(str(tmp_path / "audit.db"))
+    monkeypatch.setattr(d.web_records, "STORE", db)
+    yield db
+    db.close()
 
 
-def test_chain_detects_edited_and_deleted_lines(tmp_path):
-    path = str(tmp_path / "a.jsonl")
+@pytest.fixture
+def db(tmp_path):
+    s = store.Store(str(tmp_path / "a.db"))
+    yield s
+    s.close()
+
+
+def test_chain_detects_edited_and_deleted_rows(db):
     for i in range(4):
-        audit.record(path, f"action {i}", user="boss", detail={"n": i, "password": "hunter22"})
-    assert audit.verify(path) == (True, 4, 0)
-    rows = audit.read(path)
+        audit.record(db, f"action {i}", user="boss", detail={"n": i, "password": "hunter22"})
+    assert audit.verify(db) == (True, 4, 0)
+    rows = audit.read(db)
     assert rows[0]["action"] == "action 3" and rows[0]["detail"]["password"] == "•••"
-    lines = open(path, encoding="utf-8").read().splitlines()
-    edited = json.loads(lines[1]); edited["user"] = "someone else"
-    open(path, "w", encoding="utf-8").write("\n".join([lines[0], json.dumps(edited)] + lines[2:]) + "\n")
-    assert audit.verify(path) == (False, 1, 2)
-    open(path, "w", encoding="utf-8").write("\n".join([lines[0]] + lines[2:]) + "\n")
-    assert audit.verify(path)[0] is False
-    audit._last.pop(path, None)
+    db.x("UPDATE audit SET user='someone else' WHERE id=2")
+    assert audit.verify(db) == (False, 1, 2)
+    db.x("UPDATE audit SET user='boss' WHERE id=2")
+    assert audit.verify(db)[0]
+    db.x("DELETE FROM audit WHERE id=3")
+    assert audit.verify(db) == (False, 2, 3)
 
 
-def test_csv_is_safe_for_spreadsheets(tmp_path):
-    path = str(tmp_path / "a.jsonl")
-    audit.record(path, "=HYPERLINK(\"x\")", user="@boss")
-    text = audit.to_csv(audit.read(path))
+def test_pruning_keeps_the_chain_valid(db, monkeypatch):
+    import time as _t
+    now = _t.time()
+    for i, age_days in enumerate((400, 380, 10, 1)):
+        monkeypatch.setattr(audit.time, "time", lambda a=age_days: now - a * 86400)
+        audit.record(db, f"r{i}")
+    monkeypatch.setattr(audit.time, "time", lambda: now)
+    assert audit.verify(db) == (True, 4, 0)
+    assert audit.prune(db, days=365) == 2
+    assert audit.verify(db) == (True, 2, 0) and [r["action"] for r in audit.read(db)] == ["r3", "r2"]
+    audit.record(db, "after prune")
+    assert audit.verify(db) == (True, 3, 0)
+    db.x("DELETE FROM audit WHERE action='r2'")  # deleting the oldest kept record still shows
+    assert audit.verify(db)[0] is False
+
+
+def test_csv_is_safe_for_spreadsheets(db):
+    audit.record(db, "=HYPERLINK(\"x\")", user="@boss")
+    text = audit.to_csv(audit.read(db))
     assert "'=HYPERLINK" in text and "'@boss" in text
-    audit._last.pop(path, None)
 
 
 def test_drone_actions_are_logged_with_who_did_them(d, client, fleet, fresh_log):
@@ -95,12 +117,12 @@ def test_shut_down_asks_the_launcher(d, client, fresh_log, monkeypatch):
     page = bm.StartPage(Owner(), "x", port=port)
     assert page.start()
     try:
-        monkeypatch.setattr(d, "LAUNCHER_URL", f"http://127.0.0.1:{port}/")
+        monkeypatch.setattr(d.web_records, "LAUNCHER_URL", f"http://127.0.0.1:{port}/")
         assert client.post("/api/system/shutdown").get_json()["ok"] and Owner.actions == ["shutdown"]
         assert audit.read(fresh_log)[0]["action"] == "POST /api/system/shutdown"
     finally:
         page.stop()
-    monkeypatch.setattr(d, "LAUNCHER_URL", f"http://127.0.0.1:{_free_port()}/")
+    monkeypatch.setattr(d.web_records, "LAUNCHER_URL", f"http://127.0.0.1:{_free_port()}/")
     r = client.post("/api/system/shutdown")
     assert r.status_code == 503 and "launcher isn't running" in r.get_json()["error"]
 

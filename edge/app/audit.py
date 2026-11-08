@@ -1,47 +1,27 @@
 """Audit log: who flew which drone, who changed what, and what the system did by itself.
 
-One JSON record per line (audit_log.jsonl), never rewritten. Each record carries the hash of the one
-before it, so editing or deleting a line breaks the chain and verify() shows where.
+Records live in the `audit` table of the app's database (store.py); rows are only ever added. Each
+record carries the hash of the one before it, so editing or deleting a row breaks the chain and
+verify() shows where.
 
 Record: {"t", "user", "source", "action", "target", "detail", "result", "prev", "hash"}
     user    who did it ("" for the system itself)
-    source  "dashboard", "telegram", "auto", "scheduler", "safety" ...
+    source  "dashboard", "telegram", "system" ...
 """
 import csv
 import hashlib
 import io
 import json
-import os
-import threading
 import time
 
 GENESIS = "0" * 64
 SECRET_WORDS = ("password", "token", "secret", "key", "hash")
-_lock = threading.Lock()
-_last = {}  # path -> hash of the last record (so each write doesn't re-read the file)
+RETENTION_DAYS = 365  # older records are pruned; the chain restarts from the first one kept
 
 
 def _digest(prev, record):
     body = {k: record[k] for k in ("t", "user", "source", "action", "target", "detail", "result")}
     return hashlib.sha256((prev + json.dumps(body, sort_keys=True, ensure_ascii=False)).encode("utf-8")).hexdigest()
-
-
-def _tail_hash(path):
-    if path in _last:
-        return _last[path]
-    prev = GENESIS
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            lines = [x for x in f.read().splitlines() if x.strip()]
-        if lines:
-            prev = json.loads(lines[-1].decode("utf-8")).get("hash") or GENESIS
-    except (OSError, ValueError):
-        pass
-    _last[path] = prev
-    return prev
 
 
 def redact(value, depth=0):
@@ -58,53 +38,58 @@ def redact(value, depth=0):
     return value
 
 
-def record(path, action, user="", source="dashboard", target="", detail=None, result="ok"):
+def _row(r):
+    try:
+        detail = json.loads(r["detail"] or "{}")
+    except ValueError:
+        detail = {}
+    return {"id": r["id"], "t": r["t"], "user": r["user"] or "", "source": r["source"] or "", "action": r["action"] or "",
+            "target": r["target"] or "", "detail": detail, "result": r["result"] or "", "prev": r["prev"], "hash": r["hash"]}
+
+
+def record(store, action, user="", source="dashboard", target="", detail=None, result="ok"):
     rec = {"t": round(time.time(), 3), "user": str(user or ""), "source": str(source or ""),
            "action": str(action)[:120], "target": str(target or "")[:80], "detail": redact(detail or {}),
            "result": str(result or "")[:200]}
-    with _lock:
-        prev = _tail_hash(path)
-        rec["prev"] = prev
-        rec["hash"] = _digest(prev, rec)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        _last[path] = rec["hash"]
+    with store.lock:
+        last = store.q("SELECT hash FROM audit ORDER BY id DESC LIMIT 1")
+        rec["prev"] = last[0]["hash"] if last else (store.meta("audit_chain_start") or GENESIS)
+        rec["hash"] = _digest(rec["prev"], rec)
+        store.x("INSERT INTO audit(t, user, source, action, target, detail, result, prev, hash) VALUES(?,?,?,?,?,?,?,?,?)",
+                (rec["t"], rec["user"], rec["source"], rec["action"], rec["target"],
+                 json.dumps(rec["detail"], ensure_ascii=False), rec["result"], rec["prev"], rec["hash"]))
     return rec
 
 
-def read(path, limit=500, since=0.0):
+def read(store, limit=500, since=0.0):
     """Newest first."""
-    rows = []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if r.get("t", 0) >= since:
-                    rows.append(r)
-    except OSError:
-        return []
-    return rows[::-1][:limit]
+    return [_row(r) for r in store.q("SELECT * FROM audit WHERE t >= ? ORDER BY id DESC LIMIT ?", (since, int(limit)))]
 
 
-def verify(path):
-    """(ok, records checked, line number of the first broken record or 0)."""
-    prev, n = GENESIS, 0
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for n, line in enumerate(f, 1):
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    return False, n - 1, n
-                if r.get("prev") != prev or _digest(prev, r) != r.get("hash"):
-                    return False, n - 1, n
-                prev = r["hash"]
-    except OSError:
-        return True, 0, 0
-    return True, n, 0
+def verify(store):
+    """(ok, records checked, position of the first broken record or 0)."""
+    with store.lock:
+        rows = store.q("SELECT * FROM audit ORDER BY id")
+        prev = store.meta("audit_chain_start") or GENESIS
+    for n, r in enumerate(rows, 1):
+        rec = _row(r)
+        if rec["prev"] != prev or _digest(prev, rec) != rec["hash"]:
+            return False, n - 1, n
+        prev = rec["hash"]
+    return True, len(rows), 0
+
+
+def prune(store, days=RETENTION_DAYS):
+    """Drop records older than `days`; the first record kept becomes the new start of the chain."""
+    with store.lock:
+        cutoff = time.time() - days * 86400
+        old = store.q("SELECT COUNT(*) AS n FROM audit WHERE t < ?", (cutoff,))[0]["n"]
+        if not old:
+            return 0
+        last_old = store.q("SELECT hash FROM audit WHERE t < ? ORDER BY id DESC LIMIT 1", (cutoff,))[0]["hash"]
+        store.x("DELETE FROM audit WHERE t < ?", (cutoff,))
+        store.meta("audit_chain_start", last_old)  # the next record kept (or written) follows on from it
+        return old
 
 
 def _cell(v):
