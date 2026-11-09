@@ -13,7 +13,7 @@ a = Analysis(
     # cv2/data holds the Haar face detector used by face enrollment.
     # static/leaflet + static/three: the map and 3D-viewer libraries, bundled so they work without internet.
     datas=collect_data_files('cv2', includes=['data/*.xml']) + [(os.path.join(APP, 'static'), 'static')],
-    hiddenimports=['dashboard', 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'paho.mqtt.client', 'yaml', 'requests', 'cv2']
+    hiddenimports=['dashboard', 'browser_mode', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'nofly', 'users', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'paho.mqtt.client', 'yaml', 'requests', 'cv2']
                   + collect_submodules('pages', filter=lambda n: True)
                   + collect_submodules('pyttsx3.drivers') + ['comtypes', 'win32com.client'],
     excludes=['matplotlib', 'tkinter.test'],

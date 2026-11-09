@@ -3,8 +3,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import edition
+import browser_mode as browser_mode_lib
 
-APP_VERSION = 'V11.3.5'
+APP_VERSION = 'V11.7.0'
 PRODUCT_NAME = edition.PRODUCT_NAME
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 FROZEN = getattr(sys, 'frozen', False)
@@ -20,6 +21,7 @@ OVERLAY_DIR = os.path.join(DATA_HOME, 'frigate-overlay')
 LOG_DIR = os.path.join(DATA_HOME, 'logs')
 PID_FILE = os.path.join(DATA_HOME, 'dashboard.pid')
 DASH_LOG = os.path.join(LOG_DIR, 'dashboard.log')
+LAUNCHER_LOG = os.path.join(LOG_DIR, 'launcher.log')
 LOG_MAX_BYTES = 5 * 1024 * 1024
 DASHBOARD_PORT = 8080
 CONTAINERS = ['frigate', 'drone-mediamtx', 'frigate-mqtt']
@@ -123,7 +125,10 @@ def run_dashboard_in_process():
 
 
 class App(tk.Tk):
-    def __init__(self):
+    """browser_mode (the normal start): no window; the system opens in the web browser and stops when
+    the browser is closed. `--window` shows this control window instead and nothing stops on its own."""
+
+    def __init__(self, browser_mode=True, background=False):
         super().__init__()
         self.title(f'{PRODUCT_NAME} {APP_VERSION}')
         self.geometry('820x610')
@@ -131,9 +136,75 @@ class App(tk.Tk):
         self.protocol('WM_DELETE_WINDOW', self.on_close)
         self.q = queue.Queue()
         self.busy = False
+        self.stage = 'Starting...'
+        self.ready_url = ''
+        self.error = ''
+        self.window_shown = not browser_mode
+        self.quitting = False
+        self.background = background  # started with Windows: run without opening the browser
         self._build()
+        self.start_page = browser_mode_lib.StartPage(self, PRODUCT_NAME)
+        if not self.start_page.start():
+            self.start_page = None  # port taken by another program: no start page, use the window
+        self.browser_mode = browser_mode and self.start_page is not None
+        if self.browser_mode:
+            self.withdraw()
+            if not background:
+                webbrowser.open(browser_mode_lib.SPLASH_URL)
+            threading.Thread(target=self._browser_watch, name='browser-watch', daemon=True).start()
+        else:
+            self.window_shown = True
         self.after(200, self._poll)
         self.after(800, self.start_system)
+
+    # ---- start page (browser_mode.StartPage owner) ----
+    def status(self):
+        return {'message': self.stage, 'ready': bool(self.ready_url) and not self.busy,
+                'url': self.ready_url, 'error': self.error}
+
+    def on_action(self, name):
+        if name == 'shutdown':  # Settings → System → Shut down (the dashboard asks, admins only)
+            threading.Thread(target=self._shutdown, daemon=True).start()
+        else:
+            self.emit(name)
+
+    def _shutdown(self):
+        self.emit('log', 'Shut down asked from the dashboard: stopping the system.')
+        time.sleep(1)  # let the dashboard answer its page first
+        self._stop_services()
+        self.emit('quit')
+
+    def show_window(self):
+        """From now on the person drives the system from the window; closing the browser stops nothing."""
+        self.window_shown = True
+        self.deiconify(); self.lift()
+        try: self.focus_force()
+        except Exception: pass
+
+    def _browser_watch(self):
+        watch = browser_mode_lib.BrowserWatch(time.time())
+        while not self.quitting:
+            time.sleep(2)
+            if self.window_shown:
+                return
+            now = time.time()
+            presence = browser_mode_lib.dashboard_presence(DASHBOARD_PORT)
+            page_open = True if self.start_page.is_open(now) else None
+            if page_open is None and presence is not None:
+                # Normally the system keeps guarding with the browser closed; it only stops with the
+                # browser when Settings → System → "Stop the system when the browser closes" is on.
+                page_open = presence['open_pages'] > 0 or not presence['stop_with_browser']
+            decision = watch.step(now, page_open, busy=self.busy,
+                                  splash_ever_seen=self.background or self.start_page.last_seen > 0)
+            if decision == 'show-window':
+                self.emit('log', 'The browser did not open the start page; showing the control window.')
+                self.emit('show')
+                return
+            if decision == 'stop' and not self.window_shown:
+                self.emit('log', 'Browser closed: stopping the system.')
+                self._stop_services()
+                self.emit('quit')
+                return
 
     def _build(self):
         top = ttk.Frame(self, padding=(18,16,18,10)); top.pack(fill='x')
@@ -166,20 +237,37 @@ class App(tk.Tk):
         self.log.configure(yscrollcommand=scr.set)
         self.log.pack(side='left', fill='both', expand=True); scr.pack(side='right', fill='y')
 
-    def emit(self, kind, *args): self.q.put((kind,args))
+    def emit(self, kind, *args):
+        if kind == 'msg': self.stage = args[0]
+        self.q.put((kind,args))
+
+    def _file_log(self, text):
+        try:
+            rotate_log(LAUNCHER_LOG)
+            with open(LAUNCHER_LOG, 'a', encoding='utf-8', errors='ignore') as f:
+                f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + text + '\n')
+        except OSError:
+            pass
 
     def _poll(self):
         try:
             while True:
                 kind,args = self.q.get_nowait()
                 if kind == 'log':
+                    self._file_log(args[0])
                     self.log.configure(state='normal'); self.log.insert('end', args[0]+'\n'); self.log.see('end'); self.log.configure(state='disabled')
                 elif kind == 'msg': self.message.set(args[0])
                 elif kind == 'status': self.status_vars[args[0]].set(args[1])
                 elif kind == 'busy':
                     self.busy = args[0]; self.start_btn.configure(state='disabled' if self.busy else 'normal')
                     self.progress.start(12) if self.busy else self.progress.stop()
-                elif kind == 'error': messagebox.showerror(PRODUCT_NAME, args[0], parent=self)
+                elif kind == 'error':
+                    if self.browser_mode: self.show_window()
+                    messagebox.showerror(PRODUCT_NAME, args[0], parent=self)
+                elif kind == 'show': self.show_window()
+                elif kind == 'open': webbrowser.open(self.ready_url or browser_mode_lib.SPLASH_URL)
+                elif kind == 'retry': self.start_system()
+                elif kind == 'quit': self.on_close()
                 elif kind == 'info': messagebox.showinfo(PRODUCT_NAME, args[0], parent=self)
         except queue.Empty:
             pass
@@ -188,6 +276,7 @@ class App(tk.Tk):
     def start_system(self):
         if self.busy: return
         self.busy = True
+        self.error = ''
         self.start_btn.configure(state='disabled')
         threading.Thread(target=self._start_worker, daemon=True).start()
 
@@ -231,8 +320,10 @@ class App(tk.Tk):
             self.emit('status','Dashboard',f'Running • {DASHBOARD_PORT}')
             self.emit('status','Drone stream','RTSP server reachable • 8556' if port_open(8556) else 'Waiting for RTSP server')
             self.emit('msg','System ready'); self.emit('log',f'System ready: {url}')
-            webbrowser.open(url)
+            self.ready_url = url
+            if not self.browser_mode: webbrowser.open(url)  # browser mode: the start page moves on to it
         except Exception as e:
+            self.error = str(e)
             self.emit('log','ERROR: '+str(e)); self.emit('error', str(e)); self.emit('msg','Start failed — see Activity / Diagnostics')
         finally:
             self.emit('busy', False)
@@ -333,18 +424,23 @@ class App(tk.Tk):
     def _stop_worker(self):
         self.emit('busy',True); self.emit('msg','Stopping system...')
         try:
-            if os.path.exists(PID_FILE):
-                try:
-                    pid=open(PID_FILE).read().strip()
-                    if pid: run_hidden(['taskkill','/PID',pid,'/T','/F'], timeout=15)
-                except Exception: pass
-                try: os.remove(PID_FILE)
-                except OSError: pass
-            try: compose('--profile', 'mapping', 'stop', timeout=120)  # also the 3D mapping engine, if it was started
-            except Exception: pass
+            self._stop_services()
             for k in self.status_vars: self.emit('status',k,'Stopped')
             self.emit('msg','System stopped'); self.emit('log','System stopped.')
         finally: self.emit('busy',False)
+
+    def _stop_services(self):
+        """Stop the dashboard and the AI services (Docker Desktop itself keeps running)."""
+        self.ready_url = ''
+        if os.path.exists(PID_FILE):
+            try:
+                pid=open(PID_FILE).read().strip()
+                if pid: run_hidden(['taskkill','/PID',pid,'/T','/F'], timeout=15)
+            except Exception: pass
+            try: os.remove(PID_FILE)
+            except OSError: pass
+        try: compose('--profile', 'mapping', 'stop', timeout=120)  # also the 3D mapping engine, if it was started
+        except Exception: pass
 
     def open_settings(self):
         win=tk.Toplevel(self); win.title('Camera / Drone Setup'); win.geometry('700x470'); win.minsize(640,430); win.transient(self)
@@ -399,11 +495,21 @@ class App(tk.Tk):
             try: return socket.gethostbyname(socket.gethostname())
             except Exception: return 'YOUR_PC_IP'
 
-    def on_close(self): self.destroy()
+    def on_close(self):
+        """Closing the window leaves the system running, as before (Stop System stops it)."""
+        self.quitting = True
+        if self.start_page: self.start_page.stop()
+        self.destroy()
 
 
 if __name__=='__main__':
     if '--dashboard' in sys.argv:
         run_dashboard_in_process()
     else:
-        App().mainloop()
+        window = '--window' in sys.argv
+        background = '--background' in sys.argv  # Windows sign-in: start guarding, no browser
+        if background and browser_mode_lib.notify_running_instance('ping'):
+            sys.exit(0)
+        # Already running: bring up the browser (or the control window) and leave it at that.
+        if background or not browser_mode_lib.notify_running_instance('show' if window else 'open'):
+            App(browser_mode=not window, background=background and not window).mainloop()

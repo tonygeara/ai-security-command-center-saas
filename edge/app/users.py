@@ -1,7 +1,6 @@
 """Dashboard sign-in and roles.
 
-Sign-in is off until the first user (always an admin) is created on the Users page; existing installs keep
-working as before until then. Roles:
+Until the first user (always an admin) exists, every page asks for one to be created (/welcome). Roles:
     viewer    watches live video, events and maps; changes nothing
     operator  also flies: drone controls, routes, drone responses, live-feed switches
     admin     everything, including setup, licences, no-fly zones and users
@@ -19,9 +18,9 @@ ROLES = ("viewer", "operator", "admin")
 ROLE_NAMES = {"viewer": "Viewer: watch only", "operator": "Operator: watch and fly", "admin": "Admin: everything"}
 
 # Paths anyone may open without signing in (the app also calls can-add-source on itself).
-OPEN_PATHS = ("/login", "/logout", "/healthz", "/favicon.ico", "/api/cloud/can-add-source/")
+OPEN_PATHS = ("/login", "/logout", "/healthz", "/favicon.ico", "/api/cloud/can-add-source/", "/api/browser/")
 # Read-only pages that still need an admin (they show secrets or manage users).
-ADMIN_ONLY_READ = ("/users", "/api/users", "/api/drone/link/pair")
+ADMIN_ONLY_READ = ("/users", "/api/users", "/api/drone/link/pair", "/audit", "/api/audit")
 # What an operator may change: flying, routes, responses, which live feeds are shown.
 OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/drone/(?!add$|remove$|link/pair)",  # adding, removing and pairing drones: admins
@@ -32,6 +31,9 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/virtual-drones/[^/]+$",
     r"^/api/maps(/plan|/[a-f0-9]{12}/(fly|stop|photos|process|cancel))?$",  # 3D maps: plan, fly, add photos, process
     r"^/api/(routes/optimize|rf/check)$",  # planning helpers (they change nothing)
+    r"^/api/incidents/\d+$",  # mark an incident reviewed
+    r"^/api/evidence/verify$",  # check a pack (changes nothing)
+    r"^/api/coverage/send$",  # send a drone to a spot on the Coverage page
 )]
 
 _cache = {"path": None, "mtime": None, "users": []}

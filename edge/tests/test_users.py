@@ -20,7 +20,27 @@ def login(d, name, pw):
     return c, r
 
 
-def test_open_until_first_admin(d, signin):
+def test_first_start_asks_for_an_admin(d, signin, monkeypatch):
+    monkeypatch.setattr(d.web_access, "REQUIRE_FIRST_ADMIN", True)
+    c = d.app.test_client()
+    for path in ("/", "/drone-control", "/settings", "/login"):
+        r = c.get(path)
+        assert r.status_code == 302 and r.headers["Location"] == "/welcome", path
+    assert c.get("/api/drone/links").status_code == 401
+    assert c.post("/api/drone/command?drone=drone", json={"cmd": "hover"}).status_code == 401
+    page = c.get("/welcome")
+    assert page.status_code == 200 and "Create the admin account" in page.get_data(as_text=True)
+    assert c.get("/healthz").status_code == 200 and c.get("/hud.css").status_code == 200
+    r = c.post("/api/users", json={"username": "kim", "password": "longpassword", "role": "viewer"})
+    assert r.status_code == 400 and "first user must be an admin" in r.get_json()["error"]
+    assert c.post("/api/users", json={"username": "boss", "password": "correct horse", "role": "admin"}).get_json()["ok"]
+    assert c.get("/").status_code == 200  # signed in straight away
+    assert c.get("/welcome").status_code == 302  # only once
+    other = d.app.test_client()
+    assert other.get("/").headers["Location"].startswith("/login")
+
+
+def test_open_until_first_admin_when_not_required(d, signin):
     c = d.app.test_client()
     assert c.get("/").status_code == 200
     assert c.get("/api/users").get_json()["users"] == []

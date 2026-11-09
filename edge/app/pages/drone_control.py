@@ -168,7 +168,10 @@ BODY = r"""
 <span style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" id="rAutoV"> vehicle</span>
 between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" type="time" style="width:110px"></label>
 <div class="muted" style="margin-top:4px">It picks the closest drone that is ready (connected, enough battery, not on a route or held as a backup), flies round no-fly zones and sends you a Telegram alert with a Recall button. Each camera triggers it at most once every
-<input id="rCool" type="number" min="1" max="120" style="width:60px"> min. Only cameras with a map location count. Same start and end time = all day.</div></div>
+<input id="rCool" type="number" min="1" max="120" style="width:60px"> min. Only cameras with a map location count. Same start and end time = all day.</div>
+<label style="margin:10px 0 0;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rHandoff" onchange="handoffWarn(this)">
+<b>Camera-to-drone handoff</b>: when a person or vehicle leaves a camera's view, send the nearest drone to where they went</label>
+<div class="muted" style="margin-top:4px">Uses the same people/vehicle choices, hours and cooldown as above. Only cameras placed and pointed on the <a href="/coverage" style="color:#5bd9ff">Coverage</a> page take part. The drone flies to the estimated spot and hovers there with its camera; it does not chase.</div></div>
 <div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="saveResp()">Save</button><button class="hud-btn danger" onclick="recallResp()">Recall drone</button>
 <button class="hud-btn" onclick="briefNow()">Send briefing now</button></div>
 <div id="respMsg" class="hud-msg"></div>
@@ -440,7 +443,8 @@ async function loadResp(){try{const d=await fetch('/api/response/settings').then
   $('rAlt').value=c.altitude_m;$('rSpeed').value=c.speed_ms;$('rHover').value=c.hover_seconds;$('rBatt').value=c.min_battery;$('rBrief').value=c.briefing_time;
   $('rReturn').checked=!!c.auto_return;$('rBriefOn').checked=!!c.briefing_enabled;
   if(document.activeElement?.closest?.('#respAutoBox')==null){$('rAuto').checked=!!c.auto_dispatch;$('rAutoP').checked=!!c.auto_person;$('rAutoV').checked=!!c.auto_vehicle;
-    $('rFrom').value=c.auto_from;$('rTo').value=c.auto_to;$('rCool').value=c.auto_cooldown_min}renderResp()}catch(e){}}
+    $('rFrom').value=c.auto_from;$('rTo').value=c.auto_to;$('rCool').value=c.auto_cooldown_min;$('rHandoff').checked=!!c.handoff}renderResp()}catch(e){}}
+function handoffWarn(el){if(el.checked&&!confirm('Handoff flies a drone with no confirmation when someone leaves a camera\'s view in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
 function autoWarn(el){if(el.checked&&!confirm('Auto-send flies a drone with no confirmation when a camera sees someone in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
 function renderResp(){if(!resp)return;const locs=resp.settings.camera_locations||{},r=resp.response||{};
   $('respState').textContent=r.active?('RESPONDING: '+r.camera+' · '+r.phase):(resp.telegram?'TELEGRAM READY':'TELEGRAM NOT SET UP');
@@ -453,7 +457,7 @@ async function saveCamLoc(lat,lon){const n=locFor;locFor='';const locs={...(resp
   if(d.ok){resp.settings=d.settings;rmsg('Location of '+n+' saved.',true)}else rmsg(d.error,false);renderResp()}
 async function saveResp(){const body={altitude_m:+$('rAlt').value,speed_ms:+$('rSpeed').value,hover_seconds:+$('rHover').value,min_battery:+$('rBatt').value,
   briefing_time:$('rBrief').value,auto_return:$('rReturn').checked,briefing_enabled:$('rBriefOn').checked,
-  auto_dispatch:$('rAuto').checked,auto_person:$('rAutoP').checked,auto_vehicle:$('rAutoV').checked,auto_from:$('rFrom').value,auto_to:$('rTo').value,auto_cooldown_min:+$('rCool').value||10};
+  auto_dispatch:$('rAuto').checked,auto_person:$('rAutoP').checked,auto_vehicle:$('rAutoV').checked,auto_from:$('rFrom').value,auto_to:$('rTo').value,auto_cooldown_min:+$('rCool').value||10,handoff:$('rHandoff').checked};
   const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(d.ok){resp.settings=d.settings;rmsg('Saved.',true);loadResp()}else rmsg(d.error,false)}
 async function sendTo(n){const sim=(st.telemetry||{}).simulator;

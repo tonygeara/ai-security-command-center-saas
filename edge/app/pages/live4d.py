@@ -44,7 +44,7 @@ export function start(box, bar, drone, hooks){
   controls.enableDamping = true; controls.maxPolarAngle = Math.PI * 0.49;
   // Turning or moving the view by hand saves the place looked at, for the flat map and 3D MAP.
   controls.addEventListener('end', () => { if (st && st.centre) { const ll = latlon(controls.target); focusSet(ll.lat, ll.lon); } });
-  const groups = {zones: new THREE.Group(), aircraft: new THREE.Group(), site: new THREE.Group(), draft: new THREE.Group()};
+  const groups = {zones: new THREE.Group(), aircraft: new THREE.Group(), site: new THREE.Group(), draft: new THREE.Group(), cams: new THREE.Group()};
   Object.values(groups).forEach(g => scene.add(g));
   st = {box, bar, drone, renderer, scene, camera, controls, groups, info, centre: null, drones: {}, follow: store.get('l4d-follow') || drone,
         hidden: new Set(store.get('l4d-hidden') || []), zonesKey: '', siteKey: '', timer: null, raf: 0, alive: true, last: null,
@@ -75,7 +75,7 @@ export function stop(){
 // Move the whole scene to another place: new ground there, everything else is redrawn round it.
 function recentre(lat, lon, label){
   (st.groundObjs || []).forEach(o => st.scene.remove(o));
-  st.centre = {lat, lon}; st.zonesKey = ''; st.siteKey = ''; st.draftKey = ''; st.barKey = '';
+  st.centre = {lat, lon}; st.zonesKey = ''; st.siteKey = ''; st.camsKey = ''; st.draftKey = ''; st.barKey = '';
   Object.values(st.drones).forEach(o => { o.routeKey = null; });
   if (st.follow) { st.follow = ''; store.set('l4d-follow', ''); }
   st.last = null; ground(); focusSet(lat, lon);
@@ -213,6 +213,7 @@ async function poll(){
   if (!st || !d.ok) { if (st) st.info.textContent = d && d.error || 'No data'; return; }
   if (!st.centre) { const f = focusGet(); st.centre = f ? {lat: f.lat, lon: f.lon} : d.centre; ground(); }
   zones(d.zones || []);
+  cams(d.cameras || []);
   site(d.maps || []);
   drones(d.drones || []);
   aircraft(d.aircraft || []);
@@ -256,6 +257,27 @@ function zones(list){
     const color = ZONE[z.source] || 0xff4d6a;
     st.groups.zones.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color, transparent: true, opacity: 0.13, depthWrite: false})));
     st.groups.zones.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({color, transparent: true, opacity: 0.6})));
+  }
+}
+
+// ----- cameras: what each one sees on the ground (from the Coverage page) -----
+function cams(list){
+  const key = JSON.stringify(list);
+  if (key === st.camsKey) return;
+  st.camsKey = key; st.groups.cams.clear();
+  for (const c of list) {
+    const at = enu(c.lat, c.lon, 0), v = c.view, n = 18;
+    const shape = new THREE.Shape(); shape.moveTo(at.x, -at.z);
+    for (let i = 0; i <= n; i++) {
+      const b = (v.heading - v.fov / 2 + v.fov * i / n) * Math.PI / 180;
+      shape.lineTo(at.x + v.range * Math.sin(b), -at.z + v.range * Math.cos(b));
+    }
+    const geo = new THREE.ShapeGeometry(shape); geo.rotateX(-Math.PI / 2);
+    const fan = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color: 0x2bc0ff, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide}));
+    fan.position.y = 0.3; st.groups.cams.add(fan);
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 6), new THREE.MeshBasicMaterial({color: 0x5bd9ff}));
+    post.position.set(at.x, 3, at.z); st.groups.cams.add(post);
+    const tag = label('▣ ' + c.name, '#9edfff'); tag.position.set(at.x, 9, at.z); st.groups.cams.add(tag);
   }
 }
 

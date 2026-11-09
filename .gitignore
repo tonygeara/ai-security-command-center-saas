@@ -19,6 +19,9 @@ camera_recovery*.json
 local_settings.json
 known_plates.json
 event_history.csv
+ai_security.db*
+evidence_signing.key
+*.migrated
 frigate.db
 .jwt_secret
 license_cache.json

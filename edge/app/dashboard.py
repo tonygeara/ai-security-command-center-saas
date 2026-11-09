@@ -44,6 +44,7 @@ from flask import (
     redirect,
     session,
     g,
+    has_request_context,
 )
 
 
@@ -92,7 +93,25 @@ BASE_FOLDER = os.environ.get(
 )
 os.makedirs(BASE_FOLDER, exist_ok=True)
 EVENT_FOLDER = os.path.join(BASE_FOLDER, "events")
-EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")
+EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")  # before V11.5; imported into the database once
+DATA_FOLDER = os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER)
+# Events, sightings, audit log and incidents: one SQLite database (store.py).
+import store as _store_mod
+import coverage
+import audit  # needed early: the retention worker (started below) prunes the audit log
+STORE = _store_mod.Store(os.path.join(DATA_FOLDER, "ai_security.db"))
+STORE.migrate(event_csv=EVENT_LOG, sightings_jsonl=os.path.join(BASE_FOLDER, "sightings.jsonl"),
+              audit_jsonl=os.path.join(DATA_FOLDER, "audit_log.jsonl"))
+# The event pipeline (bus.py): detections, events, sightings and drone actions are published once;
+# incidents and auto-dispatch subscribe.
+import bus as _bus_mod
+import incidents as _incidents_mod
+PIPELINE = _bus_mod.Bus("pipeline")
+INCIDENTS = _incidents_mod.Incidents(STORE)
+INCIDENTS.attach(PIPELINE)
+import patterns as _patterns_mod
+PATTERNS = _patterns_mod.Patterns(STORE, lambda: _load_customer_settings(), PIPELINE.publish)
+PATTERNS.attach(PIPELINE)
 PLATE_FILE = os.path.join(BASE_FOLDER, "known_plates.json")
 TELEGRAM_CONFIG_FILE = os.path.join(BASE_FOLDER, "telegram_config.json")
 EDGE_AGENT_CONFIG_FILE = os.path.join(BASE_FOLDER, "edge_agent_config.json")
@@ -141,7 +160,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.3.5"
+APP_VERSION = "V11.7.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -331,6 +350,15 @@ def telegram_ready(config=None):
         and str(config.get("bot_token") or "").strip()
         and str(config.get("chat_id") or "").strip()
     )
+
+
+def _alert_to_telegram(m):
+    """Pipeline subscriber: every "alert" (unknown/known faces and plates, casing, unusual activity) goes to Telegram."""
+    queue_telegram_alert(m.get("alert") or "alert", m.get("text") or "", m.get("key") or m.get("text") or "",
+                         snapshot_bytes=m.get("snapshot"), buttons=m.get("buttons"))
+
+
+PIPELINE.subscribe("alert", _alert_to_telegram)
 
 
 def queue_telegram_alert(kind, text, key, snapshot_bytes=None, buttons=None):
@@ -829,42 +857,28 @@ def save_unknown_event(event_type, name, identifier="", object_id="", snapshot_b
         "Camera": CAMERA_NAME,
         "Snapshot": snapshot_path,
     }
-    fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
-
     try:
-        with event_log_lock:
-            os.makedirs(os.path.dirname(EVENT_LOG), exist_ok=True)
-            file_exists = os.path.exists(EVENT_LOG) and os.path.getsize(EVENT_LOG) > 0
-            if file_exists:
-                with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                    existing_fields = csv.DictReader(f).fieldnames or []
-                if existing_fields:
-                    fieldnames = existing_fields
-            with open(EVENT_LOG, "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-                if not file_exists:
-                    writer.writeheader()
-                writer.writerow({key: row.get(key, "") for key in fieldnames})
+        event_id = STORE.add_event_row(row)
+        PIPELINE.publish("event", camera=CAMERA_NAME, type=event_type, name=name, identifier=identifier,
+                         snapshot=snapshot_path, event_id=event_id)
         print(f"Saved unknown event: {event_type} {identifier or name}")
 
         # Unknown alerts are queued only after the event was actually saved,
         # so the existing object-ID de-duplication also prevents Telegram spam.
         if event_type.upper() == "UNKNOWN FACE":
-            queue_telegram_alert(
-                "unknown_face",
-                f"⚠️ UNKNOWN PERSON detected at {CAMERA_NAME}\n{date_text} {time_text}",
-                f"unknown_face:{object_id or identifier or name}",
-                snapshot_bytes=snapshot_bytes,
-                buttons=alert_buttons(CAMERA_NAME),
+            PIPELINE.publish(
+                "alert", alert="unknown_face", camera=CAMERA_NAME,
+                text=f"⚠️ UNKNOWN PERSON detected at {CAMERA_NAME}\n{date_text} {time_text}",
+                key=f"unknown_face:{object_id or identifier or name}",
+                snapshot=snapshot_bytes, buttons=alert_buttons(CAMERA_NAME),
             )
         elif event_type.upper() in {"UNKNOWN PLATE", "UNKNOWN VEHICLE"}:
             plate_text = identifier or "Plate unavailable"
-            queue_telegram_alert(
-                "unknown_vehicle",
-                f"⚠️ UNKNOWN VEHICLE detected at {CAMERA_NAME}\nPlate: {plate_text}\n{date_text} {time_text}",
-                f"unknown_vehicle:{object_id or plate_text}",
-                snapshot_bytes=snapshot_bytes,
-                buttons=alert_buttons(CAMERA_NAME),
+            PIPELINE.publish(
+                "alert", alert="unknown_vehicle", camera=CAMERA_NAME,
+                text=f"⚠️ UNKNOWN VEHICLE detected at {CAMERA_NAME}\nPlate: {plate_text}\n{date_text} {time_text}",
+                key=f"unknown_vehicle:{object_id or plate_text}",
+                snapshot=snapshot_bytes, buttons=alert_buttons(CAMERA_NAME),
             )
 
         return True
@@ -1004,22 +1018,9 @@ def prune_old_events(days=None, now=None):
         return 0, 0
     cutoff = (now or time.time()) - days * 86400
     cutoff_date = time.strftime("%Y-%m-%d", time.localtime(cutoff))
-    removed_rows = removed_files = 0
-    with event_log_lock:
-        if os.path.exists(EVENT_LOG):
-            with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                fieldnames = reader.fieldnames
-                rows = list(reader)
-            keep = [r for r in rows if not r.get("Date") or r["Date"] >= cutoff_date]
-            removed_rows = len(rows) - len(keep)
-            if removed_rows and fieldnames:
-                tmp = EVENT_LOG + ".tmp"
-                with open(tmp, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=fieldnames)
-                    writer.writeheader()
-                    writer.writerows(keep)
-                os.replace(tmp, EVENT_LOG)
+    removed_files = 0
+    # Whole days, as before: everything from the cutoff day on is kept.
+    removed_rows = STORE.prune_events(time.mktime(time.strptime(cutoff_date, "%Y-%m-%d")))
     if os.path.isdir(EVENT_FOLDER):
         for name in os.listdir(EVENT_FOLDER):
             path = os.path.join(EVENT_FOLDER, name)
@@ -1038,6 +1039,10 @@ def event_retention_worker():
     while True:
         try:
             prune_old_events()
+            audit.prune(STORE)
+            INCIDENTS.close_stale()
+            if EVENT_RETENTION_DAYS > 0:
+                INCIDENTS.prune(time.time() - EVENT_RETENTION_DAYS * 86400)
         except Exception as e:
             print("Event retention error:", e)
         time.sleep(6 * 3600)
@@ -1862,12 +1867,16 @@ def on_message(
                         identity_label=drone_label,
                     )
             return
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update", "end"):
+            after_t = data.get("after") if isinstance(data.get("after"), dict) else {}
+            PIPELINE.publish("track", camera=camera, type=data.get("type"), object_id=str(after_t.get("id") or ""),
+                             label=str(after_t.get("label") or "").lower(), box=payload_box(after_t),
+                             stationary=bool(after_t.get("stationary")), false_positive=after_t.get("false_positive"))
         if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update"):
             after_auto = data.get("after") if isinstance(data.get("after"), dict) else {}
             if after_auto.get("false_positive") is False:
-                threading.Thread(target=auto_dispatch_check, daemon=True,
-                                 args=(camera, str(after_auto.get("label") or "").lower(), str(after_auto.get("id") or ""),
-                                       bool(after_auto.get("stationary")))).start()
+                PIPELINE.publish("detection", camera=camera, label=str(after_auto.get("label") or "").lower(),
+                                 object_id=str(after_auto.get("id") or ""), stationary=bool(after_auto.get("stationary")))
         if camera and camera != CAMERA_NAME:
             return
 
@@ -1966,10 +1975,10 @@ def on_message(
             set_face_overlay(True, display_name, payload_box(data), object_id=face_object_id)
             detection_beep("face_" + display_name.lower(), True)
             record_sighting("face", display_name, "", CAMERA_NAME, face_object_id)
-            queue_telegram_alert(
-                "known_face",
-                f"✅ {display_name} detected at {CAMERA_NAME}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
-                "known_face:" + display_name.lower(),
+            PIPELINE.publish(
+                "alert", alert="known_face", camera=CAMERA_NAME,
+                text=f"✅ {display_name} detected at {CAMERA_NAME}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                key="known_face:" + display_name.lower(),
             )
 
             first_name = (
@@ -2079,10 +2088,10 @@ def on_message(
             record_sighting("plate", vehicle if known else "", plate, CAMERA_NAME, vehicle_object_id, known=known)
 
             if known:
-                queue_telegram_alert(
-                    "known_vehicle",
-                    f"✅ Authorized vehicle detected at {CAMERA_NAME}\n{vehicle}\nPlate: {plate}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
-                    "known_vehicle:" + plate,
+                PIPELINE.publish(
+                    "alert", alert="known_vehicle", camera=CAMERA_NAME,
+                    text=f"✅ Authorized vehicle detected at {CAMERA_NAME}\n{vehicle}\nPlate: {plate}\n{time.strftime('%Y-%m-%d %H:%M:%S')}",
+                    key="known_vehicle:" + plate,
                 )
                 speak(
                     (
@@ -2317,8 +2326,10 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch  # noqa: E401
+import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage  # noqa: E401
 import users as user_accounts
+import web_access
+import web_records
 
 # Optional flag beside the brand subtitle (on-prem "Lebanon" edition sets BRAND_FLAG = "lb").
 BRAND_FLAGS = {
@@ -2456,34 +2467,11 @@ threading.Thread(target=cloud_control_worker, daemon=True).start()
 # ============================================================
 
 def get_events(limit=8):
-    if not os.path.exists(
-        EVENT_LOG
-    ):
-        return []
-
+    """Newest first, in the old CSV row shape (Date, Time, Type, Name, Identifier, Camera, Snapshot)."""
     try:
-        with open(
-            EVENT_LOG,
-            "r",
-            encoding="utf-8"
-        ) as f:
-            rows = list(
-                csv.DictReader(f)
-            )
-
-        rows.reverse()
-
-        if limit is None:
-            return rows
-
-        return rows[:limit]
-
+        return STORE.events(limit)
     except Exception as e:
-        print(
-            "History error:",
-            e
-        )
-
+        print("History error:", e)
         return []
 
 
@@ -4826,6 +4814,33 @@ def _drone_drop(conn, why, slot=None):
 def _drone_event(msg, slot=None):
     link = get_link(slot)
     link["events"] = (link["events"] + [{"at": time.time(), "msg": str(msg)[:200]}])[-30:]
+    key, now = (slot, str(msg)[:110]), time.time()
+    if now - _drone_event_audited.get(key, 0) > 10:  # a message repeated many times a second is logged once
+        _drone_event_audited[key] = now
+        audit_record("drone: " + key[1], target=slot or DRONE_CAMERA_NAME)
+        if drone_response.get("active") and drone_response.get("drone") == (slot or DRONE_CAMERA_NAME):
+            PIPELINE.publish("drone", camera=drone_response.get("camera"), drone=slot, text=key[1])
+
+
+_drone_event_audited = {}
+
+
+TRACK_EVERY_S = 2  # one GPS point every 2 s while a drone responds (for the incident's evidence pack)
+_track_last = {}
+
+
+def _record_track(slot, tel):
+    try:
+        if not (drone_response.get("active") and drone_response.get("drone") == slot and tel.get("lat") is not None):
+            return
+        now = time.time()
+        if now - _track_last.get(slot, 0) < TRACK_EVERY_S:
+            return
+        _track_last[slot] = now
+        INCIDENTS.add_track_point(drone_response.get("camera"), now, slot, float(tel["lat"]), float(tel["lon"]),
+                                  tel.get("altitude"))
+    except Exception as e:
+        print("Track error:", e)
 
 
 def _drone_session(conn, addr):
@@ -4873,6 +4888,7 @@ def _drone_session(conn, addr):
             if kind == "tel":
                 msg.pop("t", None)
                 link["telemetry"], link["tel_at"] = msg, time.time()
+                _record_track(slot, msg)
             elif kind == "ack":
                 with drone_ack_cond:
                     link["acks"][int(msg.get("id") or 0)] = msg
@@ -5467,13 +5483,16 @@ DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_C
 # ============================================================
 # Sightings: known faces and plates (unknown faces are already in event_history.csv), kept 30 days,
 # so the assistant can answer "who came today?" and build the morning briefing offline.
-SIGHTINGS_FILE = os.path.join(BASE_FOLDER, "sightings.jsonl")
 RESPONSE_SETTINGS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "response_settings.json")
 RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "hover_seconds": 60, "auto_return": True,
                      "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": [],
                      # Auto-send the nearest drone when a camera sees someone at night (off until the owner turns it on).
                      "auto_dispatch": False, "auto_person": True, "auto_vehicle": True, "auto_from": "19:00", "auto_to": "06:00",
-                     "auto_cooldown_min": 10}
+                     "auto_cooldown_min": 10,
+                     # Digital twin (coverage.py): where each camera looks, and the site's outline.
+                     "camera_views": {}, "site_outline": [],
+                     # Camera-to-drone handoff: off until the owner turns it on (Drone page / Coverage).
+                     "handoff": False}
 sightings_lock = threading.Lock()
 _sighting_last = {}
 
@@ -5485,57 +5504,29 @@ def record_sighting(kind, name, identifier, camera, object_id="", known=True):
     if now - _sighting_last.get(key, 0) < 120:
         return
     _sighting_last[key] = now
-    row = {"t": round(now), "kind": kind, "name": str(name or ""), "id": str(identifier or ""), "camera": str(camera or ""), "known": bool(known)}
     try:
-        with sightings_lock, open(SIGHTINGS_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        STORE.add_sighting(kind, name, identifier, camera, known=known, t=round(now))
+        PIPELINE.publish("sighting", camera=camera, sighting=kind, name=name, identifier=identifier, known=known)
     except Exception as e:
         print("Sighting log error:", e)
 
 
 def load_sightings(since, until=None):
-    """Known faces/plates from the sightings log plus unknown faces from the event history."""
+    """Known faces/plates from the sightings plus unknown faces and plates from the event history."""
     until = until or time.time() + 60
-    rows = []
-    try:
-        with sightings_lock, open(SIGHTINGS_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if since <= r.get("t", 0) <= until:
-                    rows.append(r)
-    except FileNotFoundError:
-        pass
-    try:
-        with event_log_lock, open(EVENT_LOG, "r", encoding="utf-8") as f:
-            for r in csv.DictReader(f):
-                try:
-                    t = time.mktime(time.strptime(f"{r.get('Date')} {r.get('Time')}", "%Y-%m-%d %H:%M:%S"))
-                except Exception:
-                    continue
-                if since <= t <= until:
-                    kind = "face" if "FACE" in str(r.get("Type", "")).upper() else "plate"
-                    rows.append({"t": t, "kind": kind, "name": "", "id": r.get("Identifier", "") if kind == "plate" else "",
-                                 "camera": r.get("Camera") or CAMERA_NAME, "known": False, "snapshot": r.get("Snapshot", "")})
-    except FileNotFoundError:
-        pass
+    rows = STORE.sightings(since, until)
+    for r in STORE.events(since=since, until=until):
+        typ = str(r["Type"]).upper()
+        if "FACE" not in typ and "PLATE" not in typ:
+            continue  # drone responses and other events are not sightings
+        kind = "face" if "FACE" in typ else "plate"
+        rows.append({"t": r["t"], "kind": kind, "name": "", "id": r["Identifier"] if kind == "plate" else "",
+                     "camera": r["Camera"] or CAMERA_NAME, "known": False, "snapshot": r["Snapshot"]})
     return sorted(rows, key=lambda r: r["t"])
 
 
 def prune_sightings(days=30):
-    cutoff = time.time() - days * 86400
-    try:
-        with sightings_lock:
-            with open(SIGHTINGS_FILE, "r", encoding="utf-8") as f:
-                keep = [line for line in f if (json.loads(line).get("t", 0) if line.strip() else 0) >= cutoff]
-            with open(SIGHTINGS_FILE, "w", encoding="utf-8") as f:
-                f.writelines(keep)
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print("Sightings prune error:", e)
+    STORE.prune_sightings(time.time() - days * 86400)
 
 
 def load_response_settings():
@@ -5564,7 +5555,13 @@ def save_response_settings(data):
             lo, hi = {"altitude_m": (10, DRONE_LIMITS["max_altitude_m"]), "speed_ms": (1, 8), "hover_seconds": (10, 600), "min_battery": (20, 90),
                       "auto_cooldown_min": (1, 120)}[k]
             v = max(lo, min(hi, float(v)))
-        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle"):
+        elif k == "camera_views" and isinstance(v, dict):
+            v = {str(cam)[:60]: coverage.clean_view(view) for cam, view in list(v.items())[:64]}
+        elif k == "site_outline":
+            v = [[float(p[0]), float(p[1])] for p in (v or [])[:200]
+                 if isinstance(p, (list, tuple)) and len(p) == 2 and -90 <= float(p[0]) <= 90 and -180 <= float(p[1]) <= 180]
+            v = v if len(v) >= 3 else []
+        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle", "handoff"):
             v = bool(v)
         elif k in ("auto_from", "auto_to"):
             v = str(v) if re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(v)) else RESPONSE_DEFAULTS[k]
@@ -5656,15 +5653,23 @@ def _nearest_ready(camera):
     return min(ready, key=far), ""
 
 
-def dispatch_drone(camera, by="dashboard", drone=None):
+def dispatch_drone(camera, by="dashboard", drone=None, target=None):
+    """Send a drone to a camera (or, with target=(lat, lon), to a spot near that camera)."""
     if drone_response["active"]:
         return {"ok": False, "error": f"{drone_label(drone_response['drone'])} is already responding to {drone_response['camera']}."}
     slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d), drone) if drone else _nearest_ready(camera)
     if problem:
         return {"ok": False, "error": problem}
     cfg = load_response_settings()
-    loc = cfg["camera_locations"][camera]
+    loc = {"lat": float(target[0]), "lon": float(target[1])} if target else cfg["camera_locations"][camera]
     tel = get_link(slot)["telemetry"]
+    if target:
+        home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
+        if None not in home and _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
+            return {"ok": False, "error": f"That spot is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."}
+        z = nofly.zone_at(nofly_zones(), loc["lat"], loc["lon"])
+        if z:
+            return {"ok": False, "error": f"That spot is inside no-fly zone “{z['name']}”."}
     via = nofly.detour(nofly_zones(), (tel["lat"], tel["lon"]), (loc["lat"], loc["lon"])) if tel.get("lat") else []
     if via is None:
         z = nofly.zone_at(nofly_zones(), loc["lat"], loc["lon"])
@@ -5678,7 +5683,8 @@ def dispatch_drone(camera, by="dashboard", drone=None):
     who = drone_label(slot) if len(drone_slots()) > 1 else "Drone"
     drone_response.update(active=True, drone=slot, camera=camera, phase="flying", started=time.time(), arrived=0.0, stay_until=0.0, by=by,
                           message=f"{who} on its way to {camera}", routing=bool(via),
-                          began=time.time(), log_pending=True, cam_snap=None, drone_snap=None)
+                          began=time.time(), log_pending=True, cam_snap=None, drone_snap=None,
+                          target=loc if target else None)
     # The camera's view when the drone was sent, for the event record (fetched in the background).
     threading.Thread(target=lambda: drone_response.update(cam_snap=_camera_snapshot(camera)), daemon=True).start()
     if via:
@@ -5693,7 +5699,43 @@ def dispatch_drone(camera, by="dashboard", drone=None):
         threading.Thread(target=round_zones, daemon=True).start()
         _drone_event(f"Flying round the no-fly zones to {camera} ({len(via)} turn{'s' if len(via) > 1 else ''})", slot)
     _drone_event(f"Drone response to {camera} started ({by})", slot)
+    PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by)
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
+
+
+def send_drone_to_point(lat, lon, by="dashboard", drone=None):
+    """Send the nearest ready drone to any spot (Coverage page, handoff). The response is filed under the
+    nearest located camera, whose incident it joins."""
+    locs = load_response_settings()["camera_locations"]
+    if not locs:
+        return {"ok": False, "error": "Set at least one camera's place on the map first."}
+    camera = min(locs, key=lambda c: _distance_m(lat, lon, locs[c]["lat"], locs[c]["lon"]))
+    return dispatch_drone(camera, by=by, drone=drone, target=(lat, lon))
+
+
+def site_cameras():
+    """{camera: {"lat", "lon", "view"}} for the cameras placed on the map."""
+    cfg = load_response_settings()
+    return {n: {**p, "view": coverage.clean_view((cfg.get("camera_views") or {}).get(n))} for n, p in cfg["camera_locations"].items()}
+
+
+_frame_size_cache = {"mtime": None, "sizes": {}}
+
+
+def _camera_frame_size(camera):
+    """The camera's detection picture size from the Frigate config (Frigate's boxes are in it)."""
+    path = _frigate_config_path()
+    try:
+        mtime = os.path.getmtime(path) if path else None
+        if mtime != _frame_size_cache["mtime"]:
+            with open(path, encoding="utf-8") as f:
+                cams = (yaml.safe_load(f) or {}).get("cameras") or {}
+            _frame_size_cache.update(mtime=mtime, sizes={n: ((c.get("detect") or {}).get("width"), (c.get("detect") or {}).get("height"))
+                                                         for n, c in cams.items() if isinstance(c, dict)})
+    except Exception:
+        pass
+    w, h = _frame_size_cache["sizes"].get(camera, (None, None))
+    return (w or 1280, h or 720)
 
 
 def _in_window(start, end, now=None):
@@ -5705,6 +5747,20 @@ def _in_window(start, end, now=None):
 
 
 _auto_seen, _auto_last = set(), {}
+
+
+def _auto_dispatch_from_pipeline(m):
+    # Dispatching waits for the drone's answers: never hold up the pipeline for it.
+    threading.Thread(target=auto_dispatch_check, daemon=True,
+                     args=(m["camera"], m.get("label") or "", m.get("object_id") or "", bool(m.get("stationary")))).start()
+
+
+PIPELINE.subscribe("detection", _auto_dispatch_from_pipeline)
+import handoff as _handoff_mod
+HANDOFF = _handoff_mod.Handoff(lambda: load_response_settings(), lambda: site_cameras(), lambda cam: _camera_frame_size(cam),
+                               lambda lat, lon, by: send_drone_to_point(lat, lon, by=by), PIPELINE.publish,
+                               lambda a, b: _in_window(a, b), lambda: drone_control_allowed())
+HANDOFF.attach(PIPELINE)
 
 
 def auto_dispatch_check(camera, label, object_id="", stationary=False):
@@ -5757,18 +5813,10 @@ def _fetch_clip(slot, start, end):
 
 
 def _append_event_row(row):
-    with event_log_lock:
-        os.makedirs(os.path.dirname(EVENT_LOG), exist_ok=True)
-        fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
-        exists = os.path.exists(EVENT_LOG) and os.path.getsize(EVENT_LOG) > 0
-        if exists:
-            with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                fieldnames = csv.DictReader(f).fieldnames or fieldnames
-        with open(EVENT_LOG, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-            if not exists:
-                w.writeheader()
-            w.writerow({k: row.get(k, "") for k in fieldnames})
+    event_id = STORE.add_event_row(row)
+    PIPELINE.publish("event", camera=row.get("Camera") or "", type=row.get("Type"), name=row.get("Name"),
+                     identifier=row.get("Identifier"), snapshot=row.get("Snapshot"), event_id=event_id)
+    return event_id
 
 
 def save_response_event(resp, ended):
@@ -5846,7 +5894,7 @@ def _drone_response_worker():
                 continue  # still flying round a no-fly zone
             if drone_response["phase"] == "flying":
                 if not mission and drone_response["started"] and time.time() - drone_response["started"] > 5:
-                    loc = cfg["camera_locations"].get(cam) or {}
+                    loc = drone_response.get("target") or cfg["camera_locations"].get(cam) or {}
                     near = tel.get("lat") and loc and _distance_m(tel["lat"], tel["lon"], loc["lat"], loc["lon"]) < 8
                     if near:
                         drone_response.update(phase="hovering", arrived=time.time(), stay_until=time.time() + cfg["hover_seconds"],
@@ -6184,6 +6232,7 @@ def telegram_assistant_worker():
         for upd in res.get("result", []):
             offset = max(offset, upd["update_id"] + 1)
             try:
+                _audit_actor.source = "telegram"
                 if "callback_query" in upd:
                     cq = upd["callback_query"]
                     _tg("answerCallbackQuery", callback_query_id=cq["id"])
@@ -7723,7 +7772,8 @@ def api_live4d():
                     "zones": [{"id": z["id"], "name": z["name"], "source": z.get("source", ""), "points": z["points"]} for z in nofly_zones()],
                     "aircraft": [{**{k: a[k] for k in ("hex", "call", "lat", "lon", "height_ft", "track", "dist_m")}, "threat": a["hex"] in threats}
                                  for a in (t["aircraft"] if fresh else [])][:40],
-                    "maps": maps[:1]})
+                    "maps": maps[:1],
+                    "cameras": [{"name": n, "lat": c["lat"], "lon": c["lon"], "view": c["view"]} for n, c in site_cameras().items()]})
 
 
 GEOCODE_URL = "https://nominatim.openstreetmap.org/search"
@@ -7778,6 +7828,39 @@ def maps_embed_page():
     return Response('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                     '<base target="_top"><link rel="stylesheet" href="/hud.css"><style>body{background:#020a10}.hud-main{padding:12px}'
                     '.page-head{display:none}</style></head><body>' + pages.maps.BODY + '</body></html>', mimetype="text/html")
+
+
+@app.route("/coverage")
+def coverage_page():
+    return Response(COVERAGE_PAGE, mimetype="text/html")
+
+
+@app.route("/api/coverage")
+def api_coverage():
+    return jsonify(coverage.analyse(site_cameras(), load_response_settings().get("site_outline") or None))
+
+
+@app.route("/api/coverage/at")
+def api_coverage_at():
+    try:
+        lat, lon = float(request.args["lat"]), float(request.args["lon"])
+    except (KeyError, ValueError):
+        return jsonify({"ok": False, "error": "lat and lon needed"}), 400
+    return jsonify({"ok": True, "cameras": coverage.who_sees(site_cameras(), lat, lon)})
+
+
+@app.route("/api/coverage/send", methods=["POST"])
+def api_coverage_send():
+    data = request.get_json(silent=True) or {}
+    try:
+        lat, lon = float(data["lat"]), float(data["lon"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"ok": False, "error": "lat and lon needed"}), 400
+    r = send_drone_to_point(lat, lon, by="dashboard: send to spot")
+    return jsonify(r), (200 if r.get("ok") else 409)
+
+
+COVERAGE_PAGE = hud_page("Coverage", pages.coverage.BODY, active="settings")
 
 
 @app.route("/safety")
@@ -7946,6 +8029,8 @@ def api_assistant_briefing():
 def healthz():
     return jsonify({"ok": True, "service": "ai-security-command-center", "version": APP_VERSION})
 
+
+
 @app.route("/api/system/readiness")
 def api_system_readiness():
     """Customer-facing local readiness check for the V10 setup experience."""
@@ -8015,19 +8100,8 @@ def event_key(row):
 
 
 def delete_history_event(event_index, key=""):
-    if not os.path.exists(EVENT_LOG):
-        raise RuntimeError("Event history file does not exist.")
-
     with event_log_lock:
-        with open(EVENT_LOG, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-
-        if not fieldnames:
-            raise RuntimeError("Event history has no headers.")
-
-        newest_first = list(reversed(rows))
+        newest_first = STORE.events()
         if key:
             matches = [row for row in newest_first if event_key(row) == key]
             if not matches:
@@ -8038,22 +8112,7 @@ def delete_history_event(event_index, key=""):
                 raise RuntimeError("Event could not be found.")
             event_to_delete = newest_first[event_index]
         snapshot = event_to_delete.get("Snapshot", "") or ""
-
-        removed = False
-        new_rows = []
-        for row in rows:
-            if not removed and row == event_to_delete:
-                removed = True
-                continue
-            new_rows.append(row)
-
-        if not removed:
-            raise RuntimeError("Event could not be deleted.")
-
-        with open(EVENT_LOG, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(new_rows)
+        STORE.delete_event(event_to_delete["id"])
 
     if snapshot:
         snapshot_name = os.path.basename(snapshot.replace("\\", "/"))
@@ -8080,24 +8139,9 @@ def api_delete_event(event_index):
 
 def clear_all_history_events():
     """Remove all event-history rows and their locally saved snapshots."""
-    deleted_count = 0
-    snapshots = []
-    fieldnames = ["Date", "Time", "Type", "Name", "Identifier", "Snapshot"]
-
     with event_log_lock:
-        if os.path.exists(EVENT_LOG):
-            with open(EVENT_LOG, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                if reader.fieldnames:
-                    fieldnames = reader.fieldnames
-                rows = list(reader)
-
-            deleted_count = len(rows)
-            snapshots = [row.get("Snapshot", "") or "" for row in rows]
-
-            with open(EVENT_LOG, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
+        snapshots = STORE.clear_events()
+    deleted_count = len(snapshots)
 
     for snapshot in snapshots:
         if not snapshot:
@@ -8285,7 +8329,8 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False}
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,"cloud_incidents":False,
+                           **_patterns_mod.DEFAULTS}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
     except Exception:return dict(DEFAULT_CUSTOMER_SETTINGS)
@@ -8310,7 +8355,22 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/license"><span>⚿</span><b>Licence</b><small>This PC's licence</small></a>
 <a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
+<a href="/incidents"><span>⚑</span><b>Incidents</b><small>Each camera's events as one story</small></a>
+<a href="/coverage"><span>◔</span><b>Coverage</b><small>What cameras see, blind spots</small></a>
+<a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
 </nav>
+<section class="panel"><div class="panel-head"><div class="panel-title">🔎 Patterns</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Casing warnings</b><div class="muted">The same unknown plate coming by several times: burglars often check a place before they come back.</div></div><input class="toggle" type="checkbox" data-key="casing_alerts" onchange="save()"></div>
+<div class="hud-row"><div><b>Warn after this many visits</b></div><input id="casingVisits" type="number" min="2" max="20" style="width:120px" onchange="save()"></div>
+<div class="hud-row"><div><b>…within this many hours</b></div><input id="casingHours" type="number" min="1" max="336" style="width:120px" onchange="save()"></div>
+<div class="hud-row"><div><b>Unusual activity warnings</b><div class="muted">Far more people or vehicles at a camera than usual for that hour and weekday (learns for two weeks first).</div></div><input class="toggle" type="checkbox" data-key="unusual_alerts" onchange="save()"></div>
+</div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
+<div class="hud-row" id="cloudRow"><div><b>Phone access</b><div class="muted">Off: nothing leaves this PC. On: incidents (unknown faces and plates, drone responses) with one snapshot each go to your portal account, and the portal can ask for live pictures of a camera while you watch on your phone. Cloud edition only.</div><div class="muted" id="cloudState"></div></div><input class="toggle" type="checkbox" data-key="cloud_incidents" onchange="save()"></div>
+<div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
+<div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
+<div id="offMsg" class="hud-msg"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Camera live feed on the dashboard</b><div class="muted">Off: the main camera's live video is not shown (or streamed) on the dashboard.</div></div><input class="toggle" type="checkbox" data-key="dashboard_camera_feed" onchange="save()"></div>
 </div></section>
@@ -8337,7 +8397,15 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <button class="hud-btn" onclick="location.href='/setup/discover'">Add camera or drone</button>
 </div></section>
 </main>
-<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}load()</script>""", active="settings")
+<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
+fetch('/api/cloud/sync').then(r=>r.json()).then(c=>{if(c.onprem){cloudRow.style.display='none';return}
+  cloudState.textContent=!c.paired?'This PC is not paired with the portal yet.':c.synced===false?'Last sync failed: '+c.error:c.synced?`Synced ${new Date(c.last*1000).toLocaleTimeString()} · ${c.incidents_sent} incident updates sent`+(c.watching?` · ${c.watching} watching live`:''):''});
+async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to shut down';setTimeout(()=>{delete b.dataset.arm;b.textContent='Shut down system'},4000);return}
+  b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Shutting down…';
+  const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));
+  if(d.ok){document.body.innerHTML='<main class="hud-main narrow"><h1 class="page-title">System stopped</h1><p class="muted">Cameras and drones are no longer guarded. Start the program again from the desktop icon. You can close this window.</p></main>'}
+  else{b.disabled=false;offMsg.className='hud-msg bad';offMsg.textContent=d.error||'Could not shut down.'}}
+load()</script>""", active="settings")
 @app.route("/settings")
 def customer_settings_page():return Response(SETTINGS_PAGE,mimetype="text/html")
 @app.route("/api/customer/settings",methods=["GET","POST"])
@@ -8420,187 +8488,21 @@ def map_cache_stats():
     return {"tiles": _tile_stats["tiles"], "mb": _tile_stats["mb"]}
 
 # ============================================================
-# SIGN-IN AND ROLES (off until the first admin is created on the Users page)
+# SIGN-IN, USERS, AUDIT LOG, INCIDENTS, SHUTDOWN (web_access.py, web_records.py)
 # ============================================================
-USERS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "users.json")
-app.secret_key = user_accounts.secret_key(os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "session.key"))
+app.secret_key = user_accounts.secret_key(os.path.join(DATA_FOLDER, "session.key"))
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", PERMANENT_SESSION_LIFETIME=12 * 3600)
-_login_fails = {}
+web_access.setup(app, DATA_FOLDER, hud_page)
+web_records.setup(app, STORE, INCIDENTS, hud_page, _load_customer_settings,
+                  data_folder=DATA_FOLDER, event_folder=EVENT_FOLDER, version=APP_VERSION)
+USERS_FILE = web_access.USERS_FILE
+current_user = web_access.current_user
+html_escape = web_access.html_escape
+audit_record = web_records.audit_record
+_audit_actor = web_records._audit_actor
+_browser_pages = web_records._browser_pages
+_login_fails = web_access._login_fails
 
-
-def current_user():
-    """The signed-in user, or None (also None while sign-in is off)."""
-    users = user_accounts.load(USERS_FILE)
-    u = user_accounts.find(users, session.get("user")) if users else None
-    return u if u and session.get("stamp") == u.get("stamp") else None
-
-
-@app.before_request
-def _require_sign_in():
-    g.user = None
-    if not user_accounts.load(USERS_FILE):
-        return None  # sign-in not set up yet: open as before
-    path = request.path
-    if path in user_accounts.OPEN_PATHS or any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")):
-        return None
-    g.user = current_user()
-    if not g.user:
-        if path.startswith("/api/"):
-            return jsonify({"ok": False, "error": "Sign in first."}), 401
-        return redirect("/login?next=" + urllib.parse.quote(request.full_path.rstrip("?")))
-    if not user_accounts.allowed(g.user["role"], request.method, path):
-        msg = f"Your role ({g.user['role']}) can't do that. Ask an admin."
-        return (jsonify({"ok": False, "error": msg}), 403) if path.startswith("/api/") or request.method != "GET" else \
-            Response(hud_page("Not allowed", f'<main class="hud-main"><h1 class="page-title">Not allowed</h1><p class="muted">{msg}</p>'
-                                              '<a class="hud-btn" href="/">Back to the dashboard</a></main>'), status=403, mimetype="text/html")
-    return None
-
-
-@app.after_request
-def _user_badge(resp):
-    """Who is signed in, with Sign out, on every page."""
-    u = getattr(g, "user", None)
-    if u and resp.mimetype == "text/html" and not resp.direct_passthrough:
-        try:
-            html = resp.get_data(as_text=True)
-            i = html.rfind("</body>")
-            if i != -1:
-                badge = ('<div id="userBadge" style="position:fixed;left:10px;bottom:10px;z-index:9999;background:rgba(3,16,26,.92);'
-                         'border:1px solid #155879;border-radius:4px;padding:5px 9px;font:12px Arial;color:#9edfff">👤 '
-                         f'{html_escape(u["username"])} · {u["role"]} · <a href="/logout" style="color:#5bd9ff">Sign out</a></div>')
-                resp.set_data(html[:i] + badge + html[i:])
-        except Exception:
-            pass
-    return resp
-
-
-def html_escape(v):
-    return str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
-
-
-LOGIN_PAGE = r"""
-<main class="hud-main" style="max-width:420px;margin:60px auto">
-<div class="page-head"><div><div class="page-kicker">AI Security</div><h1 class="page-title">Sign in</h1></div></div>
-<section class="panel"><div class="panel-body">
-<form method="post">
-<input type="hidden" name="next" value="__NEXT__">
-<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required>
-<label for="pw" style="margin-top:10px">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required>
-<div class="actions" style="margin-top:14px"><button class="hud-btn primary" type="submit">Sign in</button></div>
-<div class="hud-msg bad" style="__ERRSTYLE__">__ERR__</div>
-</form></div></section></main>"""
-
-
-@app.route("/login", methods=["GET", "POST"])
-def login_page():
-    nxt = request.values.get("next") or "/"
-    if not nxt.startswith("/") or nxt.startswith("//"):
-        nxt = "/"
-    if not user_accounts.load(USERS_FILE):
-        return redirect("/users")
-    err = ""
-    if request.method == "POST":
-        ip = request.remote_addr or ""
-        fails = [t for t in _login_fails.get(ip, []) if time.time() - t < 300]
-        if len(fails) >= 5:
-            err = "Too many wrong tries. Wait 5 minutes."
-        else:
-            u = user_accounts.authenticate(USERS_FILE, request.form.get("username"), request.form.get("password"))
-            if u:
-                session.clear()
-                session.permanent = True
-                session.update(user=u["username"], stamp=u.get("stamp"))
-                _login_fails.pop(ip, None)
-                return redirect(nxt)
-            time.sleep(1)
-            _login_fails[ip] = fails + [time.time()]
-            err = "Wrong user name or password."
-    body = (LOGIN_PAGE.replace("__NEXT__", html_escape(nxt)).replace("__ERR__", html_escape(err))
-            .replace("__ERRSTYLE__", "" if err else "display:none"))
-    return Response(hud_page("Sign in", body, nav=False), mimetype="text/html")
-
-
-@app.route("/logout")
-def logout_page():
-    session.clear()
-    return redirect("/login" if user_accounts.load(USERS_FILE) else "/")
-
-
-USERS_PAGE = r"""
-<main class="hud-main">
-<div class="page-head"><div><div class="page-kicker">Access</div><h1 class="page-title">Users &amp; roles</h1>
-<div class="page-sub">Who can use this dashboard. <b>Viewer</b>: watches live video, events and maps. <b>Operator</b>: also flies drones, routes and drone responses. <b>Admin</b>: everything, including setup, licences, no-fly zones and users.</div></div></div>
-<section class="panel"><div class="panel-body">
-<div id="firstNote" class="hud-msg" style="display:none">Sign-in is <b>off</b>: anyone at this PC can use everything. Create the first user below (an admin) to turn it on; you will be signed in as that user.</div>
-<div id="userList"></div>
-<div style="margin-top:14px;border-top:1px solid #123447;padding-top:12px"><b style="color:#5bd9ff;font-size:11px;letter-spacing:1.5px">ADD A USER</b>
-<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 10px">
-<div><label for="nu">User name</label><input id="nu" autocomplete="off"></div>
-<div><label for="np">Password (8+ characters)</label><input id="np" type="password" autocomplete="new-password"></div>
-<div><label for="nr">Role</label><select id="nr"><option value="viewer">Viewer: watch only</option><option value="operator">Operator: watch and fly</option><option value="admin">Admin: everything</option></select></div></div>
-<div class="actions" style="margin-top:10px"><button class="hud-btn primary" onclick="addUser()">Add user</button></div>
-<div id="umsg" class="hud-msg"></div></div>
-</div></section></main>
-<script>
-const $=id=>document.getElementById(id);
-const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
-const ROLES={viewer:'Viewer: watch only',operator:'Operator: watch and fly',admin:'Admin: everything'};
-let me='',arm='';
-function umsg(t,ok){const e=$('umsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
-async function call(url,method,body){const r=await fetch(url,{method,headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});return r.json()}
-async function load(){const d=await call('/api/users','GET');if(!d.ok){umsg(d.error,false);return}me=d.me||'';
-  $('firstNote').style.display=d.users.length?'none':'';if(!d.users.length){$('nr').value='admin'}
-  $('userList').innerHTML=d.users.map(u=>`<div class="hud-row"><div><b>${esc(u.username)}</b>${u.username===me?' <span class="muted">(you)</span>':''}<div class="muted">${ROLES[u.role]}</div></div>
-    <div class="actions"><select onchange="setRole('${esc(u.username)}',this.value)">${Object.keys(ROLES).map(r=>`<option value="${r}" ${r===u.role?'selected':''}>${r}</option>`).join('')}</select>
-    <button class="hud-btn" onclick="resetPw('${esc(u.username)}')">New password</button>
-    <button class="hud-btn danger" onclick="delUser('${esc(u.username)}',this)">${arm===u.username?'Click again to delete':'Delete'}</button></div></div>`).join('')||'<p class="muted">No users yet.</p>'}
-async function addUser(){const first=!$('userList').querySelector('.hud-row');
-  const d=await call('/api/users','POST',{username:$('nu').value,password:$('np').value,role:$('nr').value});
-  if(!d.ok){umsg(d.error,false);return}$('nu').value=$('np').value='';umsg('User '+d.username+' added.'+(first?' Sign-in is now on.':''),true);if(first)location.reload();else load()}
-async function setRole(n,r){const d=await call('/api/users/'+encodeURIComponent(n),'POST',{role:r});umsg(d.ok?n+' is now '+r+'.':d.error,d.ok);load()}
-async function resetPw(n){const pw=prompt('New password for '+n+' (8+ characters):');if(!pw)return;const d=await call('/api/users/'+encodeURIComponent(n),'POST',{password:pw});
-  umsg(d.ok?'Password changed. '+n+' is signed out on other devices.':d.error,d.ok);if(d.ok&&n===me)location.href='/login'}
-async function delUser(n){if(arm!==n){arm=n;load();setTimeout(()=>{if(arm===n){arm='';load()}},4000);return}arm='';
-  const d=await call('/api/users/'+encodeURIComponent(n),'DELETE');umsg(d.ok?n+' deleted.':d.error,d.ok);if(d.ok&&n===me)location.href='/login';else load()}
-load();
-</script>"""
-
-
-@app.route("/users")
-def users_page():
-    return Response(hud_page("Users", USERS_PAGE, active="users"), mimetype="text/html")
-
-
-@app.route("/api/users", methods=["GET", "POST"])
-def api_users():
-    all_users = user_accounts.load(USERS_FILE)
-    if request.method == "POST":
-        data = request.get_json(silent=True) or {}
-        try:
-            name = user_accounts.add(USERS_FILE, data.get("username"), data.get("password"), data.get("role"))
-        except ValueError as e:
-            return jsonify({"ok": False, "error": str(e)}), 400
-        if not all_users:  # the first admin is signed in straight away
-            u = user_accounts.find(user_accounts.load(USERS_FILE), name)
-            session.clear()
-            session.permanent = True
-            session.update(user=u["username"], stamp=u.get("stamp"))
-        return jsonify({"ok": True, "username": name})
-    me = current_user()
-    return jsonify({"ok": True, "users": [user_accounts.public(u) for u in all_users], "me": me["username"] if me else ""})
-
-
-@app.route("/api/users/<name>", methods=["POST", "DELETE"])
-def api_user(name):
-    try:
-        if request.method == "DELETE":
-            user_accounts.delete(USERS_FILE, name)
-        else:
-            data = request.get_json(silent=True) or {}
-            user_accounts.update(USERS_FILE, name, role=data.get("role"), password=data.get("password"))
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    return jsonify({"ok": True})
 
 # ============================================================
 # WEB ROUTES
@@ -9215,6 +9117,38 @@ def _start_v105_recovery():
     return t
 # ---------------- END V10.5 LOCAL CAMERA AUTO-RECOVERY ----------------
 
+# ---------------- Phone access through the cloud (cloud_sync.py) ----------------
+import cloud_sync as _cloud_sync_mod
+EDGE_SYNC_URL = CLOUD_CONTROL_URL.rsplit("/", 1)[0] + "/edge-sync"
+
+
+def _cloud_sync_enabled():
+    return (edition.EDITION != "onprem" and not onprem_mode() and bool(_load_customer_settings().get("cloud_incidents")))
+
+
+def _event_file(snapshot):
+    path = os.path.join(EVENT_FOLDER, os.path.basename(str(snapshot or "").replace("\\", "/")))
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+CLOUD_SYNC = _cloud_sync_mod.CloudSync(
+    EDGE_SYNC_URL, lambda: str(load_edge_agent_config().get("device_token") or "").strip(), _cloud_sync_enabled, INCIDENTS,
+    _event_file, lambda cam: _camera_snapshot(cam), lambda: [n for n in _frigate_camera_names() if not _is_drone_name(n)])
+
+
+@app.route("/api/cloud/sync")
+def api_cloud_sync():
+    st = dict(CLOUD_SYNC.state)
+    return jsonify({**st, "ok": True, "synced": st.pop("ok", None), "enabled": _cloud_sync_enabled(),
+                    "onprem": edition.EDITION == "onprem" or onprem_mode(),
+                    "paired": bool(str(load_edge_agent_config().get("device_token") or "").strip()),
+                    "watching": len(CLOUD_SYNC.live)})
+
+
 def main():
     """Start the dashboard web server. Called by `python dashboard.py` and by the packaged
     launcher (which imports this module, also when it is compiled to native code)."""
@@ -9223,6 +9157,7 @@ def main():
     start_virtual_drones()
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     start_assistant()
+    CLOUD_SYNC.start()
     print()
     print(
         "======================================"
