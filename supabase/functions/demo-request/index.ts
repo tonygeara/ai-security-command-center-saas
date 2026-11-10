@@ -21,7 +21,7 @@ const esc = (s: string) => s.replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;
 
 function cors(req: Request) {
   const o = req.headers.get("origin") || "";
-  return {"Access-Control-Allow-Origin": origins.has(o) || o.endsWith("-tonygearas-projects.vercel.app") ? o : "https://www.aisecuritycommandcenter.com",
+  return {"Access-Control-Allow-Origin": origins.has(o) || /^https:\/\/ai-security-command-center-saas-[a-z0-9-]+-tony-geara-8688\.vercel\.app$/.test(o) ? o : "https://www.aisecuritycommandcenter.com",
     "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "content-type, authorization, apikey, x-client-info",
     "Vary": "Origin"};
 }
