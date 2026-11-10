@@ -33,6 +33,13 @@ BODY = r"""
 <div class="hud-row" style="margin-top:10px"><div><b>Camera-to-drone handoff</b><div class="muted">When someone leaves a camera's view, the nearest drone flies to where they went. Same hours and cooldown as auto-send on the Drone page.</div></div><input class="toggle" type="checkbox" id="handoff" onchange="setHandoff(this)"></div>
 <div id="sugBox" class="hud-msg" style="margin-top:10px"></div>
 <div id="cvMsg" class="hud-msg"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">🗺 Smart patrol</div><div class="live" id="spState">OFF</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Smart patrol</b><div class="muted">The system writes its own patrol route over the blind spots and the places incidents happen, flies it every day at the riskiest hour, and rebuilds it every week.</div></div><input class="toggle" type="checkbox" id="smart_patrol" onchange="spSave()"></div>
+<div class="hud-row"><div><b>Stops</b></div><input id="smart_patrol_stops" type="number" min="2" max="25" style="width:90px" onchange="spSave()"></div>
+<div class="hud-row"><div><b>Height (m)</b></div><input id="smart_patrol_alt" type="number" min="10" max="120" style="width:90px" onchange="spSave()"></div>
+<div class="hud-row"><div><b>Start without asking</b><div class="muted">Off (recommended): Telegram asks Start / Skip at patrol time.</div></div><input class="toggle" type="checkbox" id="smart_patrol_auto_start" onchange="spSave()"></div>
+<div class="actions" style="margin-top:8px"><button class="hud-btn" onclick="spRebuild()">Rebuild now</button></div>
+<div id="spInfo" class="hud-msg"></div></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">▣ Cameras</div></div><div class="panel-body">
 <div class="muted" style="margin-bottom:6px">Set where each camera is on the Drone page. Here, set where it looks: <b>Point</b> then click the map in the direction it faces, or type the numbers.</div>
 <div id="camList"></div></div></section>
@@ -43,12 +50,12 @@ const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const post=(url,body)=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}).then(async r=>{try{return await r.json()}catch(e){return {ok:false,error:'HTTP '+r.status}}});
 function msg(id,t,ok){const e=$(id);e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
-let map,heat,cones,marks,outlineLayer,sugLayer,data=null,settings=null,mode='',draft=[],fitted=false;
+let map,heat,cones,marks,outlineLayer,sugLayer,spLayer,data=null,settings=null,mode='',draft=[],fitted=false;
 function initMap(){map=L.map('cvMap',{maxZoom:22}).setView([20,0],2);
   const sat=L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:22,maxNativeZoom:19,attribution:'Imagery © Esri'}).addTo(map);
   const osm=L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:22,maxNativeZoom:19,attribution:'© OpenStreetMap'});
   L.control.layers({'Satellite':sat,'Street map':osm}).addTo(map);if(window.addMapSearch&&addMapSearch(map))fitted=true;
-  heat=L.layerGroup().addTo(map);cones=L.layerGroup().addTo(map);outlineLayer=L.layerGroup().addTo(map);sugLayer=L.layerGroup().addTo(map);marks=L.layerGroup().addTo(map);
+  heat=L.layerGroup().addTo(map);cones=L.layerGroup().addTo(map);outlineLayer=L.layerGroup().addTo(map);sugLayer=L.layerGroup().addTo(map);spLayer=L.layerGroup().addTo(map);marks=L.layerGroup().addTo(map);
   map.on('click',onClick)}
 async function load(){
   const r=await fetch('/api/response/settings').then(r=>r.json());settings=r.settings;
@@ -99,5 +106,18 @@ async function onClick(e){const {lat,lng}=e.latlng;
   const who=d.cameras.length?'Seen by '+d.cameras.map(c=>`<b>${esc(c.camera)}</b> (${Math.round(c.distance_m)} m)`).join(', '):'<b style="color:#ff8f8f">Blind spot</b>: no camera sees here';
   L.popup().setLatLng(e.latlng).setContent(`${who}<br><button class="hud-btn" style="margin-top:6px" onclick="sendHere(${lat},${lng})">Send a drone here</button><div id="sendMsg" class="muted"></div>`).openOn(map)}
 async function sendHere(lat,lon){const d=await post('/api/coverage/send',{lat,lon});const m=$('sendMsg');if(m)m.textContent=d.ok?d.message:d.error}
-initMap();load();
+function spShow(d){const c=d.settings,i=d.info||{};$('spState').textContent=c.smart_patrol?'ON':'OFF';
+  for(const k of ['smart_patrol','smart_patrol_auto_start'])$(k).checked=!!c[k];for(const k of ['smart_patrol_stops','smart_patrol_alt'])$(k).value=c[k];
+  spLayer.clearLayers();const r=i.route||[];
+  if(c.smart_patrol&&r.length){L.polyline(r.map(p=>[p.lat,p.lon]),{color:'#26ee89',weight:3,dashArray:'8 6'}).addTo(spLayer);
+    r.forEach((p,k)=>L.marker([p.lat,p.lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],html:`<div style="width:22px;height:22px;border-radius:50%;background:#26ee89;color:#04131c;font:bold 12px/22px Arial;text-align:center">${k+1}</div>`})}).bindTooltip(esc(p.why)).addTo(spLayer));
+    msg('spInfo',`${i.stops} stops (${i.blind_stops} blind spots, ${i.hot_stops} incident spots), every day at ${i.time}. Built ${new Date(i.built*1000).toLocaleString()} from ${i.incidents_used} incident(s).`,true)}
+  else msg('spInfo',c.smart_patrol&&i.error?i.error:'',c.smart_patrol&&i.error?false:null)}
+async function spLoad(){spShow(await fetch('/api/smart-patrol').then(r=>r.json()))}
+async function spSave(){const body={smart_patrol:$('smart_patrol').checked,smart_patrol_auto_start:$('smart_patrol_auto_start').checked,
+  smart_patrol_stops:Number($('smart_patrol_stops').value||6),smart_patrol_alt:Number($('smart_patrol_alt').value||30)};
+  if(body.smart_patrol_auto_start&&!confirm('Start the Smart patrol without asking flies the drone with no confirmation at patrol time. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?')){$('smart_patrol_auto_start').checked=false;body.smart_patrol_auto_start=false}
+  msg('spInfo','Planning…');const d=await post('/api/smart-patrol',body);if(!d.ok){msg('spInfo',d.error,false);return spLoad()}spShow(d)}
+async function spRebuild(){msg('spInfo','Planning…');const d=await post('/api/smart-patrol/rebuild');if(!d.ok){msg('spInfo',d.error,false);return}spLoad()}
+initMap();load();spLoad();
 </script>"""

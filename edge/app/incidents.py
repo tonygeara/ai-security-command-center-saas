@@ -57,7 +57,7 @@ class Incidents:
                                                              "identifier": m.get("identifier")})
         elif kind == "dispatch":
             self.add(camera, t, kind, f"{m.get('drone_label') or m.get('drone')} sent ({m.get('by')})", 3,
-                     {"drone": m.get("drone"), "by": m.get("by")})
+                     {"drone": m.get("drone"), "by": m.get("by"), "lat": m.get("lat"), "lon": m.get("lon")})
         elif kind == "alert":
             if m.get("pattern"):  # casing / unusual activity warnings (patterns.py)
                 self.add(camera, t, "pattern", m.get("text") or "", 2, {"alert": m.get("alert")})

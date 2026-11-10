@@ -97,6 +97,9 @@ EVENT_LOG = os.path.join(BASE_FOLDER, "event_history.csv")  # before V11.5; impo
 DATA_FOLDER = os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER)
 # Events, sightings, audit log and incidents: one SQLite database (store.py).
 import store as _store_mod
+import evidence as evidence_mod
+import alarm_verify as _alarm_verify_mod
+import risk_patrol as _risk_patrol_mod
 import coverage
 import audit  # needed early: the retention worker (started below) prunes the audit log
 STORE = _store_mod.Store(os.path.join(DATA_FOLDER, "ai_security.db"))
@@ -160,7 +163,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.7.0"
+APP_VERSION = "V11.8.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2326,7 +2329,7 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage  # noqa: E401
+import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -5492,7 +5495,11 @@ RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "h
                      # Digital twin (coverage.py): where each camera looks, and the site's outline.
                      "camera_views": {}, "site_outline": [],
                      # Camera-to-drone handoff: off until the owner turns it on (Drone page / Coverage).
-                     "handoff": False}
+                     "handoff": False,
+                     # Drone-verified alarms to a monitoring centre (alarm_verify.py): off until turned on.
+                     **_alarm_verify_mod.DEFAULTS,
+                     # Smart patrols (risk_patrol.py): off until turned on.
+                     **_risk_patrol_mod.DEFAULTS}
 sightings_lock = threading.Lock()
 _sighting_last = {}
 
@@ -5545,6 +5552,12 @@ def load_response_settings():
 
 def save_response_settings(data):
     cfg = load_response_settings()
+    data = dict(data)
+    if data.get("webhook_secret") == _alarm_verify_mod.SECRET_MASK:
+        data.pop("webhook_secret")  # shown masked on the page: keep the saved one
+    if any(k in data for k in _alarm_verify_mod.DEFAULTS):
+        merged = {k: data.get(k, cfg.get(k)) for k in _alarm_verify_mod.DEFAULTS}
+        data.update(_alarm_verify_mod.clean(merged))
     for k, v in data.items():
         if k not in RESPONSE_DEFAULTS:
             continue
@@ -5561,7 +5574,11 @@ def save_response_settings(data):
             v = [[float(p[0]), float(p[1])] for p in (v or [])[:200]
                  if isinstance(p, (list, tuple)) and len(p) == 2 and -90 <= float(p[0]) <= 90 and -180 <= float(p[1]) <= 180]
             v = v if len(v) >= 3 else []
-        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle", "handoff"):
+        elif k in ("smart_patrol_stops", "smart_patrol_alt"):
+            lo, hi = (2, ROUTE_MAX_POINTS) if k == "smart_patrol_stops" else (10, DRONE_LIMITS["max_altitude_m"])
+            v = int(max(lo, min(hi, float(v))))
+        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle", "handoff",
+                   "smart_patrol", "smart_patrol_auto_start"):
             v = bool(v)
         elif k in ("auto_from", "auto_to"):
             v = str(v) if re.match(r"^([01]\d|2[0-3]):[0-5]\d$", str(v)) else RESPONSE_DEFAULTS[k]
@@ -5699,7 +5716,7 @@ def dispatch_drone(camera, by="dashboard", drone=None, target=None):
         threading.Thread(target=round_zones, daemon=True).start()
         _drone_event(f"Flying round the no-fly zones to {camera} ({len(via)} turn{'s' if len(via) > 1 else ''})", slot)
     _drone_event(f"Drone response to {camera} started ({by})", slot)
-    PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by)
+    PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by, lat=loc["lat"], lon=loc["lon"])
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
 
 
@@ -5761,6 +5778,82 @@ HANDOFF = _handoff_mod.Handoff(lambda: load_response_settings(), lambda: site_ca
                                lambda lat, lon, by: send_drone_to_point(lat, lon, by=by), PIPELINE.publish,
                                lambda a, b: _in_window(a, b), lambda: drone_control_allowed())
 HANDOFF.attach(PIPELINE)
+
+
+# ---------------- Drone-verified alarms (alarm_verify.py) ----------------
+def _alarm_arrived(slot):
+    r = drone_response
+    return r.get("arrived") or 0 if r.get("active") and r.get("drone") == slot and r.get("phase") == "hovering" else 0
+
+
+def _alarm_ask(vid, text, photo):
+    send_telegram(text, photo, [[{"text": "✅ Real intrusion: send alarm", "callback_data": f"alarm:yes:{vid}"}],
+                                [{"text": "❎ False alarm", "callback_data": f"alarm:no:{vid}"}]])
+
+
+def _alarm_evidence(inc_id):
+    inc = INCIDENTS.get(inc_id)
+    if not inc:
+        return None
+    data, manifest, _ = evidence_mod.build(inc, INCIDENTS.track(inc_id), EVENT_FOLDER, web_records.evidence_key(),
+                                           made_by="automatic (verified alarm)", product=edition.PRODUCT_NAME, version=APP_VERSION)
+    return data, manifest
+
+
+def _alarm_zone(camera):
+    names = sorted(load_response_settings()["camera_locations"])
+    return names.index(camera) + 1 if camera in names else 1
+
+
+ALARMS = _alarm_verify_mod.Verifier(
+    settings=lambda: {k: load_response_settings().get(k, v) for k, v in _alarm_verify_mod.DEFAULTS.items()},
+    arrived=_alarm_arrived,
+    drone_active=lambda slot: bool(drone_response.get("active") and drone_response.get("drone") == slot),
+    snapshots=lambda camera, slot: (_camera_snapshot(camera), _drone_snapshot(slot)),
+    publish=PIPELINE.publish,
+    incident_note=lambda camera, text, sev, data: INCIDENTS.add(camera, time.time(), "alarm", text, sev, data),
+    audit=lambda action, target, detail, result: audit_record(action, target=target, detail=detail, result=result),
+    ask_operator=_alarm_ask, evidence=_alarm_evidence, camera_zone=_alarm_zone,
+    run_worker=os.environ.get("AI_SECURITY_NO_ALARM_WORKER") != "1")
+ALARMS.attach(PIPELINE)
+
+
+@app.route("/alarms")
+def alarms_page():
+    return Response(ALARMS_PAGE, mimetype="text/html")
+
+
+@app.route("/api/alarms")
+def api_alarms():
+    return jsonify({"ok": True, "verifications": ALARMS.status(),
+                    "settings": {k: v for k, v in _masked(load_response_settings()).items() if k in _alarm_verify_mod.DEFAULTS}})
+
+
+@app.route("/api/alarms/settings", methods=["POST"])
+def api_alarms_settings():
+    data = {k: v for k, v in (request.get_json(silent=True) or {}).items() if k in _alarm_verify_mod.DEFAULTS}
+    try:
+        cfg = save_response_settings(data)
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    return jsonify({"ok": True, "settings": {k: v for k, v in _masked(cfg).items() if k in _alarm_verify_mod.DEFAULTS}})
+
+
+@app.route("/api/alarms/test", methods=["POST"])
+def api_alarms_test():
+    out = ALARMS.test()
+    if not out:
+        return jsonify({"ok": False, "error": "Set a webhook address or an alarm receiver first."}), 400
+    return jsonify({"ok": all(v == "ok" for v in out.values()), "results": out})
+
+
+@app.route("/api/alarms/<vid>", methods=["POST"])
+def api_alarm_decide(vid):
+    u = getattr(g, "user", None)
+    who = u["username"] if u else "dashboard"
+    decision = (request.get_json(silent=True) or {}).get("decision")
+    r = ALARMS.verify(vid, f"operator {who}", operator=who) if decision == "verify" else ALARMS.false_alarm(vid, who)
+    return jsonify(r), (200 if r.get("ok") else 409)
 
 
 def auto_dispatch_check(camera, label, object_id="", stationary=False):
@@ -6196,6 +6289,10 @@ def _handle_callback(data):
     elif data.startswith("route:"):
         r = fly_route(data.split(":", 1)[1], by="Telegram")
         send_telegram(("🗺️ " + r["message"]) if r["ok"] else f"⚠️ {r['error']}")
+    elif data.startswith("alarm:"):
+        _, decision, vid = (data.split(":") + ["", ""])[:3]
+        r = ALARMS.verify(vid, "operator on Telegram", operator="Telegram") if decision == "yes" else ALARMS.false_alarm(vid, "Telegram")
+        send_telegram(r.get("error") or ("✅ Confirmed: sending the verified alarm." if decision == "yes" else "❎ Marked as a false alarm. Nothing was sent."))
     elif data == "dsnap":
         photo = _drone_snapshot()
         send_telegram("📷 Drone view" if photo else "No drone picture right now.", photo)
@@ -6276,6 +6373,7 @@ def start_assistant():
     threading.Thread(target=_briefing_worker, daemon=True).start()
     threading.Thread(target=_drone_response_worker, daemon=True).start()
     threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
+    threading.Thread(target=_smart_patrol_worker, daemon=True).start()
     threading.Thread(target=_nofly_watch_worker, daemon=True).start()
     start_mapping()
     threading.Thread(target=_traffic_worker, daemon=True).start()
@@ -6499,6 +6597,7 @@ def note_drone_detection(slot, label, object_id=""):
         return
     drone_detections.append((time.time(), slot, kind, object_id))
     del drone_detections[:-2000]
+    PIPELINE.publish("drone_detection", drone=slot, label=kind, object_id=object_id)
     run = run_of(slot)
     if run is not None and len(run.get("photos", [])) < 8:
         _patrol_photo(run, slot, f"{kind} seen")
@@ -7830,6 +7929,48 @@ def maps_embed_page():
                     '.page-head{display:none}</style></head><body>' + pages.maps.BODY + '</body></html>', mimetype="text/html")
 
 
+# ---------------- 4D incident replay ----------------
+@app.route("/incidents/<int:inc_id>/replay")
+def incident_replay_page(inc_id):
+    return Response(REPLAY_PAGE, mimetype="text/html")
+
+
+@app.route("/api/incidents/<int:inc_id>/replay")
+def api_incident_replay(inc_id):
+    """Everything the replay needs: timeline, pictures, the drone's track, cameras and their views, the site."""
+    INCIDENTS.close_stale()
+    inc = INCIDENTS.get(inc_id)
+    if not inc:
+        return jsonify({"ok": False, "error": "No such incident."}), 404
+    cams = site_cameras()
+    track = INCIDENTS.track(inc_id)
+    centre = None
+    if inc["camera"] in cams:
+        centre = (cams[inc["camera"]]["lat"], cams[inc["camera"]]["lon"])
+    elif track:
+        centre = (track[0]["lat"], track[0]["lon"])
+    else:
+        centre = _site_location()[0]
+    if not centre:
+        return jsonify({"ok": False, "error": "This incident's camera has no place on the map, so it can't be shown in 3D. "
+                                              "Place the camera on the Drone page."}), 409
+    maps = []
+    for m in mapping.list_all(MAPS_DIR):
+        r = m.get("result") or {}
+        o = r.get("origin")
+        if m.get("status") == "ready" and r.get("model") and o and _distance_m(centre[0], centre[1], o["lat"], o["lon"]) < 3000:
+            maps.append({"id": m["id"], "name": m["name"], "model": r["model"], "origin": o})
+    events = [{"t": e["t"], "type": e["type"], "identifier": e.get("identifier") or "",
+               "image": "/events/" + os.path.basename(str(e["snapshot"]).replace("\\", "/")) if e.get("snapshot") else ""}
+              for e in inc.get("events", [])]
+    return jsonify({"ok": True, "centre": {"lat": centre[0], "lon": centre[1]},
+                    "incident": {k: inc[k] for k in ("id", "title", "camera", "started", "updated", "level", "severity", "status")},
+                    "items": inc["items"], "events": events, "track": track,
+                    "cameras": [{"name": n, "lat": c["lat"], "lon": c["lon"], "view": c["view"]} for n, c in cams.items()],
+                    "zones": [{"name": z["name"], "source": z.get("source", ""), "points": z["points"]} for z in nofly_zones()],
+                    "maps": maps[:1]})
+
+
 @app.route("/coverage")
 def coverage_page():
     return Response(COVERAGE_PAGE, mimetype="text/html")
@@ -7861,6 +8002,8 @@ def api_coverage_send():
 
 
 COVERAGE_PAGE = hud_page("Coverage", pages.coverage.BODY, active="settings")
+ALARMS_PAGE = hud_page("Monitoring centre", pages.alarms.BODY, active="settings")
+REPLAY_PAGE = hud_page("Incident replay", pages.replay.BODY, active="settings", head=pages.live4d.IMPORTMAP)
 
 
 @app.route("/safety")
@@ -7971,6 +8114,90 @@ def _patrol_scheduler_worker():
             print("Patrol scheduler error:", e)
 
 
+# ---------------- Smart patrols (risk_patrol.py) ----------------
+def build_smart_patrol(by="dashboard"):
+    """(Re)write the Smart patrol route and its daily schedule from blind spots and incident history."""
+    cfg = load_response_settings()
+    home = _site_location()[0]
+    analysis = coverage.analyse(site_cameras(), cfg.get("site_outline") or None)
+    incidents = INCIDENTS.list(time.time() - _risk_patrol_mod.HISTORY_DAYS * 86400, limit=5000, min_severity=1)
+    stops, summary = _risk_patrol_mod.plan(analysis, site_cameras(), incidents, home, DRONE_LIMITS["max_distance_m"],
+                                           stops=int(cfg["smart_patrol_stops"]),
+                                           zone_at=lambda lat, lon: nofly.zone_at(nofly_zones(), lat, lon))
+    if summary.get("error"):
+        STORE.meta("smart_patrol", json.dumps({**summary, "route": []}))
+        return {"ok": False, "error": summary["error"]}
+    try:
+        save_route(_risk_patrol_mod.ROUTE_NAME, {"points": [{"lat": a, "lon": b} for a, b, _ in stops], "alt": cfg["smart_patrol_alt"],
+                                                 "speed": 5, "pause": 8, "end": "home"})
+    except ValueError as e:  # a leg crosses a no-fly zone
+        STORE.meta("smart_patrol", json.dumps({**summary, "error": str(e), "route": []}))
+        return {"ok": False, "error": f"Could not make a safe route: {e}"}
+    days = list(range(7))
+    sched = [x for x in cfg["patrol_schedules"] if x["id"] != _risk_patrol_mod.SCHEDULE_ID]
+    sched.append({"id": _risk_patrol_mod.SCHEDULE_ID, "route": _risk_patrol_mod.ROUTE_NAME, "time": summary["time"], "days": days,
+                  "enabled": True, "auto_start": bool(cfg["smart_patrol_auto_start"]), "drone": ""})
+    save_response_settings({"patrol_schedules": sched})
+    summary["route"] = [{"lat": a, "lon": b, "why": w} for a, b, w in stops]
+    STORE.meta("smart_patrol", json.dumps(summary))
+    audit_record("smart patrol built", target=_risk_patrol_mod.ROUTE_NAME, detail={k: summary[k] for k in ("stops", "time")},
+                 source=None if has_request_context() else "system")
+    return {"ok": True, **summary}
+
+
+def remove_smart_patrol():
+    cfg = load_response_settings()
+    save_response_settings({"patrol_schedules": [x for x in cfg["patrol_schedules"] if x["id"] != _risk_patrol_mod.SCHEDULE_ID]})
+    delete_route(_risk_patrol_mod.ROUTE_NAME)
+
+
+def smart_patrol_info():
+    try:
+        return json.loads(STORE.meta("smart_patrol") or "{}")
+    except ValueError:
+        return {}
+
+
+def _smart_patrol_worker():
+    """Rebuild the Smart patrol once a week while it is on."""
+    while True:
+        time.sleep(3600)
+        try:
+            if load_response_settings().get("smart_patrol") and time.time() - smart_patrol_info().get("built", 0) > 7 * 86400:
+                r = build_smart_patrol(by="weekly")
+                send_telegram(f"🗺️ Smart patrol updated for this week: {r['stops']} stops ({r['blind_stops']} blind spots, "
+                              f"{r['hot_stops']} incident spots), daily at {r['time']}." if r["ok"] else f"⚠️ Smart patrol not updated: {r['error']}")
+        except Exception as e:
+            print("Smart patrol error:", e)
+
+
+@app.route("/api/smart-patrol", methods=["GET", "POST"])
+def api_smart_patrol():
+    if request.method == "POST":
+        data = {k: v for k, v in (request.get_json(silent=True) or {}).items() if k in _risk_patrol_mod.DEFAULTS}
+        try:
+            cfg = save_response_settings(data)
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        if cfg["smart_patrol"]:
+            r = build_smart_patrol()
+            if not r["ok"]:
+                return jsonify(r), 409
+        else:
+            remove_smart_patrol()
+    cfg = load_response_settings()
+    return jsonify({"ok": True, "settings": {k: cfg[k] for k in _risk_patrol_mod.DEFAULTS},
+                    "info": smart_patrol_info() if cfg["smart_patrol"] else {}})
+
+
+@app.route("/api/smart-patrol/rebuild", methods=["POST"])
+def api_smart_patrol_rebuild():
+    if not load_response_settings()["smart_patrol"]:
+        return jsonify({"ok": False, "error": "Turn Smart patrol on first."}), 409
+    r = build_smart_patrol()
+    return jsonify(r), (200 if r["ok"] else 409)
+
+
 def patrols_text():
     items = load_response_settings()["patrol_schedules"]
     if not items:
@@ -7984,14 +8211,19 @@ def patrols_text():
     return "\n".join(lines)
 
 
+def _masked(cfg):
+    """Settings for the browser: the webhook secret is never sent back."""
+    return {**cfg, "webhook_secret": _alarm_verify_mod.SECRET_MASK if cfg.get("webhook_secret") else ""}
+
+
 @app.route("/api/response/settings", methods=["GET", "POST"])
 def api_response_settings():
     if request.method == "POST":
         try:
-            return jsonify({"ok": True, "settings": save_response_settings(request.get_json(silent=True) or {})})
+            return jsonify({"ok": True, "settings": _masked(save_response_settings(request.get_json(silent=True) or {}))})
         except (TypeError, ValueError) as e:
             return jsonify({"ok": False, "error": f"Invalid value: {e}"}), 400
-    return jsonify({"ok": True, "settings": load_response_settings(), "cameras": _frigate_camera_names(),
+    return jsonify({"ok": True, "settings": _masked(load_response_settings()), "cameras": _frigate_camera_names(),
                     "response": drone_response, "telegram": telegram_ready()})
 
 
@@ -8357,6 +8589,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
 <a href="/incidents"><span>⚑</span><b>Incidents</b><small>Each camera's events as one story</small></a>
 <a href="/coverage"><span>◔</span><b>Coverage</b><small>What cameras see, blind spots</small></a>
+<a href="/alarms"><span>☎</span><b>Monitoring centre</b><small>Drone-verified alarms</small></a>
 <a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
 </nav>
 <section class="panel"><div class="panel-head"><div class="panel-title">🔎 Patterns</div></div><div class="panel-body">

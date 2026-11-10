@@ -42,7 +42,7 @@ def evidence_key():
 _audit_actor = threading.local()  # .source for work done outside a web request (e.g. "telegram")
 AUDITED_WRITES = re.compile(r"^/api/(drone/|routes|response/|maps/[a-f0-9]{12}/(fly|stop)|maps/plan|virtual-drones|nofly"
                             r"|gps-dispatch/request|users|customer/settings|safety/settings|response/settings|airspace/"
-                            r"|system/|license|cloud/pair|sources/|incidents/|coverage/)")
+                            r"|system/|license|cloud/pair|sources/|incidents/|coverage/|alarms/|smart-patrol)")
 STICK_AUDIT_GAP = 30  # stick input arrives many times a second: log when a stick session starts
 _stick_audit_last = {}
 
@@ -229,6 +229,7 @@ async function fill(id){const d=await fetch('/api/incidents/'+id).then(r=>r.json
   const imgs=i.events.filter(e=>e.snapshot).map(e=>`<img src="/events/${esc(e.snapshot.split(/[\\/]/).pop())}" alt="">`).join('');
   $('b'+id).innerHTML=i.items.map(x=>`<div class="it"><time>${tm(x.t)}</time><span>${esc(x.text)}</span></div>`).join('')+imgs+
    `<div class="actions" style="margin-top:8px"><button class="hud-btn" onclick="mark(${id},'reviewed')">Mark reviewed</button>
+    <a class="hud-btn" href="/incidents/${id}/replay">▶ 4D replay</a>
     <a class="hud-btn primary" href="/api/incidents/${id}/evidence.zip">Download evidence pack</a></div>`}
 async function check(){const f=$('pack').files[0],m=$('vmsg');if(!f){m.className='hud-msg bad';m.textContent='Choose a .zip first.';return}
   const fd=new FormData();fd.append('pack',f);m.className='hud-msg';m.textContent='Checking…';

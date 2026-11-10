@@ -17,6 +17,9 @@ edge/
   app/coverage.py         camera views on the ground, blind spots, suggested camera (Coverage page)
   app/handoff.py          camera-to-drone handoff (off by default)
   app/cloud_sync.py       phone access: incidents and live pictures to the portal (off by default)
+  app/alarm_verify.py     drone-verified alarms to a monitoring centre (off by default); app/sia_dc09.py the receiver protocol
+  app/risk_patrol.py      Smart patrol: route over blind spots and incident places (off by default)
+  app/pages/replay.py     4D incident replay
   app/dashboard.py        dashboard web app (http://127.0.0.1:8080)
   runtime/                the ONLY Docker setup (versions pinned)
   installer/              build.ps1 -> Setup.exe
@@ -82,6 +85,26 @@ go to the portal with one snapshot each, through the `edge-sync` function (devic
 Incidents page can ask for live pictures of a camera: the PC then uploads one every 3 s for as long as
 the page is open (requests last 2 minutes and are renewed). Backend: `supabase/migrations/
 20261108120000_phone_access.sql`, `supabase/functions/edge-sync`; portal: `app/portal/incidents`.
+
+## Verified alarms, 4D replay and Smart patrol
+
+**Drone-verified alarms** (off by default; Settings → Monitoring centre): each drone dispatch starts a
+verification (`alarm_verify.py`). Verified when the drone's own camera sees a person or vehicle within
+`verify_window_s` of arriving (`drone_detection` on the pipeline), or when an operator confirms on Telegram
+or the page; false alarms are never sent. A verified alarm goes to an HTTPS webhook (JSON with both
+pictures, `X-Signature-SHA256` = HMAC-SHA256 of the body; the evidence pack follows 60 s after the response
+ends) and/or an alarm receiver over SIA DC-09 ADM-CID, unencrypted (`sia_dc09.py`: 130 verified, 380
+unconfirmed, 602 test; zone = camera number). Unconfirmed alarms are sent only if switched on.
+
+**4D incident replay** (Incidents → an incident → 4D replay; `/api/incidents/<id>/replay`): cameras and
+their views, the drone's recorded track with trail, the spot it was sent to, each picture at its moment;
+play, speed, scrub.
+
+**Smart patrol** (off by default; Coverage page): `risk_patrol.py` scores the site's squares (blind spots,
+nearness to cameras with recent incidents, weighted by severity and halved every 14 days), picks up to N
+spaced stops within range and outside no-fly zones, orders them from home, and saves route "Smart patrol"
+with a daily confirm-first schedule at the riskiest hour (22:00 with no history). Rebuilt weekly; switching
+it off removes both.
 
 ## Sign-in and audit log
 

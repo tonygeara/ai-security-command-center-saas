@@ -34,6 +34,7 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/incidents/\d+$",  # mark an incident reviewed
     r"^/api/evidence/verify$",  # check a pack (changes nothing)
     r"^/api/coverage/send$",  # send a drone to a spot on the Coverage page
+    r"^/api/alarms/[0-9a-f]{6,16}$",  # confirm an intrusion or mark a false alarm
 )]
 
 _cache = {"path": None, "mtime": None, "users": []}
