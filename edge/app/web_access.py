@@ -2,6 +2,7 @@
 
 Part of the dashboard (registered by dashboard.py with setup()); the role rules are in users.py.
 """
+import ipaddress
 import os
 import time
 import urllib.parse
@@ -9,6 +10,11 @@ import urllib.parse
 from flask import Blueprint, Response, g, jsonify, redirect, request, session
 
 import users as user_accounts
+
+try:
+    from edition import PRODUCT_NAME
+except Exception:  # noqa: BLE001
+    PRODUCT_NAME = "AI Security Command Center"
 
 bp = Blueprint("access", __name__)
 hud_page = None  # set by setup()
@@ -123,7 +129,11 @@ LOGIN_PAGE = r"""
 <label for="pw" style="margin-top:10px">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required>
 <div class="actions" style="margin-top:14px"><button class="hud-btn primary" type="submit">Sign in</button></div>
 <div class="hud-msg bad" style="__ERRSTYLE__">__ERR__</div>
-</form></div></section></main>"""
+</form>__RESET__</div></section></main>"""
+FORGOT = ('<p class="muted" style="margin-top:14px;font-size:13px">Forgot the password? On this PC open '
+          f'<b>Start → {PRODUCT_NAME} - Reset sign-in</b>. The dashboard uses its own user names, not your portal email.</p>')
+RESET_READY = ('<div class="hud-msg" style="margin-top:14px">A sign-in reset was requested on this PC. '
+               '<a class="hud-btn primary" href="/reset-signin">Choose a new password</a></div>')
 
 
 @bp.route("/login", methods=["GET", "POST"])
@@ -151,8 +161,86 @@ def login_page():
             _login_fails[ip] = fails + [time.time()]
             err = "Wrong user name or password."
     body = (LOGIN_PAGE.replace("__NEXT__", html_escape(nxt)).replace("__ERR__", html_escape(err))
-            .replace("__ERRSTYLE__", "" if err else "display:none"))
+            .replace("__ERRSTYLE__", "" if err else "display:none")
+            .replace("__RESET__", RESET_READY if reset_requested() else FORGOT))
     return Response(hud_page("Sign in", body, nav=False), mimetype="text/html")
+
+
+# Forgotten password: Start menu → "<product> - Reset sign-in" (launcher.pyw --reset-signin) writes this file in
+# the data folder; for 15 minutes the sign-in page then offers to choose a new password, only in a browser on
+# this PC. Writing the file needs this Windows account, which can read every file of the app anyway.
+RESET_FILE_NAME = "reset-signin.request"
+RESET_VALID_S = 15 * 60
+
+
+def _reset_file():
+    return os.path.join(DATA_FOLDER, RESET_FILE_NAME)
+
+
+def reset_requested():
+    """A fresh reset request, made on this PC, for a browser on this PC."""
+    try:
+        if time.time() - os.path.getmtime(_reset_file()) > RESET_VALID_S:
+            return False
+        return ipaddress.ip_address((request.remote_addr or "").split("%")[0]).is_loopback
+    except (OSError, ValueError):
+        return False
+
+
+RESET_PAGE = r"""
+<main class="hud-main" style="max-width:460px;margin:60px auto">
+<div class="page-head"><div><div class="page-kicker">AI Security</div><h1 class="page-title">Choose a new password</h1>
+<div class="page-sub">Requested from this PC's Start menu. Pick the admin account and its new password; you are then signed in.</div></div></div>
+<section class="panel"><div class="panel-body"><form method="post">
+<label for="u">Account</label><select id="u" name="username">__USERS__</select>
+<label for="p1" style="margin-top:10px">New password (8+ characters)</label><input id="p1" name="password" type="password" autocomplete="new-password" required minlength="8">
+<label for="p2" style="margin-top:10px">New password again</label><input id="p2" name="password2" type="password" autocomplete="new-password" required minlength="8">
+<div class="actions" style="margin-top:14px"><button class="hud-btn primary" type="submit">Save and sign in</button></div>
+<div class="hud-msg bad" style="__ERRSTYLE__">__ERR__</div>
+</form></div></section></main>"""
+
+
+@bp.route("/reset-signin", methods=["GET", "POST"])
+def reset_signin_page():
+    if not reset_requested():
+        return Response(hud_page("Reset sign-in", '<main class="hud-main" style="max-width:520px;margin:60px auto">'
+                                 '<h1 class="page-title">Reset sign-in</h1><p class="muted">On the PC running the system, open '
+                                 f'<b>Start → {PRODUCT_NAME} - Reset sign-in</b>, then use the browser window it opens '
+                                 '(within 15 minutes).</p><a class="hud-btn" href="/login">Back to sign in</a></main>', nav=False),
+                        status=403, mimetype="text/html")
+    admins = [u for u in user_accounts.load(USERS_FILE) if u["role"] == "admin"]
+    if not admins:
+        return redirect("/welcome")
+    err = ""
+    if request.method == "POST":
+        name, pw = request.form.get("username"), request.form.get("password") or ""
+        try:
+            if pw != (request.form.get("password2") or ""):
+                raise ValueError("The two passwords are different.")
+            u = user_accounts.find(admins, name)
+            if not u:
+                raise ValueError("Choose an admin account.")
+            u = user_accounts.update(USERS_FILE, u["username"], password=pw)
+            try:
+                os.remove(_reset_file())
+            except OSError:
+                pass
+            session.clear()
+            session.permanent = True
+            session.update(user=u["username"], stamp=u.get("stamp"))
+            _login_fails.clear()
+            try:
+                import web_records
+                web_records.audit_record("password reset from the Start menu", target=u["username"], user=u["username"])
+            except Exception:
+                pass
+            return redirect("/")
+        except ValueError as e:
+            err = str(e)
+    opts = "".join(f'<option value="{html_escape(u["username"])}">{html_escape(u["username"])}</option>' for u in admins)
+    body = (RESET_PAGE.replace("__USERS__", opts).replace("__ERR__", html_escape(err))
+            .replace("__ERRSTYLE__", "" if err else "display:none"))
+    return Response(hud_page("Reset sign-in", body, nav=False), mimetype="text/html")
 
 
 @bp.route("/logout")

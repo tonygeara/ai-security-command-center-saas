@@ -27,8 +27,11 @@ function cors(req: Request) {
 }
 
 async function email(r: Record<string, string>, id: string) {
-  const key = Deno.env.get("RESEND_API_KEY"), to = Deno.env.get("DEMO_REQUEST_EMAIL");
-  if (!key || !to) return false;
+  const key = (Deno.env.get("RESEND_API_KEY") || "").trim(), to = (Deno.env.get("DEMO_REQUEST_EMAIL") || "").trim();
+  if (!key || !to) {
+    console.warn("demo request not emailed: secret missing:", [!key && "RESEND_API_KEY", !to && "DEMO_REQUEST_EMAIL"].filter(Boolean).join(", "));
+    return false;
+  }
   const rows: [string, string][] = [["Name", r.full_name], ["Email", r.email], ["Company", r.company], ["Phone", r.phone],
     ["Country", r.country], ["Sites / cameras", r.sites]];
   const html = `<h2>New demo request</h2><table cellpadding="6">${rows.filter(([, v]) => v).map(([k, v]) =>
@@ -39,7 +42,8 @@ async function email(r: Record<string, string>, id: string) {
     headers: {"Authorization": `Bearer ${key}`, "Content-Type": "application/json"},
     body: JSON.stringify({from: Deno.env.get("DEMO_FROM_EMAIL") || "AI Security Command Center <onboarding@resend.dev>",
       to: [to], reply_to: r.email, subject: `Demo request: ${r.full_name}${r.company ? " (" + r.company + ")" : ""}`, html})});
-  if (!res.ok) console.error("resend", res.status, (await res.text()).slice(0, 300));
+  if (!res.ok) console.error("demo request not emailed: Resend said", res.status, (await res.text()).slice(0, 300));
+  else console.log("demo request emailed", id);
   return res.ok;
 }
 
