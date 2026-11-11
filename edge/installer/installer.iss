@@ -66,6 +66,8 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 ; Normal start opens the system in the web browser (no window); it keeps guarding when the browser closes.
 ; This one shows the control window (Start / Stop System, Diagnostics).
 Name: "{autoprograms}\{#MyAppName} - Control window"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--window"
+; Forgotten dashboard password: lets a browser on this PC choose a new one for 15 minutes.
+Name: "{autoprograms}\{#MyAppName} - Reset sign-in"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--reset-signin"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent; Check: not AppWasRunning

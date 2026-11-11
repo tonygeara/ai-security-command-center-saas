@@ -5,7 +5,7 @@ from tkinter import ttk, messagebox
 import edition
 import browser_mode as browser_mode_lib
 
-APP_VERSION = 'V11.8.0'
+APP_VERSION = 'V11.8.1'
 PRODUCT_NAME = edition.PRODUCT_NAME
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 FROZEN = getattr(sys, 'frozen', False)
@@ -505,6 +505,16 @@ class App(tk.Tk):
 if __name__=='__main__':
     if '--dashboard' in sys.argv:
         run_dashboard_in_process()
+    elif '--reset-signin' in sys.argv:
+        # Start menu → "Reset sign-in": for 15 minutes a browser on this PC may choose a new dashboard password
+        # (web_access.reset_signin_page). Opens that page, starting the system first if it isn't running.
+        os.makedirs(DATA_HOME, exist_ok=True)
+        with open(os.path.join(DATA_HOME, 'reset-signin.request'), 'w') as f:
+            f.write(str(int(time.time())))
+        if port_open(DASHBOARD_PORT):
+            webbrowser.open(f'http://127.0.0.1:{DASHBOARD_PORT}/reset-signin')
+        elif not browser_mode_lib.notify_running_instance('open'):
+            App(browser_mode=True, background=False).mainloop()  # the sign-in page then offers the reset
     else:
         window = '--window' in sys.argv
         background = '--background' in sys.argv  # Windows sign-in: start guarding, no browser
