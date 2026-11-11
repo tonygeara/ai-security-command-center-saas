@@ -27,7 +27,7 @@ export default async function Overview(){
     <div className="card tableWrap"><table className="adminTable"><tbody>{INSTALLERS.map(i => <tr key={i.file}>
       <td><b>{i.edition}</b><div className="muted">{i.note}</div></td>
       <td style={{whiteSpace: "nowrap"}}><a className="btn small" href={i.url}>Download</a></td></tr>)}
-      <tr><td className="muted" colSpan={2}>Built and published by the “Edge installer” workflow on GitHub (sign in to GitHub to download). <a href={RELEASE_URL} target="_blank">Release notes ↗</a></td></tr></tbody></table></div>
+      <tr><td className="muted" colSpan={2}>Built and published automatically by the “Edge installer” workflow on GitHub whenever a new version reaches main (sign in to GitHub to download). <a href={RELEASE_URL} target="_blank">Release notes ↗</a></td></tr></tbody></table></div>
     <h2>Recent activity</h2>
     <div className="card tableWrap"><table className="adminTable"><tbody>{(activity ?? []).map((e: any, i: number) => <tr key={i}>
       <td className="muted" style={{whiteSpace: "nowrap"}}>{new Date(e.created_at).toLocaleString()}</td>

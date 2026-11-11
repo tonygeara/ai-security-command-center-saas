@@ -7,6 +7,7 @@ import FeatureToggle from "../../FeatureToggle";
 import DownloadLicense from "./DownloadLicense";
 import RemoveButton from "../../RemoveButton";
 import UserManager from "../../../components/UserManager";
+import {PcName, PcSwitch, RenameClient, SourceSwitch} from "../../DeviceControls";
 
 const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"]];
 const FEATURE_LABEL = Object.fromEntries(FEATURES);
@@ -55,14 +56,14 @@ export default async function ClientPage({params}: {params: Promise<{key: string
       <h2>PCs (Edge Agents)</h2>
       <div className="card tableWrap"><table className="adminTable"><thead><tr><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>
         {devices.map(d => { const on = isOnline(d), srcs = sources.filter(s => s.edge_device_id === d.id); return <tr key={d.id}>
-          <td><b>{d.device_name || "Unnamed PC"}</b><div className="muted">{d.platform} {d.last_ip ? "· " + d.last_ip : ""}</div></td>
-          <td className={on ? "ok" : "locked"}>{on ? "● Online" : "○ Offline"}<div className="muted">{d.last_seen_at ? "last seen " + new Date(d.last_seen_at).toLocaleString() : "never connected"}</div></td>
+          <td><PcName id={d.id} name={d.device_name || ""}/><div className="muted">{d.platform} {d.last_ip ? "· " + d.last_ip : ""}</div></td>
+          <td className={d.status === "disabled" ? "locked" : on ? "ok" : "locked"}>{d.status === "disabled" ? "⏸ Switched off" : on ? "● Online" : "○ Offline"}<div className="muted">{d.last_seen_at ? "last seen " + new Date(d.last_seen_at).toLocaleString() : "never connected"}</div></td>
           <td className={versionBehind(d.app_version) ? "locked" : ""}>{d.app_version || "—"}{versionBehind(d.app_version) && <div className="muted">update to {LATEST_APP_VERSION}</div>}</td>
-          <td>{srcs.length ? srcs.map(s => <div key={s.id}>{s.source_type === "drone" ? "✈" : "▣"} {s.name}{!s.enabled && <span className="muted"> (off)</span>}</div>) : <span className="muted">none</span>}</td>
-          <td><RemoveButton rpc="admin_remove_device" args={{target_device: d.id}} label="Remove PC"
+          <td>{srcs.length ? srcs.map(s => <SourceSwitch key={s.id} id={s.id} name={s.name} type={s.source_type} enabled={s.enabled !== false}/>) : <span className="muted">none</span>}</td>
+          <td><div className="rowActions"><PcSwitch id={d.id} name={d.device_name || ""} disabled={d.status === "disabled"}/><RemoveButton rpc="admin_remove_device" args={{target_device: d.id}} label="Remove PC"
             confirmText={`Remove PC "${d.device_name || "Unnamed PC"}"${on ? " (it is ONLINE now and will stop working)" : ""} and its ${srcs.length} camera(s)/drone(s)?
 
-It can be paired again later with a new code.`}/></td></tr>; })}
+It can be paired again later with a new code.`}/></div></td></tr>; })}
         {!devices.length && <tr><td colSpan={5} className="muted">No PC paired yet. The client pairs one from their portal (“Pair a Windows Edge Agent”).</td></tr>}
         {sources.filter(s => !s.edge_device_id).map(s => <tr key={s.id}><td colSpan={3} className="muted">Not linked to a PC</td><td>{s.source_type === "drone" ? "✈" : "▣"} {s.name}</td></tr>)}
       </tbody></table></div>
@@ -79,6 +80,7 @@ It can be paired again later with a new code.`}/></td></tr>; })}
       <h1>{c.name}</h1><p className="muted">{[c.company, c.location].filter(Boolean).join(" · ") || "No company / location yet"}</p></div>
       <div className="portalActions">
         {c.type === "onprem" && l && <><DownloadLicense license={l}/><Link className="btn" href={"/admin/licenses?renew=" + l.id}>Renew</Link></>}
+        {c.orgId && <RenameClient orgId={c.orgId} name={c.org?.name ?? c.name}/>}
         <Link className="ghost" href={l ? "/admin/licenses?edit=" + l.id : "/admin/licenses?org=" + c.orgId}>{l ? "Edit details" : "Add contact & limits"}</Link>
         {c.type === "onprem" && l ? <RemoveButton rpc="admin_remove_client_license" args={{target_license: l.id}} label="Remove" small={false} goTo="/admin/clients"
             confirmText={`Remove ${c.name} and its licence record from the portal?

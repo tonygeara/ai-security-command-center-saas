@@ -14,6 +14,15 @@
 //   {action:"remove", org, user_id}
 //   {action:"create_client", name, admin_email, admin_name, plan?, status?}   (super admin) -> {org, temp_password}
 //
+// Super admin only, any account whatever its company (Admin → Users):
+//   {action:"account_list"}                               -> every account with blocked / super admin flags
+//   {action:"account_block", user_id, blocked}            block or allow sign-in
+//   {action:"account_update", user_id, full_name?, email?}
+//   {action:"account_password", user_id}                  -> {temp_password}
+//   {action:"account_super", user_id, on}                 give or take super admin rights (never your own)
+//   {action:"account_add_super", email}                   make an existing account a super admin
+//   {action:"account_delete", user_id}                    delete the account and its company memberships
+//
 // New users and reset passwords get a temporary password, shown once to the person who made it; the user
 // must choose their own at first sign-in (user_metadata.must_change_password).
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
@@ -132,6 +141,102 @@ Deno.serve(async (req: Request) => {
         await admin.from("organizations").delete().eq("id", o.id);  // nothing half-made is left behind
         throw e;
       }
+    }
+
+    // Super admin: any account, whatever company it belongs to (Admin → Users).
+    if (action.startsWith("account_")) {
+      if (!isSuper) throw new Refused("Super admin only.", 403);
+      if (action === "account_list") {
+        const all: Record<string, unknown>[] = [];
+        for (let page = 1; page <= 10; page++) {
+          const {data, error} = await admin.auth.admin.listUsers({page, perPage: 1000});
+          if (error) throw new Refused(error.message, 500);
+          all.push(...data.users.map(u => ({user_id: u.id, email: u.email || "", banned_until: (u as {banned_until?: string}).banned_until || null,
+            must_change_password: !!u.user_metadata?.must_change_password})));
+          if (data.users.length < 1000) break;
+        }
+        const {data: supers} = await admin.from("super_admins").select("user_id");
+        const ids = new Set((supers || []).map(s => s.user_id));
+        const now = Date.now();
+        return reply({ok: true, me: user.id, accounts: all.map(a => ({...a, super: ids.has(a.user_id as string),
+          blocked: !!a.banned_until && new Date(a.banned_until as string).getTime() > now}))});
+      }
+      if (action === "account_add_super") {
+        const email = text(body.email, 200).toLowerCase();
+        const u = await findUserByEmail(admin, email);
+        if (!u) throw new Refused("No account with that email. Add them to a client first, or create the account, then make them a super admin.", 404);
+        const {error} = await admin.from("super_admins").upsert({user_id: u.id});
+        if (error) throw new Refused(error.message, 500);
+        await audit(admin, null, user.id, "super_admin_added", u.id, {email});
+        return reply({ok: true});
+      }
+      const target = body.user_id;
+      if (!isUuid(target)) throw new Refused("Choose a user.");
+      if (target === user.id) throw new Refused("You can't change your own account here. Use Account for your password.", 403);
+      const {data: cur} = await admin.auth.admin.getUserById(target as string);
+      if (!cur?.user) throw new Refused("That account no longer exists.", 404);
+      const email = cur.user.email;
+      const {data: targetSuper} = await admin.from("super_admins").select("user_id").eq("user_id", target).maybeSingle();
+
+      if (action === "account_block") {
+        const blocked = body.blocked === true;
+        const {error} = await admin.auth.admin.updateUserById(target as string, {ban_duration: blocked ? "876000h" : "none"});
+        if (error) throw new Refused(error.message, 500);
+        await audit(admin, null, user.id, blocked ? "user_blocked" : "user_unblocked", target as string, {email});
+        return reply({ok: true});
+      }
+      if (action === "account_update") {
+        const fullName = text(body.full_name, 120), newEmail = text(body.email, 200).toLowerCase();
+        const change: Record<string, unknown> = {};
+        if (newEmail && newEmail !== email) {
+          if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(newEmail)) throw new Refused("Enter a valid email address.");
+          change.email = newEmail; change.email_confirm = true;
+        }
+        if (fullName) change.user_metadata = {...(cur.user.user_metadata || {}), full_name: fullName};
+        if (Object.keys(change).length) {
+          const {error} = await admin.auth.admin.updateUserById(target as string, change);
+          if (error) throw new Refused(error.message, 400);
+        }
+        if (fullName) await admin.from("profiles").update({full_name: fullName}).eq("id", target);
+        await audit(admin, null, user.id, "user_updated", target as string, {email, new_email: change.email ?? null, full_name: fullName || null});
+        return reply({ok: true});
+      }
+      if (action === "account_password") {
+        const password = tempPassword();
+        const {error} = await admin.auth.admin.updateUserById(target as string,
+          {password, user_metadata: {...(cur.user.user_metadata || {}), must_change_password: true}});
+        if (error) throw new Refused(error.message, 500);
+        await audit(admin, null, user.id, "user_password_reset", target as string, {email});
+        return reply({ok: true, temp_password: password});
+      }
+      if (action === "account_super") {
+        const on = body.on === true;
+        if (on) {
+          const {error} = await admin.from("super_admins").upsert({user_id: target});
+          if (error) throw new Refused(error.message, 500);
+        } else {
+          const {error} = await admin.from("super_admins").delete().eq("user_id", target);
+          if (error) throw new Refused(error.message, 500);
+        }
+        await audit(admin, null, user.id, on ? "super_admin_added" : "super_admin_removed", target as string, {email});
+        return reply({ok: true});
+      }
+      if (action === "account_delete") {
+        if (targetSuper) throw new Refused("Remove their super admin rights first.", 403);
+        const {data: orgs} = await admin.from("organization_members").select("organization_id,role").eq("user_id", target);
+        for (const m of orgs || []) {
+          if (ADMIN.includes(m.role) && await adminsLeft(admin, m.organization_id, target as string) === 0) {
+            const {data: o} = await admin.from("organizations").select("name").eq("id", m.organization_id).maybeSingle();
+            throw new Refused(`${o?.name || "Their company"} needs at least one admin. Add another admin there first.`);
+          }
+        }
+        await admin.from("organization_members").delete().eq("user_id", target);
+        const {error} = await admin.auth.admin.deleteUser(target as string);
+        if (error) throw new Refused(error.message, 500);
+        await audit(admin, null, user.id, "user_deleted", target as string, {email});
+        return reply({ok: true});
+      }
+      throw new Refused("Unknown action.");
     }
 
     const org = body.org;
