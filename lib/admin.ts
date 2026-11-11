@@ -2,8 +2,10 @@
 // on-prem licence records, plus the "needs attention" checks shown on the overview.
 import type {SupabaseClient} from "@supabase/supabase-js";
 
-// Bump when a new Windows release ships, so PCs on older versions are flagged.
-export const LATEST_APP_VERSION = "11.3.5";
+// The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
+// new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
+// published automatically when that version reaches main (.github/workflows/edge-installer.yml).
+export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.8.0";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>
 // (private repository: open the links signed in to GitHub).
 export const RELEASE_URL = `https://github.com/tonygeara/ai-security-command-center-saas/releases/tag/edge-v${LATEST_APP_VERSION}`;

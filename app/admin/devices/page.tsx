@@ -1,6 +1,7 @@
 import Link from "next/link";
 import {createClient} from "../../../lib/supabase/server";
 import RemoveButton from "../RemoveButton";
+import {PcName, PcSwitch, SourceSwitch} from "../DeviceControls";
 import {buildClients, isOnline, LATEST_APP_VERSION, loadAdminData, versionBehind} from "../../../lib/admin";
 
 export default async function Devices(){
@@ -10,7 +11,7 @@ export default async function Devices(){
     srcs: data.sources.filter(s => s.edge_device_id === d.id)})).sort((a, b) => Number(a.on) - Number(b.on) || (a.c?.name ?? "").localeCompare(b.c?.name ?? ""));
   const online = rows.filter(r => r.on).length, old = rows.filter(r => versionBehind(r.d.app_version)).length;
   return <>
-    <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Devices</h1><p className="muted">Every online client's Windows PC. On-prem PCs never connect here (they run offline).</p></div></div>
+    <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Devices</h1><p className="muted">Every online client's Windows PC: rename, switch off or on, switch single cameras and drones off, or remove. On-prem PCs never connect here (they run offline).</p></div></div>
     <section className="grid">
       <article className="card"><h2>Online now</h2><strong className={online < rows.length ? "locked" : "ok"}>{online}/{rows.length}</strong><p className="muted">PCs</p></article>
       <article className="card"><h2>Out of date</h2><strong className={old ? "locked" : "ok"}>{old}</strong><p className="muted">not on {LATEST_APP_VERSION}</p></article>
@@ -20,14 +21,14 @@ export default async function Devices(){
     <div className="card tableWrap"><table className="adminTable"><thead><tr><th>Client</th><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>
       {rows.map(({d, c, on, srcs}) => <tr key={d.id}>
         <td>{c ? <Link href={"/admin/clients/" + c.key}><b>{c.name}</b></Link> : <span className="muted">unknown</span>}</td>
-        <td><b>{d.device_name || "Unnamed PC"}</b><div className="muted">{d.platform} {d.last_ip ? "· " + d.last_ip : ""}</div></td>
-        <td className={on ? "ok" : "locked"}>{on ? "● Online" : "○ Offline"}<div className="muted">{d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "never connected"}</div></td>
+        <td><PcName id={d.id} name={d.device_name || ""}/><div className="muted">{d.platform} {d.last_ip ? "· " + d.last_ip : ""}</div></td>
+        <td className={d.status === "disabled" ? "locked" : on ? "ok" : "locked"}>{d.status === "disabled" ? "⏸ Switched off" : on ? "● Online" : "○ Offline"}<div className="muted">{d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : "never connected"}</div></td>
         <td className={versionBehind(d.app_version) ? "locked" : ""}>{d.app_version || "—"}</td>
-        <td>{srcs.filter(s => s.source_type === "camera").length} cam · {srcs.filter(s => s.source_type === "drone").length} drone</td>
-        <td><RemoveButton rpc="admin_remove_device" args={{target_device: d.id}} label="Remove PC"
+        <td>{srcs.length ? srcs.map(s => <SourceSwitch key={s.id} id={s.id} name={s.name} type={s.source_type} enabled={s.enabled !== false}/>) : <span className="muted">none</span>}</td>
+        <td><div className="rowActions"><PcSwitch id={d.id} name={d.device_name || ""} disabled={d.status === "disabled"}/><RemoveButton rpc="admin_remove_device" args={{target_device: d.id}} label="Remove PC"
           confirmText={`Remove PC "${d.device_name || "Unnamed PC"}" of ${c?.name ?? "unknown client"}${on ? " (it is ONLINE now and will stop working)" : ""}?
 
-It can be paired again later with a new code.`}/></td></tr>)}
+It can be paired again later with a new code.`}/></div></td></tr>)}
       {!rows.length && <tr><td colSpan={6} className="muted">No PCs paired yet.</td></tr>}
     </tbody></table></div>
   </>;
