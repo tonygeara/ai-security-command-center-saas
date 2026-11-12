@@ -1,0 +1,80 @@
+AI SECURITY COMMAND CENTER - INSTALLATION GUIDE (online edition)
+==================================================================
+
+Your provider has created your company account. You received:
+  - the portal address:  https://www.aisecuritycommandcenter.com/login
+  - your email and a temporary password (you choose your own at first sign-in)
+  - the program:         AI-Security-Command-Center-Setup-<version>.exe
+
+Video, faces, plates and recordings stay on your computer. The portal is used for your account,
+your users, pairing the computer and (only if you switch it on) incidents on your phone.
+
+COMPUTER REQUIREMENTS
+  - Windows 10 or 11, 64-bit, with virtualization enabled in the BIOS/UEFI
+  - 1-2 cameras: 4 cores / 8 threads (Intel Core i5 8th gen / Ryzen 5 2000 or newer), 16 GB RAM
+  - 4+ cameras: 8 cores, 32 GB RAM and an NVIDIA graphics card (RTX 3050 / 3060 or better)
+  - SSD with at least 256 GB free (recordings: ~150-250 GB per camera)
+  - Internet connection (it keeps working for up to 7 days if the internet drops)
+  - IP cameras with RTSP video, 1080p or better, on the same network as the computer
+  - Optional drones: DJI aircraft with the Drone Link app on the controller (ask your provider)
+
+STEP 1 - SIGN IN TO THE PORTAL (5 minutes)
+  - Open https://www.aisecuritycommandcenter.com/login and sign in with your email and the
+    temporary password. Choose your own password when asked.
+
+STEP 2 - INSTALL DOCKER DESKTOP (one time)
+  Docker Desktop runs the local AI services.
+  - Download it from https://www.docker.com/products/docker-desktop/ and install it with the
+    default options (WSL 2). Restart the computer if asked.
+  - Open Docker Desktop once and wait for "Engine running".
+  - Settings > General > tick "Start Docker Desktop when you sign in".
+
+STEP 3 - INSTALL THE PROGRAM
+  - Run AI-Security-Command-Center-Setup-<version>.exe.
+  - Windows may show "Windows protected your PC": click More info > Run anyway.
+  - No administrator rights are needed.
+  - The program starts with Windows and opens in your web browser. The first start downloads the
+    AI services and takes several minutes.
+
+STEP 4 - FIRST START: ADMIN ACCOUNT AND PAIRING
+  - The browser asks you to create this computer's admin account (a user name and password).
+  - Then it asks for a pairing code. In the portal, choose "Pair a Windows device": you get a
+    one-time code, valid 15 minutes. Type it on the computer and click "Pair device".
+  - Once paired, you can also sign in to this computer with your portal email and password.
+    Portal Admins are admins here, Editors are operators (they can fly drones), Viewers can
+    only watch.
+
+STEP 5 - ADD CAMERAS
+  - Dashboard > Devices > Add camera: scan the network to find your cameras, or enter the
+    camera's RTSP address, for example rtsp://username:password@192.168.1.50:554/stream1
+  - Recorders (NVR/DVR): add all channels at once from the same page.
+  - The number of cameras and drones is set by your licence.
+  - Camera passwords stay on this computer; they are never sent to the portal.
+
+STEP 6 - ADD YOUR TEAM (portal)
+  - Portal > Users > Add a user: give each person their own account.
+      Editor: can change cameras, sites and computers
+      Viewer: can see everything, change nothing
+  - Each new user gets a temporary password, shown once: give it to them privately.
+
+OPTIONAL
+  - Drones: dashboard > Drone > + Add drone, then scan the QR code with the Drone Link app.
+  - Telegram alerts with pictures and buttons: your provider sets them up with you.
+  - Phone access (incidents and live pictures on your phone through the portal): dashboard >
+    Settings > Phone access. Off until you switch it on.
+  - Map your site and camera views: dashboard > Settings > Coverage.
+
+UPDATES
+  - When a new version is out, run the new Setup file over the installed one. Cameras, faces,
+    events and settings are kept.
+
+FORGOT A PASSWORD?
+  - Portal password: ask your company Admin (Users > New password) or your provider.
+  - This computer's own admin account: on the computer open Start > "AI Security Command Center
+    - Reset sign-in" and choose a new password in the browser page it opens (15 minutes).
+
+GOOD TO KNOW
+  - Closing the browser does not stop protection. To stop everything: Settings > Shut down.
+  - Motion recordings are kept 3 days, alerts and snapshots 14 days, event history 30 days.
+  - Data folder: %LOCALAPPDATA%\AI-Security-System (back it up to keep faces and events).
+  - Support: contact your provider.
