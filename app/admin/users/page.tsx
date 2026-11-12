@@ -10,7 +10,7 @@ export default async function Users(){
     organization_id: u.organization_id ?? null, organization_name: u.organization_name ?? null, role: u.role ?? null, client_key: keyOf(u.organization_id)}));
   return <>
     <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Users</h1>
-      <p className="muted">Every portal account across all clients: add, edit, block, reset passwords, give super admin rights or delete.</p></div></div>
+      <p className="muted">Every portal account: super admins first, then each client with its Admins and their Editors and Viewers. Add, edit, block, reset passwords, give super admin rights or delete.</p></div></div>
     <AdminUsers rows={rows} clients={clients.filter(c => c.orgId).map(c => ({orgId: c.orgId!, name: c.name}))}/>
   </>;
 }
