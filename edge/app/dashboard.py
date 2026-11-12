@@ -87,6 +87,18 @@ UNKNOWN_FACE_WAIT_SECONDS = 30    # first look at a person's face-recognition re
 UNKNOWN_FACE_MIN_ATTEMPTS = 6     # failed face attempts before an in-view person counts as unknown
 UNKNOWN_FACE_MAX_SECONDS = 300    # decide by then even if the person is still in view
 
+def _replace_file(src, dst):
+    """os.replace, retried briefly: on Windows it is refused while another thread or program (backup,
+    antivirus, a reader of the same settings) has the file open for a moment."""
+    for attempt in range(20):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 BASE_FOLDER = os.environ.get(
     "AI_SECURITY_HOME",
     os.path.join(os.environ.get("LOCALAPPDATA", os.path.dirname(os.path.abspath(__file__))), "AI Security Command Center")
@@ -140,7 +152,7 @@ def save_local_settings(updates):
     tmp = LOCAL_SETTINGS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2)
-    os.replace(tmp, LOCAL_SETTINGS_FILE)
+    _replace_file(tmp, LOCAL_SETTINGS_FILE)
     return settings
 
 LOCAL_SETTINGS = load_local_settings()
@@ -2188,7 +2200,7 @@ def pair_windows_device(pairing_code, device_name="Windows Edge"):
                 "device_id": data["device_id"],
                 "device_token": data["device_token"]
             }, f, indent=2)
-        os.replace(tmp_cfg, EDGE_AGENT_CONFIG_FILE)
+        _replace_file(tmp_cfg, EDGE_AGENT_CONFIG_FILE)
         threading.Thread(target=cloud_control_worker, daemon=True).start()
         return {"ok": True, "device_id": data["device_id"]}
     except Exception as e:
@@ -2233,7 +2245,7 @@ def save_license_cache(token, data):
         tmp = LICENSE_CACHE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(lease, f)
-        os.replace(tmp, LICENSE_CACHE_FILE)
+        _replace_file(tmp, LICENSE_CACHE_FILE)
     except Exception as e:
         print("License cache save error:", e)
 
@@ -3975,7 +3987,7 @@ def _write_fresh_frigate(camera_name, source_url):
     tmp=LIVE_FRIGATE_CONFIG+".tmp"
     with open(tmp,"w",encoding="utf-8") as f:
         yaml.safe_dump(cfg,f,sort_keys=False)
-    os.replace(tmp,LIVE_FRIGATE_CONFIG)
+    _replace_file(tmp,LIVE_FRIGATE_CONFIG)
 
 def _restart_frigate():
     try:
@@ -4026,7 +4038,7 @@ def api_setup_camera():
             settings=load_local_settings();settings.update({"camera_name":slug,"camera_stream":f"rtsp://localhost:8554/{slug}","camera_display_name":display})
             tmp=LOCAL_SETTINGS_FILE+".tmp"
             with open(tmp,"w",encoding="utf-8") as f: json.dump(settings,f,indent=2)
-            os.replace(tmp,LOCAL_SETTINGS_FILE)
+            _replace_file(tmp,LOCAL_SETTINGS_FILE)
             CAMERA_NAME=slug;STREAM=f"rtsp://localhost:8554/{slug}"
             CAMERA_STATE_TOPIC=f"frigate/{slug}/enabled/state";CAMERA_SET_TOPIC=f"frigate/{slug}/enabled/set"
         restarted,msg=_restart_frigate()
@@ -4047,7 +4059,7 @@ def _save_frigate_config(cfg):
         yaml.safe_dump(cfg, f, sort_keys=False)
     for _ in range(20):
         try:
-            os.replace(tmp, LIVE_FRIGATE_CONFIG)
+            _replace_file(tmp, LIVE_FRIGATE_CONFIG)
             return
         except PermissionError:
             time.sleep(0.5)
@@ -4604,7 +4616,7 @@ def add_cameras_batch(cameras):
                 tmp = LOCAL_SETTINGS_FILE + ".tmp"
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(settings, f, indent=2)
-                os.replace(tmp, LOCAL_SETTINGS_FILE)
+                _replace_file(tmp, LOCAL_SETTINGS_FILE)
                 CAMERA_NAME = slug; STREAM = f"rtsp://localhost:8554/{slug}"
                 CAMERA_STATE_TOPIC = f"frigate/{slug}/enabled/state"; CAMERA_SET_TOPIC = f"frigate/{slug}/enabled/set"
             added.append({"name": display, "camera_name": slug})
@@ -4804,7 +4816,7 @@ def drone_link_token(reset=False, slot=None):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(token)
-    os.replace(tmp, path)
+    _replace_file(tmp, path)
     return token
 
 
@@ -5365,7 +5377,7 @@ def _save_virtual_config():
     tmp = VIRTUAL_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-    os.replace(tmp, VIRTUAL_FILE)
+    _replace_file(tmp, VIRTUAL_FILE)
 
 
 _virtual_cfg = _load_virtual_config()
@@ -5620,7 +5632,7 @@ def save_response_settings(data):
     tmp = RESPONSE_SETTINGS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-    os.replace(tmp, RESPONSE_SETTINGS_FILE)
+    _replace_file(tmp, RESPONSE_SETTINGS_FILE)
     return cfg
 
 
@@ -6538,7 +6550,7 @@ def save_route(name, route):
     tmp = ROUTES_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(routes, f, indent=2)
-    os.replace(tmp, ROUTES_FILE)
+    _replace_file(tmp, ROUTES_FILE)
     return name, routes[name]
 
 
@@ -7481,7 +7493,7 @@ def save_safety(update):
     tmp = SAFETY_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(s, f, indent=2)
-    os.replace(tmp, SAFETY_FILE)
+    _replace_file(tmp, SAFETY_FILE)
     return load_safety()
 
 
@@ -7645,7 +7657,7 @@ def _airports_fetch():
                 with open(AIRPORTS_FILE + ".part", "wb") as f:
                     for chunk in r.iter_content(1 << 20):
                         f.write(chunk)
-            os.replace(AIRPORTS_FILE + ".part", AIRPORTS_FILE)
+            _replace_file(AIRPORTS_FILE + ".part", AIRPORTS_FILE)
         except Exception:
             if not os.path.exists(AIRPORTS_FILE):
                 raise ValueError("Could not download the airport list (no internet?). Import airports.csv from "
@@ -7730,7 +7742,7 @@ def api_airspace_upload():
                 raise ValueError("Set the site position first (or connect a drone).")
             with open(AIRPORTS_FILE + ".tmp", "wb") as out:
                 out.write(raw)
-            os.replace(AIRPORTS_FILE + ".tmp", AIRPORTS_FILE)
+            _replace_file(AIRPORTS_FILE + ".tmp", AIRPORTS_FILE)
             s = load_safety()["airports"]
             found = airspace.airports_near(airspace.text_lines(raw), loc[0], loc[1], s["within_km"])
             zones, inside = _merge_zones(airspace.airport_zones(found, s["radius_m"]), "airport")
@@ -8606,7 +8618,7 @@ def _save_customer_settings(data):
     for k in safe:
         if k in data:safe[k]=data[k]
     CUSTOMER_SETTINGS_FILE.parent.mkdir(parents=True,exist_ok=True)
-    tmp=CUSTOMER_SETTINGS_FILE.with_suffix(".tmp");tmp.write_text(json.dumps(safe,indent=2),encoding="utf-8");os.replace(tmp,CUSTOMER_SETTINGS_FILE);return safe
+    tmp=CUSTOMER_SETTINGS_FILE.with_suffix(".tmp");tmp.write_text(json.dumps(safe,indent=2),encoding="utf-8");_replace_file(tmp,CUSTOMER_SETTINGS_FILE);return safe
 
 SETTINGS_PAGE = hud_page("Settings", r"""
 <main class="hud-main narrow">
@@ -8736,7 +8748,7 @@ def map_tile(layer, z, x, y):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path + ".tmp", "wb") as f:
                     f.write(r.content)
-                os.replace(path + ".tmp", path)
+                _replace_file(path + ".tmp", path)
         except Exception:
             pass  # offline: use the saved tile if there is one
     if not os.path.exists(path):
@@ -8838,7 +8850,7 @@ def api_license():
         tmp = LICENSE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, LICENSE_FILE)
+        _replace_file(tmp, LICENSE_FILE)
         check_offline_license()
         with cloud_lock:
             cloud_state["usage"] = local_source_usage()
@@ -8987,7 +8999,7 @@ def _save_recovery_state(s):
     with open(tmp,"w",encoding="utf-8") as f:
         json.dump(s,f,indent=2)
         f.flush(); os.fsync(f.fileno())
-    os.replace(tmp,RECOVERY_STATE_PATH)
+    _replace_file(tmp,RECOVERY_STATE_PATH)
 
 def _camera_source_parts(url):
     # Do not log returned user/password.
@@ -9161,7 +9173,7 @@ def _safe_update_camera_hosts(updates):
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(rendered)
-        os.replace(tmp, path)
+        _replace_file(tmp, path)
         if not _docker_restart_frigate() or not _wait_for_frigate():
             shutil.copy2(backup, path)
             _docker_restart_frigate()
