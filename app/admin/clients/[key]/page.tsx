@@ -7,9 +7,13 @@ import FeatureToggle from "../../FeatureToggle";
 import DownloadLicense from "./DownloadLicense";
 import RemoveButton from "../../RemoveButton";
 import UserManager from "../../../components/UserManager";
-import {PcName, PcSwitch, RenameClient, SourceSwitch} from "../../DeviceControls";
+import {BlockClient, PcName, PcSwitch, RenameClient, SourceSwitch} from "../../DeviceControls";
 
-const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"]];
+const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"],
+  ["handoff", "Camera-to-drone handoff"], ["smart_patrol", "Smart patrol"], ["verified_alarms", "Drone-verified alarms"],
+  ["incident_replay", "4D incident replay"], ["phone_access", "Phone access"]];
+// Newer features: until set for a client, they are included (as before these switches existed).
+const PREMIUM = new Set(["handoff", "smart_patrol", "verified_alarms", "incident_replay", "phone_access"]);
 const FEATURE_LABEL = Object.fromEntries(FEATURES);
 
 function Contact({c}: {c: Record<string, any>}){
@@ -50,8 +54,9 @@ export default async function ClientPage({params}: {params: Promise<{key: string
           // Until "Fly drone from PC" is set for a client, the PC allows flying whenever Drone live is on.
           const live = overrides?.find(e => e.feature_key === "drone_live") ?? defaults?.find(e => e.feature_key === "drone_live");
           const follows = k === "drone_control" && !ov && !def;
-          const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : false);
-          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial}/></p>; })}</article>
+          const included = PREMIUM.has(k) && !ov && !def;
+          const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : included);
+          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial}/></p>; })}</article>
       </section>
       <h2>PCs (Edge Agents)</h2>
       <div className="card tableWrap"><table className="adminTable"><thead><tr><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>
@@ -81,6 +86,7 @@ It can be paired again later with a new code.`}/></div></td></tr>; })}
       <div className="portalActions">
         {c.type === "onprem" && l && <><DownloadLicense license={l}/><Link className="btn" href={"/admin/licenses?renew=" + l.id}>Renew</Link></>}
         {c.orgId && <RenameClient orgId={c.orgId} name={c.org?.name ?? c.name}/>}
+        {c.orgId && <BlockClient orgId={c.orgId} name={c.name} blocked={c.status === "suspended"}/>}
         <Link className="ghost" href={l ? "/admin/licenses?edit=" + l.id : "/admin/licenses?org=" + c.orgId}>{l ? "Edit details" : "Add contact & limits"}</Link>
         {c.type === "onprem" && l ? <RemoveButton rpc="admin_remove_client_license" args={{target_license: l.id}} label="Remove" small={false} goTo="/admin/clients"
             confirmText={`Remove ${c.name} and its licence record from the portal?

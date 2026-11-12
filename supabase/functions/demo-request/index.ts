@@ -7,11 +7,11 @@
 //
 // Secrets (Supabase → Edge Functions → Secrets):
 //   RESEND_API_KEY      key from resend.com; without it requests are only saved, not emailed
-//   DEMO_REQUEST_EMAIL  where the requests go
+//   DEMO_REQUEST_EMAIL  where the requests go; without it, to the super admins' account emails
 //   DEMO_FROM_EMAIL     sender, default "AI Security Command Center <onboarding@resend.dev>" (Resend's test
 //                       sender only delivers to the Resend account's own address; verify a domain to change it)
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import {createClient} from "npm:@supabase/supabase-js@2";
+import {createClient, SupabaseClient} from "npm:@supabase/supabase-js@2";
 
 const origins = new Set(["https://www.aisecuritycommandcenter.com", "https://aisecuritycommandcenter.com",
   "https://ai-security-command-center-saas.vercel.app", "http://localhost:3000"]);
@@ -26,10 +26,23 @@ function cors(req: Request) {
     "Vary": "Origin"};
 }
 
-async function email(r: Record<string, string>, id: string) {
-  const key = (Deno.env.get("RESEND_API_KEY") || "").trim(), to = (Deno.env.get("DEMO_REQUEST_EMAIL") || "").trim();
-  if (!key || !to) {
-    console.warn("demo request not emailed: secret missing:", [!key && "RESEND_API_KEY", !to && "DEMO_REQUEST_EMAIL"].filter(Boolean).join(", "));
+// Where requests go: DEMO_REQUEST_EMAIL, or else the super admins' own account emails.
+async function recipients(admin: SupabaseClient) {
+  const set = (Deno.env.get("DEMO_REQUEST_EMAIL") || "").split(/[,;\s]+/).map(s => s.trim()).filter(s => s.includes("@"));
+  if (set.length) return set;
+  const {data} = await admin.from("super_admins").select("user_id");
+  const out: string[] = [];
+  for (const s of data || []) {
+    const {data: u} = await admin.auth.admin.getUserById(s.user_id);
+    if (u?.user?.email) out.push(u.user.email);
+  }
+  return out;
+}
+
+async function email(admin: SupabaseClient, r: Record<string, string>, id: string) {
+  const key = (Deno.env.get("RESEND_API_KEY") || "").trim(), to = await recipients(admin);
+  if (!key || !to.length) {
+    console.warn("demo request not emailed:", !key ? "secret RESEND_API_KEY missing" : "no recipient (DEMO_REQUEST_EMAIL unset and no super admin email)");
     return false;
   }
   const rows: [string, string][] = [["Name", r.full_name], ["Email", r.email], ["Company", r.company], ["Phone", r.phone],
@@ -41,7 +54,7 @@ async function email(r: Record<string, string>, id: string) {
   const res = await fetch("https://api.resend.com/emails", {method: "POST",
     headers: {"Authorization": `Bearer ${key}`, "Content-Type": "application/json"},
     body: JSON.stringify({from: Deno.env.get("DEMO_FROM_EMAIL") || "AI Security Command Center <onboarding@resend.dev>",
-      to: [to], reply_to: r.email, subject: `Demo request: ${r.full_name}${r.company ? " (" + r.company + ")" : ""}`, html})});
+      to, reply_to: r.email, subject: `Demo request: ${r.full_name}${r.company ? " (" + r.company + ")" : ""}`, html})});
   if (!res.ok) console.error("demo request not emailed: Resend said", res.status, (await res.text()).slice(0, 300));
   else console.log("demo request emailed", id);
   return res.ok;
@@ -67,7 +80,7 @@ Deno.serve(async req => {
     console.error("submit", error.message);
     return reply({error: "Something went wrong. Please try again in a moment."}, 500);
   }
-  try { if (await email(r, id as string)) await admin.from("demo_requests").update({emailed: true}).eq("id", id); }
+  try { if (await email(admin, r, id as string)) await admin.from("demo_requests").update({emailed: true}).eq("id", id); }
   catch (e) { console.error("email", String(e)); }
   return reply({ok: true});
 });

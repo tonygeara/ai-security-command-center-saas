@@ -4,8 +4,10 @@ import {useRouter} from "next/navigation";
 import {createClient} from "../../../lib/supabase/client";
 
 type Lic = Record<string, any>;
-const FEATURES: [string, string][] = [["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","Plate reading (LPR)"],["drone_live","Drone live"],["drone_ai","Drone AI"],["drone_tracking","Drone tracking"],["drone_control","Fly drone from PC"]];
-const DEFAULT_FEATURES = ["camera_ai","face_ai","lpr","drone_live","drone_ai","drone_tracking"];
+const FEATURES: [string, string][] = [["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","Plate reading (LPR)"],["drone_live","Drone live"],["drone_ai","Drone AI"],["drone_tracking","Drone tracking"],["drone_control","Fly drone from PC"],["handoff","Camera-to-drone handoff"],["smart_patrol","Smart patrol"],["verified_alarms","Drone-verified alarms"],["incident_replay","4D incident replay"],["phone_access","Phone access"]];
+// The newer features: a licence record saved before they were listed had them all (nothing could turn them off).
+const PREMIUM = ["handoff","smart_patrol","verified_alarms","incident_replay","phone_access"];
+const DEFAULT_FEATURES = ["camera_ai","face_ai","lpr","drone_live","drone_ai","drone_tracking","handoff","smart_patrol","verified_alarms","incident_replay","phone_access"];
 const inYear = () => { const d = new Date(); d.setFullYear(d.getFullYear() + 1); return d.toISOString().slice(0, 10); };
 const blank = (): Lic => ({edition:"onprem", client_name:"", company:"", location:"", address:"", contact_name:"", phone:"", email:"", notes:"",
   price:"", currency:"USD", billing_period:"yearly", next_payment_date:"", payment_status:"pending", machine_id:"", plan:"on-prem",
@@ -32,7 +34,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
   const counts = {onprem: licenses.filter(l => l.edition === "onprem").length, saas: licenses.filter(l => l.edition === "saas").length,
     expiring: licenses.filter(l => (daysLeft(l.expires_on) ?? 999) <= 30 && l.status === "active").length};
 
-  function edit(l: Lic){ setMsg(""); setForm({...blank(), ...Object.fromEntries(Object.entries(l).map(([k, v]) => [k, v ?? ""])), features: l.features?.length ? l.features : DEFAULT_FEATURES}); }
+  function edit(l: Lic){ setMsg(""); setForm({...blank(), ...Object.fromEntries(Object.entries(l).map(([k, v]) => [k, v ?? ""])), features: l.features?.length ? (l.features.some((f: string) => PREMIUM.includes(f)) ? l.features : [...l.features, ...PREMIUM]) : DEFAULT_FEATURES}); }
   function renew(l: Lic){ edit(l); setForm(f => ({...f!, expires_on: inYear(), renewing: true})); }
   function fromOrg(o: Lic){ setMsg(""); const cam = orgLimit(o.id, "camera_ai"), dr = orgLimit(o.id, "drone_live");
     setForm({...blank(), edition: "saas", client_name: o.name, organization_id: o.id, plan: o.plan_code, cameras: cam?.limit_value ?? 1, drones: dr?.enabled === false ? 0 : (dr?.limit_value ?? 1)}); }

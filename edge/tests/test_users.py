@@ -162,3 +162,86 @@ def test_forgotten_password_reset_from_this_pc(d, signin):
         if os.path.exists(req):
             os.remove(req)
         d._login_fails.clear()
+
+
+@pytest.fixture
+def portal(d):
+    """A fake cloud for one sign-in: tony@x.com is a super admin, eve@x.com an Editor, vic@x.com a Viewer."""
+    wa = d.web_access
+    saved = dict(wa._portal)
+    accounts = {"tony@x.com": ("portal pass 1", "admin"), "eve@x.com": ("editor pass", "operator"), "vic@x.com": ("viewer pass", "viewer")}
+    state = {"online": True, "calls": 0}
+
+    def post(body):
+        state["calls"] += 1
+        if not state["online"]:
+            raise OSError("no internet")
+        a = accounts.get(body["email"])
+        if not a or a[0] != body["password"]:
+            return {"ok": False, "error": "bad_credentials"}
+        if a[1] is None:
+            return {"ok": False, "error": "not_member"}
+        return {"ok": True, "email": body["email"], "role": a[1], "name": ""}
+
+    wa.portal_link("https://cloud.invalid/edge-sync", lambda: "t" * 40, lambda: True, post=post)
+    yield accounts, state
+    wa._portal.update(saved)
+    try:
+        os.remove(wa._portal_file())
+    except OSError:
+        pass
+    d._login_fails.clear()
+
+
+def test_one_signin_with_portal_account(d, signin, portal, monkeypatch):
+    accounts, state = portal
+    monkeypatch.setattr(d.web_access, "REQUIRE_FIRST_ADMIN", True)
+    c = d.app.test_client()
+    # No local account yet: the portal account still gets in, with its portal role.
+    assert "sign in with your portal account" in c.get("/welcome").get_data(as_text=True)
+    page = c.get("/login").get_data(as_text=True)
+    assert "User name or portal email" in page and "same email and password" in page
+    r = c.post("/login", data={"username": "Tony@X.com", "password": "portal pass 1", "next": "/settings"})
+    assert r.status_code == 302 and r.headers["Location"] == "/settings"
+    assert c.get("/settings").status_code == 200 and c.get("/users").status_code == 200  # admin
+    raw = open(d.web_access._portal_file(), encoding="utf-8").read()
+    assert "portal pass 1" not in raw  # only a hash is kept
+
+    viewer, _ = login(d, "vic@x.com", "viewer pass")
+    assert viewer.get("/drone-control").status_code == 200
+    assert viewer.post("/api/drone/command?drone=drone", json={"cmd": "hover"}).status_code == 403
+    _, r = login(d, "eve@x.com", "wrong")
+    assert "Wrong user name or password" in r.get_data(as_text=True)
+    d._login_fails.clear()
+
+    # Internet down: the last checked password still works on this PC; a wrong one doesn't.
+    state["online"] = False
+    c2, r = login(d, "vic@x.com", "viewer pass")
+    assert r.status_code == 302 and c2.get("/drone-control").status_code == 200
+    _, r = login(d, "vic@x.com", "guess")
+    assert "Can't reach the portal" in r.get_data(as_text=True)
+    _, r = login(d, "eve@x.com", "editor pass")  # never signed in here before
+    assert "Can't reach the portal" in r.get_data(as_text=True)
+    d._login_fails.clear()
+
+    # Removed from the company in the portal: the next check forgets it, and its sessions end.
+    state["online"] = True
+    accounts["vic@x.com"] = ("viewer pass", None)
+    _, r = login(d, "vic@x.com", "viewer pass")
+    assert "doesn't belong to the company" in r.get_data(as_text=True)
+    assert viewer.get("/drone-control").status_code == 302  # signed out
+    d._login_fails.clear()
+
+    # Local accounts keep working beside portal ones.
+    assert c.post("/api/users", json={"username": "boss", "password": "correct horse", "role": "admin"}).get_json()["ok"]
+    _, r = login(d, "boss", "correct horse")
+    assert r.status_code == 302
+
+
+def test_portal_signin_off_when_not_paired(d, signin, portal):
+    d.web_access.portal_link("https://cloud.invalid/edge-sync", lambda: "", lambda: True, post=lambda b: {"ok": True, "role": "admin"})
+    d.app.test_client().post("/api/users", json={"username": "boss", "password": "correct horse", "role": "admin"})
+    c = d.app.test_client()
+    assert "isn't paired with the portal" in c.get("/login").get_data(as_text=True)
+    _, r = login(d, "tony@x.com", "portal pass 1")
+    assert r.status_code == 200 and "Wrong user name or password" in r.get_data(as_text=True)

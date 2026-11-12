@@ -58,3 +58,18 @@ export function RenameClient({orgId, name}: {orgId: string; name: string}){
     <button className="btn small" disabled={busy}>Save</button><button type="button" className="ghost small" onClick={() => { setValue(name); setEditing(false); }}>Cancel</button>
   </form>;
 }
+
+export function BlockClient({orgId, name, blocked}: {orgId: string; name: string; blocked: boolean}){
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  async function flip(){
+    const text = blocked
+      ? `Unblock ${name}?\n\nTheir account becomes active, their PCs can connect again and their users can sign in.`
+      : `Block ${name}?\n\nAt once: their account is suspended (every feature off on their PCs), every PC is switched off and refused by the cloud, and none of their users can sign in. You can unblock at any time.`;
+    if (!confirm(text)) return;
+    setBusy(true);
+    try { await rpc("admin_block_organization", {target_org: orgId, blocked: !blocked}); router.refresh(); }
+    catch (e) { alert((e as Error).message); } finally { setBusy(false); }
+  }
+  return <button className={blocked ? "btn" : "ghost danger"} disabled={busy} onClick={flip}>{busy ? "Saving…" : blocked ? "Unblock client" : "Block client"}</button>;
+}

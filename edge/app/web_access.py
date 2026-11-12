@@ -3,9 +3,13 @@
 Part of the dashboard (registered by dashboard.py with setup()); the role rules are in users.py.
 """
 import ipaddress
+import json
 import os
+import secrets
 import time
 import urllib.parse
+
+from werkzeug.security import check_password_hash, generate_password_hash
 
 from flask import Blueprint, Response, g, jsonify, redirect, request, session
 
@@ -25,6 +29,100 @@ REQUIRE_FIRST_ADMIN = True
 _login_fails = {}
 
 
+# One sign-in: portal accounts (email + password) also open this dashboard on a paired PC. The cloud
+# (edge-sync "signin") checks the password and the account's place in this PC's company; the role comes
+# from the portal (super admin / Admin -> admin, Editor -> operator, Viewer -> viewer). A checked
+# sign-in is remembered (password hash only) so it keeps working for PORTAL_OFFLINE_DAYS while the
+# internet is down; a "no" from the cloud forgets it at once.
+PORTAL_OFFLINE_DAYS = 7
+_portal = {"url": "", "token": lambda: "", "enabled": lambda: False, "post": None}
+PORTAL_ERRORS = {"bad_credentials": "Wrong user name or password.",
+                 "blocked": "This portal account is blocked. Ask your provider.",
+                 "must_change_password": "Choose your own password in the portal first (sign in there once), then sign in here.",
+                 "not_member": "This portal account doesn't belong to the company this PC is paired with."}
+
+
+def portal_link(url, token_fn, enabled_fn, post=None):
+    """Called by dashboard.py: where the cloud is, this PC's device token, whether portal sign-in is on."""
+    _portal.update(url=url, token=token_fn, enabled=enabled_fn, post=post)
+
+
+def portal_available():
+    try:
+        return bool(_portal["enabled"]() and _portal["token"]())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _portal_file():
+    return os.path.join(DATA_FOLDER, "portal_users.json")
+
+
+def _portal_load():
+    try:
+        with open(_portal_file(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _portal_save(data):
+    tmp = _portal_file() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    os.replace(tmp, _portal_file())
+
+
+def _portal_ask(email, password):
+    """The cloud's answer, or None when it can't be reached."""
+    body = {"action": "signin", "email": email, "password": password}
+    try:
+        if _portal["post"]:
+            return _portal["post"](body)
+        import requests
+        r = requests.post(_portal["url"], json=body, headers={"x-device-token": _portal["token"]()}, timeout=15)
+        if r.status_code >= 500 or r.status_code == 401:
+            return None if r.status_code >= 500 else {"ok": False, "error": "unpaired"}
+        return r.json()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def portal_signin(email, password):
+    """(user, error). Checks with the cloud; falls back to a recent successful sign-in when offline."""
+    email = str(email or "").strip().lower()
+    cache = _portal_load()
+    answer = _portal_ask(email, password)
+    if answer is None:  # offline: the last checked password, for a few days
+        c = cache.get(email)
+        if c and time.time() - c.get("verified", 0) < PORTAL_OFFLINE_DAYS * 86400 and \
+                check_password_hash(c.get("hash", ""), str(password or "")):
+            return {"username": email, "role": c["role"], "stamp": c["stamp"], "portal": True}, ""
+        return None, "Can't reach the portal to check this account. Try again, or use a local account of this PC."
+    if not answer.get("ok"):
+        if cache.pop(email, None) is not None:
+            _portal_save(cache)
+        if answer.get("error") == "unpaired":
+            return None, "This PC isn't paired with the portal, so portal accounts can't sign in here."
+        return None, PORTAL_ERRORS.get(answer.get("error"), "Wrong user name or password.")
+    role = answer.get("role") if answer.get("role") in ("admin", "operator", "viewer") else "viewer"
+    old = cache.get(email) or {}
+    keep = old.get("role") == role and check_password_hash(old.get("hash", ""), str(password))
+    cache[email] = {"role": role, "name": str(answer.get("name") or "")[:120], "verified": time.time(),
+                    "hash": old["hash"] if keep else generate_password_hash(str(password)),
+                    "stamp": old["stamp"] if keep and old.get("stamp") else secrets.token_hex(4)}
+    _portal_save(cache)
+    return {"username": email, "role": role, "stamp": cache[email]["stamp"], "portal": True}, ""
+
+
+def _portal_user(email, stamp):
+    c = _portal_load().get(email)
+    if not c or c.get("stamp") != stamp or time.time() - c.get("verified", 0) > PORTAL_OFFLINE_DAYS * 86400:
+        return None
+    return {"username": email, "role": c["role"], "stamp": c["stamp"], "portal": True}
+
+
 def setup(app, data_folder, hud_page_fn):
     global hud_page, DATA_FOLDER, USERS_FILE
     hud_page, DATA_FOLDER = hud_page_fn, data_folder
@@ -34,8 +132,11 @@ def setup(app, data_folder, hud_page_fn):
 
 def current_user():
     """The signed-in user, or None (also None while sign-in is off)."""
+    name = str(session.get("user") or "")
+    if name.startswith("portal:"):
+        return _portal_user(name[7:], session.get("stamp"))
     users = user_accounts.load(USERS_FILE)
-    u = user_accounts.find(users, session.get("user")) if users else None
+    u = user_accounts.find(users, name) if users else None
     return u if u and session.get("stamp") == u.get("stamp") else None
 
 
@@ -65,7 +166,12 @@ FIRST_RUN_PATHS = ("/welcome", "/hud.css")
 def welcome_page():
     if user_accounts.load(USERS_FILE):
         return redirect("/")
-    return Response(hud_page("Create the admin account", WELCOME_PAGE, nav=False), mimetype="text/html")
+    body = WELCOME_PAGE
+    if portal_available():
+        body = body.replace('<div id="msg" class="hud-msg"></div>', '<div id="msg" class="hud-msg"></div>'
+                            '<p class="muted" style="margin-top:12px">Or <a href="/login">sign in with your portal account</a> '
+                            '(same email and password as on the website).</p>', 1)
+    return Response(hud_page("Create the admin account", body, nav=False), mimetype="text/html")
 
 
 @bp.before_app_request
@@ -79,12 +185,15 @@ def _require_sign_in():
                 any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")) or \
                 (path == "/api/users" and request.method == "POST"):
             return None
-        if path.startswith("/api/"):
-            return jsonify({"ok": False, "error": "Create the admin account first (open the dashboard)."}), 401
-        return redirect("/welcome")
-    if path in user_accounts.OPEN_PATHS or any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")):
+        g.user = current_user()  # a portal account (one sign-in) may be signed in before any local account exists
+        if not g.user:
+            if path.startswith("/api/"):
+                return jsonify({"ok": False, "error": "Create the admin account first (open the dashboard)."}), 401
+            return redirect("/welcome")
+    elif path in user_accounts.OPEN_PATHS or any(path.startswith(p) for p in user_accounts.OPEN_PATHS if p.endswith("/")):
         return None
-    g.user = current_user()
+    else:
+        g.user = current_user()
     if not g.user:
         if path.startswith("/api/"):
             return jsonify({"ok": False, "error": "Sign in first."}), 401
@@ -125,13 +234,15 @@ LOGIN_PAGE = r"""
 <section class="panel"><div class="panel-body">
 <form method="post">
 <input type="hidden" name="next" value="__NEXT__">
-<label for="u">User name</label><input id="u" name="username" autocomplete="username" autofocus required>
+<label for="u">__ULABEL__</label><input id="u" name="username" autocomplete="username" autofocus required>
 <label for="pw" style="margin-top:10px">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required>
 <div class="actions" style="margin-top:14px"><button class="hud-btn primary" type="submit">Sign in</button></div>
 <div class="hud-msg bad" style="__ERRSTYLE__">__ERR__</div>
 </form>__RESET__</div></section></main>"""
-FORGOT = ('<p class="muted" style="margin-top:14px;font-size:13px">Forgot the password? On this PC open '
-          f'<b>Start → {PRODUCT_NAME} - Reset sign-in</b>. The dashboard uses its own user names, not your portal email.</p>')
+FORGOT = ('<p class="muted" style="margin-top:14px;font-size:13px">Forgot the password of an account of this PC? On this PC open '
+          f'<b>Start → {PRODUCT_NAME} - Reset sign-in</b>.__PORTALNOTE__</p>')
+PORTAL_NOTE = " Portal accounts sign in here with the same email and password as on the website."
+LOCAL_NOTE = " This PC isn't paired with the portal, so use an account of this PC (not your portal email)."
 RESET_READY = ('<div class="hud-msg" style="margin-top:14px">A sign-in reset was requested on this PC. '
                '<a class="hud-btn primary" href="/reset-signin">Choose a new password</a></div>')
 
@@ -141,7 +252,7 @@ def login_page():
     nxt = request.values.get("next") or "/"
     if not nxt.startswith("/") or nxt.startswith("//"):
         nxt = "/"
-    if not user_accounts.load(USERS_FILE):
+    if not user_accounts.load(USERS_FILE) and not portal_available():
         return redirect("/welcome" if REQUIRE_FIRST_ADMIN else "/users")
     err = ""
     if request.method == "POST":
@@ -150,19 +261,33 @@ def login_page():
         if len(fails) >= 5:
             err = "Too many wrong tries. Wait 5 minutes."
         else:
-            u = user_accounts.authenticate(USERS_FILE, request.form.get("username"), request.form.get("password"))
+            name, pw = request.form.get("username") or "", request.form.get("password")
+            u = user_accounts.authenticate(USERS_FILE, name, pw)
+            portal_err = ""
+            if not u and "@" in name and portal_available() and \
+                    not user_accounts.find(user_accounts.load(USERS_FILE), name):
+                u, portal_err = portal_signin(name, pw)
             if u:
                 session.clear()
                 session.permanent = True
-                session.update(user=u["username"], stamp=u.get("stamp"))
+                session.update(user=("portal:" if u.get("portal") else "") + u["username"], stamp=u.get("stamp"))
                 _login_fails.pop(ip, None)
+                try:
+                    import web_records
+                    if u.get("portal"):
+                        web_records.audit_record("signed in with a portal account", target=u["username"], user=u["username"],
+                                                 detail={"role": u["role"]})
+                except Exception:  # noqa: BLE001
+                    pass
                 return redirect(nxt)
             time.sleep(1)
             _login_fails[ip] = fails + [time.time()]
-            err = "Wrong user name or password."
+            err = portal_err or "Wrong user name or password."
     body = (LOGIN_PAGE.replace("__NEXT__", html_escape(nxt)).replace("__ERR__", html_escape(err))
             .replace("__ERRSTYLE__", "" if err else "display:none")
-            .replace("__RESET__", RESET_READY if reset_requested() else FORGOT))
+            .replace("__RESET__", RESET_READY if reset_requested() else FORGOT)
+            .replace("__PORTALNOTE__", PORTAL_NOTE if portal_available() else LOCAL_NOTE)
+            .replace("__ULABEL__", "User name or portal email" if portal_available() else "User name"))
     return Response(hud_page("Sign in", body, nav=False), mimetype="text/html")
 
 
@@ -252,7 +377,7 @@ def logout_page():
 USERS_PAGE = r"""
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Access</div><h1 class="page-title">Users &amp; roles</h1>
-<div class="page-sub">Who can use this dashboard. <b>Viewer</b>: watches live video, events and maps. <b>Operator</b>: also flies drones, routes and drone responses. <b>Admin</b>: everything, including setup, licences, no-fly zones and users.</div></div></div>
+<div class="page-sub">Who can use this dashboard. <b>Viewer</b>: watches live video, events and maps. <b>Operator</b>: also flies drones, routes and drone responses. <b>Admin</b>: everything, including setup, licences, no-fly zones and users. On a PC paired with the portal, the company's portal accounts also sign in here with their email (portal Admin = Admin, Editor = Operator, Viewer = Viewer); manage those in the portal.</div></div></div>
 <section class="panel"><div class="panel-body">
 <div id="firstNote" class="hud-msg" style="display:none">Sign-in is <b>off</b>: anyone at this PC can use everything. Create the first user below (an admin) to turn it on; you will be signed in as that user.</div>
 <div id="userList"></div>

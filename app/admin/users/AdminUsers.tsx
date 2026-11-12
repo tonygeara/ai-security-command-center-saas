@@ -46,12 +46,19 @@ export default function AdminUsers({rows, clients}: {rows: Row[]; clients: {orgI
   }
   const confirmRun = (key: string, label: string, body: Record<string, unknown>, who = "") => arm === key ? run(label, body, who) : setArm(key);
 
-  // one line per account, with all the companies it belongs to
+  // Grouped as the business works: super admins, then each client with its Admins first, then its Editors and Viewers.
+  const RANK: Record<string, number> = {owner: 0, admin: 0, member: 1, viewer: 2};
   const people = useMemo(() => {
-    const m = new Map<string, Row & {orgs: Row[]}>();
-    for (const r of rows) { const p = m.get(r.user_id) ?? {...r, orgs: []}; if (r.organization_id) p.orgs.push(r); m.set(r.user_id, p); }
+    const m = new Map<string, Row & {orgs: Row[]; group: string; rank: number}>();
+    for (const r of rows) {
+      const p = m.get(r.user_id) ?? {...r, orgs: [], group: "", rank: 9};
+      if (r.organization_id) { p.orgs.push(r); p.group ||= r.organization_name || ""; p.rank = Math.min(p.rank, RANK[r.role ?? ""] ?? 3); }
+      m.set(r.user_id, p);
+    }
     const s = q.trim().toLowerCase();
-    return [...m.values()].filter(p => !s || [p.email, p.full_name, ...p.orgs.map(o => o.organization_name)].join(" ").toLowerCase().includes(s));
+    return [...m.values()]
+      .filter(p => !s || [p.email, p.full_name, ...p.orgs.map(o => o.organization_name)].join(" ").toLowerCase().includes(s))
+      .sort((a, b) => (a.group ? 1 : 0) - (b.group ? 1 : 0) || a.group.localeCompare(b.group) || a.rank - b.rank || a.email.localeCompare(b.email));
   }, [rows, q]);
 
   return <>
@@ -61,7 +68,13 @@ export default function AdminUsers({rows, clients}: {rows: Row[]; clients: {orgI
     {msg && <p className={bad ? "locked" : "ok"} role="status">{msg}</p>}
     <div className="clientTools"><input className="search" placeholder="Search name, email or client…" value={q} onChange={e => setQ(e.target.value)}/></div>
     <div className="card tableWrap"><table className="adminTable"><thead><tr><th>User</th><th>Client & role</th><th>Last sign-in</th><th>Actions</th></tr></thead><tbody>
-      {people.map(p => { const a = acc[p.user_id], mine = p.user_id === me; return <tr key={p.user_id}>
+      {people.map((p, i) => { const a = acc[p.user_id], mine = p.user_id === me;
+        const head = i === 0 || people[i - 1].group !== p.group;
+        return [head && <tr key={"g" + p.group} className="groupRow"><td colSpan={4}>{p.group
+          ? <>{p.orgs[0]?.client_key ? <Link href={"/admin/clients/" + p.orgs[0].client_key}><b>{p.group}</b></Link> : <b>{p.group}</b>}
+              <span className="muted"> · Admins, then their Editors and Viewers</span></>
+          : <><b>Super admins and accounts without a client</b><span className="muted"> · full control of every client</span></>}</td></tr>,
+        <tr key={p.user_id}>
         <td>{edit?.user_id === p.user_id ? <form className="inlineEdit" onSubmit={e => { e.preventDefault();
             void run(`${edit.email} saved.`, {action: "account_update", user_id: p.user_id, email: edit.email, full_name: edit.full_name}).then(ok => ok && setEdit(null)); }}>
             <input value={edit.full_name} placeholder="Full name" onChange={e => setEdit({...edit, full_name: e.target.value})}/>
@@ -81,7 +94,7 @@ export default function AdminUsers({rows, clients}: {rows: Row[]; clients: {orgI
           <button className="ghost" disabled={busy || !a} onClick={() => confirmRun("s" + p.user_id, `${p.email} ${a?.super ? "is no longer" : "is now"} a super admin.`, {action: "account_super", user_id: p.user_id, on: !a?.super})}>
             {arm === "s" + p.user_id ? "Click again to confirm" : a?.super ? "Remove super admin" : "Make super admin"}</button>
           <button className="ghost danger" disabled={busy} onClick={() => confirmRun("d" + p.user_id, `${p.email} deleted.`, {action: "account_delete", user_id: p.user_id})}>
-            {arm === "d" + p.user_id ? "Click again to delete" : "Delete account"}</button></div>}</td></tr>; })}
+            {arm === "d" + p.user_id ? "Click again to delete" : "Delete account"}</button></div>}</td></tr>]; })}
       {!people.length && <tr><td colSpan={4} className="muted">No users match.</td></tr>}
     </tbody></table></div>
     <p className="muted">{people.length} account{people.length === 1 ? "" : "s"}. Role changes for a company&apos;s users are on that client&apos;s page.</p>

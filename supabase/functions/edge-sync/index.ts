@@ -4,6 +4,10 @@
 //   {action:"photo", local_id, jpeg}                        an incident's snapshot (base64 JPEG)
 //   {action:"poll"}                                         -> {live:[{id, camera, seconds_left}]}
 //   {action:"live", request_id, camera, jpeg}               the latest live picture for a request
+//   {action:"signin", email, password}                      one sign-in: is this portal account allowed on this PC?
+//        -> {ok, email, name, role: admin|operator|viewer}  (super admin and company Admin -> admin,
+//           Editor -> operator, Viewer -> viewer) or {ok:false, error: bad_credentials|blocked|
+//           must_change_password|not_member}
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import {createClient} from "npm:@supabase/supabase-js@2";
 
@@ -31,6 +35,28 @@ Deno.serve(async req => {
   if (error || !d || d.status === "disabled") return json({error: "unauthorized"}, 401);
   const org = d.organization_id as string, dev = d.id as string;
   const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+
+  if (body.action === "signin") {
+    const email = str(body.email, 200).trim().toLowerCase(), password = str(body.password, 200);
+    if (!email.includes("@") || !password) return json({ok: false, error: "bad_credentials"});
+    const anon = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_ANON_KEY")!, {auth: {persistSession: false}});
+    const {data: s, error: e} = await anon.auth.signInWithPassword({email, password});
+    if (e || !s?.user) return json({ok: false, error: /banned/i.test(e?.message || "") ? "blocked" : "bad_credentials"});
+    const uid = s.user.id;
+    await anon.auth.signOut({scope: "local"}).catch(() => {});  // only this check, never their other sessions
+    if (s.user.user_metadata?.must_change_password) return json({ok: false, error: "must_change_password"});
+    const {data: sa} = await admin.from("super_admins").select("user_id").eq("user_id", uid).maybeSingle();
+    let role: string | null = sa ? "admin" : null;
+    if (!role) {
+      const {data: m} = await admin.from("organization_members").select("role").eq("organization_id", org).eq("user_id", uid).maybeSingle();
+      role = m ? ({owner: "admin", admin: "admin", member: "operator", viewer: "viewer"} as Record<string, string>)[m.role] ?? null : null;
+    }
+    if (!role) return json({ok: false, error: "not_member"});
+    const {data: p} = await admin.from("profiles").select("full_name").eq("id", uid).maybeSingle();
+    await admin.from("audit_logs").insert({organization_id: org, actor_user_id: uid, action: "pc_signin", target_type: "edge_device",
+      target_id: dev, metadata: {email, role, super_admin: !!sa}});
+    return json({ok: true, email, name: p?.full_name || "", role});
+  }
 
   if (body.action === "incidents") {
     const list = Array.isArray(body.incidents) ? body.incidents.slice(0, 25) : [];

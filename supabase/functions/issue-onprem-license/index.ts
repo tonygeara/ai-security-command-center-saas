@@ -53,6 +53,7 @@ Deno.serve(async (req: Request) => {
       expires,
       plan: text(body.plan, 40) || "on-prem",
       features,
+      feature_set: 2,  // the newer features are listed: the PC only allows the ones ticked
       limits: {cameras, drones},
     };
     const document = await signLicense(payload, pem);

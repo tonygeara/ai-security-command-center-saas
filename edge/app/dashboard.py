@@ -163,7 +163,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.8.1"
+APP_VERSION = "V11.9.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2298,6 +2298,7 @@ def cloud_status_snapshot():
     data["face_ai_allowed"] = cloud_feature_enabled("face_ai")
     data["lpr_allowed"] = cloud_feature_enabled("lpr")
     data["drone_live_allowed"] = cloud_feature_enabled("drone_live")
+    data["premium"] = {k: premium_allowed(k) for k in PREMIUM_FEATURES}
     data["drone_tracking_allowed"] = cloud_feature_enabled("drone_tracking")
     return data
 
@@ -4762,6 +4763,28 @@ def drone_control_allowed():
     return cloud_feature_enabled("drone_control" if explicit else "drone_live")
 
 
+# Newer features the provider can switch on or off per client licence (admin portal → client → Feature access,
+# or the on-prem licence's feature list). A cloud account never given the setting, or an on-prem licence issued
+# before these were listed (no "feature_set" 2), keeps them all, as before.
+PREMIUM_FEATURES = ("handoff", "smart_patrol", "verified_alarms", "incident_replay", "phone_access")
+
+
+def premium_allowed(key):
+    if onprem_mode():
+        payload = offline_license.get("payload") or {}
+        return key in set(payload.get("features") or []) if int(payload.get("feature_set") or 1) >= 2 else True
+    with cloud_lock:
+        explicit = key in (cloud_state.get("features") or {})
+        status = str(cloud_state.get("organization_status") or "unknown").lower()
+    if status not in ("unknown", "active", "trial"):
+        return False  # suspended or cancelled in the portal: everything is off
+    return cloud_feature_enabled(key) if explicit else True
+
+
+def premium_refused(key, label):
+    return f"{label} isn't included in this PC's licence. Ask your provider to switch it on."
+
+
 def _token_file(slot):
     return DRONE_LINK_TOKEN_FILE if slot in (None, DRONE_CAMERA_NAME) else f"{DRONE_LINK_TOKEN_FILE}_{slot}"
 
@@ -5547,12 +5570,19 @@ def load_response_settings():
     legacy = _load_customer_settings() if "_load_customer_settings" in globals() else {}
     if CAMERA_NAME not in cfg["camera_locations"] and isinstance(legacy.get("camera_latitude"), (int, float)) and isinstance(legacy.get("camera_longitude"), (int, float)):
         cfg["camera_locations"] = {**cfg["camera_locations"], CAMERA_NAME: {"lat": legacy["camera_latitude"], "lon": legacy["camera_longitude"]}}
+    # A feature the licence no longer includes is off, whatever was saved.
+    for k in ("handoff", "smart_patrol", "verified_alarms"):
+        if cfg.get(k) and not premium_allowed(k):
+            cfg[k] = False
     return cfg
 
 
 def save_response_settings(data):
     cfg = load_response_settings()
     data = dict(data)
+    for k, label in (("handoff", "Camera-to-drone handoff"), ("smart_patrol", "Smart patrol"), ("verified_alarms", "Drone-verified alarms")):
+        if data.get(k) is True and not premium_allowed(k):
+            raise ValueError(premium_refused(k, label))
     if data.get("webhook_secret") == _alarm_verify_mod.SECRET_MASK:
         data.pop("webhook_secret")  # shown masked on the page: keep the saved one
     if any(k in data for k in _alarm_verify_mod.DEFAULTS):
@@ -7932,12 +7962,17 @@ def maps_embed_page():
 # ---------------- 4D incident replay ----------------
 @app.route("/incidents/<int:inc_id>/replay")
 def incident_replay_page(inc_id):
+    if not premium_allowed("incident_replay"):
+        return Response(hud_page("Incident replay", '<main class="hud-main"><h1 class="page-title">4D replay</h1><p class="muted">'
+                                 + premium_refused("incident_replay", "4D incident replay") + '</p></main>'), status=403, mimetype="text/html")
     return Response(REPLAY_PAGE, mimetype="text/html")
 
 
 @app.route("/api/incidents/<int:inc_id>/replay")
 def api_incident_replay(inc_id):
     """Everything the replay needs: timeline, pictures, the drone's track, cameras and their views, the site."""
+    if not premium_allowed("incident_replay"):
+        return jsonify({"ok": False, "error": premium_refused("incident_replay", "4D incident replay")}), 403
     INCIDENTS.close_stale()
     inc = INCIDENTS.get(inc_id)
     if not inc:
@@ -9353,10 +9388,14 @@ def _start_v105_recovery():
 # ---------------- Phone access through the cloud (cloud_sync.py) ----------------
 import cloud_sync as _cloud_sync_mod
 EDGE_SYNC_URL = CLOUD_CONTROL_URL.rsplit("/", 1)[0] + "/edge-sync"
+# One sign-in: portal accounts of this PC's company can sign in to this dashboard (web_access.portal_signin).
+web_access.portal_link(EDGE_SYNC_URL, lambda: str(load_edge_agent_config().get("device_token") or "").strip(),
+                       lambda: edition.EDITION != "onprem" and not onprem_mode())
 
 
 def _cloud_sync_enabled():
-    return (edition.EDITION != "onprem" and not onprem_mode() and bool(_load_customer_settings().get("cloud_incidents")))
+    return (edition.EDITION != "onprem" and not onprem_mode() and bool(_load_customer_settings().get("cloud_incidents"))
+            and premium_allowed("phone_access"))
 
 
 def _event_file(snapshot):
