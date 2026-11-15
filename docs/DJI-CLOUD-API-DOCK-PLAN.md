@@ -1,6 +1,7 @@
 # DJI Cloud API: Dock support (plan)
 
-Status: **Phases 1 and 2 built, Phase 3 planned** (decided 15 November 2026; not merged yet). Drone Link (phone + RC-N1) stays as it is;
+Status: **Phases 1-5 built** (15 November 2026), in V11.10.0 (pull request, not merged yet). Next: the supervised first
+flight, `docs/DOCK-FIRST-FLIGHT.md`. Drone Link (phone + RC-N1) stays as it is;
 docks are added next to it as a new kind of drone slot.
 
 Done so far (not merged yet): `edge/app/dock.py` (broker files, hub, MQTT client, Pilot 2 setup page on LAN
@@ -196,11 +197,21 @@ the most valuable for security), then 3b (schedules, mostly wiring). Each step e
 commit; nothing flies on real hardware until you've done the first supervised test flight.
 
 ### Phase 4: live control from the dashboard
+Status: **built**. Fly to a point (map click; range and no-fly checks, detours; pauses the route, holds there),
+DRC sticks on the dock broker (neutral after 0.4 s without input, heartbeat every second, ends after 60 s idle; Return
+to dock ends it first), photo, record, gimbal down/level. `POST /api/docks/<sn>/control`, `/sticks` (operators).
+
 - DRC (drone remote control) mode over MQTT: keyboard/stick control, gimbal, photo/record and fly-to-point
   from the existing Drone page controls, with the same STOP = hover behaviour and limits as Drone Link.
 - Take control / give back control, and the pilot-on-RC override where present.
 
 ### Phase 5: media
+Status: **built**, without MinIO: `edge/app/dock_media.py` is a small S3-compatible receiver (LAN port 8769, AWS
+Signature V4 with keys made on the PC, single and multipart uploads; tested with boto3). `storage_config_get` points the
+dock at it; `file_upload_callback` lists the file (dock-media/index.json); Drone page gallery; kept 30 days; an alarm
+launch's first photo goes to Telegram and the incident. To check on hardware: that the dock accepts an empty STS
+security token with provider "minio".
+
 - Photos/videos from missions: the dock uploads to S3-compatible storage with temporary credentials.
   Plan: a local **MinIO** on the edge PC (both editions); optional copy to the cloud later.
   To check: whether Supabase Storage's S3 endpoint can serve the dock's credential request; otherwise keep

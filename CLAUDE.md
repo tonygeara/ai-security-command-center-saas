@@ -53,8 +53,9 @@ Google Docs connector isn't available in the session, say so and list the change
   licence switch and dock count; not merged yet). Supabase part already live (set_feature_override accepts
   drone_dock, client_licenses.docks, issue-onprem-license/edge-agent-control redeployed). Phase 2 (dock live
   video into the AI), Phase 3a (fly a saved route from a dock) and 3c (alarm launches, ask-first) also built
-  there, and 3b (scheduled patrols / Smart patrol from a dock): Phase 3 complete. Next: supervised first flight on
-  real hardware, then Phase 4 (live control) and 5 (media). Nothing flies on a real dock before a supervised first flight.
+  there, and 3b (scheduled patrols / Smart patrol from a dock), Phase 4 (live control) and 5 (photos/videos on the
+  PC). Version bumped to **V11.10.0** with releases/V11.10.md; pull request open, not merged (merging publishes the
+  installers). Next: the supervised first flight, `docs/DOCK-FIRST-FLIGHT.md`. Nothing flies on a real dock before a supervised first flight.
 - Open items are the improvements list in the Capabilities doc (next: confirm client creation live,
   test with real equipment, leaked-password protection in Supabase, alerts when something breaks,
   automatic backups).
