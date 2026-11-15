@@ -36,10 +36,16 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (15 November 2026)
 
-- Released: Edge **V11.9.0** (one sign-in with portal accounts, every feature a per-client licence switch,
-  Block/Unblock client, Users grouped by client, Windows settings-save retry). Installers rebuilt on
-  15 Nov with the client install guides. Website: demo request form (emails via Resend to the super
-  admins), no public sign-in/sign-up links (`/login` still works).
+- Released: Edge **V11.10.0** (15 Nov, release `edge-v11.10.0`): **DJI Docks** through DJI Cloud API, Phases 1-5
+  (registration, health alerts, live video into the AI, route flights, alarm launches with Launch/Don't, scheduled
+  patrols, live control, photos/videos saved on the PC), next to Drone Link. Off per client until the **DJI Docks**
+  licence switch and a dock count are set (Supabase part live since 15 Nov). Plan and details:
+  `docs/DJI-CLOUD-API-DOCK-PLAN.md`. **Not yet flown on a real dock**: do the supervised first flight in
+  `docs/DOCK-FIRST-FLIGHT.md` before switching docks on for a client, and fix what it finds (DJI codes, flight plan
+  format in `edge/app/dock_wayline.py`, STS token for media).
+- Before that: V11.9.0 (one sign-in with portal accounts, every feature a per-client licence switch, Block/Unblock
+  client, Users grouped by client, Windows settings-save retry). Website: demo request form (emails via Resend to the
+  super admins), no public sign-in/sign-up links (`/login` still works).
 - Roles: super admin (owner) > client Admin (manages own Editors/Viewers within the licence's user
   limit) > Editor / Viewer. Super admin manages everything in Admin (Clients, Licences, Devices, Users,
   Demo requests).
@@ -47,15 +53,7 @@ Google Docs connector isn't available in the session, say so and list the change
   https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
-- Decided 15 Nov: add **DJI Cloud API for Docks** (plan and progress: `docs/DJI-CLOUD-API-DOCK-PLAN.md`),
-  with the MQTT broker on the edge PC; Drone Link (phone + RC-N1) stays as it is next to it. Phase 1 started on
-  branch `claude/peaceful-euler-el4qcf`, now complete (registration, fleet bar and map, health alerts, `drone_dock`
-  licence switch and dock count; not merged yet). Supabase part already live (set_feature_override accepts
-  drone_dock, client_licenses.docks, issue-onprem-license/edge-agent-control redeployed). Phase 2 (dock live
-  video into the AI), Phase 3a (fly a saved route from a dock) and 3c (alarm launches, ask-first) also built
-  there, and 3b (scheduled patrols / Smart patrol from a dock), Phase 4 (live control) and 5 (photos/videos on the
-  PC). Version bumped to **V11.10.0** with releases/V11.10.md; pull request open, not merged (merging publishes the
-  installers). Next: the supervised first flight, `docs/DOCK-FIRST-FLIGHT.md`. Nothing flies on a real dock before a supervised first flight.
-- Open items are the improvements list in the Capabilities doc (next: confirm client creation live,
+- Decided 15 Nov: **DJI Cloud API for Docks** with the MQTT broker on the edge PC; Drone Link (phone + RC-N1) stays.
+- Open items are the improvements list in the Capabilities doc (next: the supervised first dock flight, confirm client creation live,
   test with real equipment, leaked-password protection in Supabase, alerts when something breaks,
   automatic backups).
