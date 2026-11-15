@@ -168,6 +168,15 @@ class DockStore:
         self.save()
         return docks[sn]
 
+    def real_docks(self):
+        """Registered real docks, oldest first (simulated docks are for testing and don't count)."""
+        docks = self.data["docks"]
+        return sorted((sn for sn, d in docks.items() if not d.get("simulated")), key=lambda sn: docks[sn].get("registered_at") or 0)
+
+    def over_limit(self, limit):
+        """Real docks beyond the licence's dock count (the newest ones), e.g. after the licence was lowered."""
+        return set() if limit is None else set(self.real_docks()[max(0, int(limit)):])
+
     def rename(self, sn, name):
         d = self.data["docks"].get(sn)
         if not d:
@@ -381,6 +390,7 @@ class DockHealth:
         self.current = {}                 # (sn, key) -> alert
         self.log = collections.deque(maxlen=50)
         self.lock = threading.Lock()
+        self.skip = lambda: set()         # docks not watched (over the licence's dock count)
 
     def _conditions(self, sn, x, name):
         """{key: (level, text)} of what is wrong now, using the previous state for the "back" thresholds."""
@@ -419,7 +429,8 @@ class DockHealth:
 
     def check(self):
         changes, now = [], self.hub.now()
-        registered = self.hub.store.docks()
+        skip = self.skip()
+        registered = {sn: d for sn, d in self.hub.store.docks().items() if sn not in skip}
         with self.lock:
             live = set()
             for sn, d in registered.items():

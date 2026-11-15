@@ -5491,6 +5491,7 @@ DOCK_SIM_MAX = 3
 _dock_status = {"pilot_page": ""}
 # Health alerts: DJI's own message texts are used when DJI's hms.json is put in the data folder; otherwise the code.
 dock_health = dock_lib.DockHealth(dock_hub, dock_lib.load_hms_text(os.path.join(DATA_FOLDER, "hms.json")))
+dock_health.skip = lambda: _docks_over_limit()
 DOCK_HEALTH_SECONDS = 5
 
 
@@ -5527,6 +5528,25 @@ def _dock_licensed():
     if onprem_mode():
         return "drone_dock" in set((offline_license.get("payload") or {}).get("features") or [])
     return cloud_feature_enabled("drone_dock")
+
+
+def dock_limit():
+    """How many real DJI Docks this PC may register: the client's drone_dock limit (portal licence form) or the on-prem
+    licence's limits.docks. None = no number set (no cap). Simulated docks don't count."""
+    if onprem_mode():
+        limits = (offline_license.get("payload") or {}).get("limits") or {}
+        v = limits.get("docks")
+    else:
+        with cloud_lock:
+            v = ((cloud_state.get("features") or {}).get("drone_dock") or {}).get("limit_value")
+    try:
+        return None if v is None else max(0, int(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def _docks_over_limit():
+    return dock_store.over_limit(dock_limit())
 
 
 def _dock_creds():
@@ -5571,13 +5591,16 @@ def _dock_refused():
 def api_docks():
     """Registered docks with their live state, and docks that connected but aren't registered yet (anyone signed in)."""
     snap = dock_hub.snapshot()
+    over = _docks_over_limit()
     for x in snap["docks"]:
+        x["over_limit"] = x["sn"] in over
         x["alerts"] = [{"key": a["key"], "level": a["level"], "text": a["text"], "t": a["t"]} for a in dock_health.active(x["sn"])]
     snap["health_log"] = dock_health.recent(15)
     return jsonify({"ok": True, "allowed": dock_allowed(), "cloud_ready": dock_store.cloud_ready(),
                     "broker": {"port": dock_lib.BROKER_PORT, "running": _port("127.0.0.1", dock_lib.BROKER_PORT),
                                "connected": bool(dock_mqtt and dock_mqtt.connected)},
-                    "can_simulate": len(dock_hub.local) < DOCK_SIM_MAX, **snap})
+                    "can_simulate": len(dock_hub.local) < DOCK_SIM_MAX,
+                    "limit": dock_limit(), "used": len(dock_store.real_docks()), **snap})
 
 
 @app.route("/api/docks/setup", methods=["GET", "POST"])
@@ -5610,8 +5633,13 @@ def api_docks_register():
     sn = dock_lib.clean_sn(data.get("sn"))
     if not sn or sn not in dock_hub.state:
         return jsonify({"ok": False, "error": "That dock hasn't connected to this PC. Set it up with Pilot 2 first."}), 404
+    simulated = sn in dock_hub.local
+    limit = dock_limit()
+    if not simulated and limit is not None and len(dock_store.real_docks()) >= limit:
+        return jsonify({"ok": False, "error": f"This licence allows {limit} DJI dock{'' if limit == 1 else 's'}. "
+                        "Remove one first, or ask your provider for more."}), 409
     try:
-        d = dock_store.register(sn, data.get("name"), simulated=sn in dock_hub.local)
+        d = dock_store.register(sn, data.get("name"), simulated=simulated)
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 409
     audit_record("dock: registered", target=sn, detail={"name": d["name"], "slot": d["slot"]})

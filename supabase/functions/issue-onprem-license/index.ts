@@ -34,6 +34,7 @@ Deno.serve(async (req: Request) => {
     const expires = text(body.expires_on, 10);
     const cameras = Math.trunc(Number(body.cameras ?? 1));
     const drones = Math.trunc(Number(body.drones ?? 1));
+    const docks = Math.trunc(Number(body.docks ?? 0));  // DJI Docks the PC may register (with the "drone_dock" feature)
     const features = Array.isArray(body.features) ? [...new Set(body.features.filter((f: unknown) => typeof f === "string" && FEATURES.includes(f as string)))].sort() : [];
     if (!client) return reply({error: "Client name is required"}, 400);
     if (!MACHINE_ID.test(machine)) return reply({error: "Machine ID must look like XXXX-XXXX-XXXX-XXXX-XXXX (from the client's License page)"}, 400);
@@ -42,6 +43,8 @@ Deno.serve(async (req: Request) => {
     if (expires <= today) return reply({error: "The expiry date must be in the future"}, 400);
     if (!(cameras >= 1 && cameras <= 500)) return reply({error: "Cameras must be between 1 and 500"}, 400);
     if (!(drones >= 0 && drones <= 50)) return reply({error: "Drones must be between 0 and 50"}, 400);
+    if (!(docks >= 0 && docks <= 50)) return reply({error: "DJI Docks must be between 0 and 50"}, 400);
+    if (features.includes("drone_dock") && docks < 1) return reply({error: "DJI Docks is ticked: set how many docks (1 or more)"}, 400);
     if (!features.length) return reply({error: "Choose at least one feature"}, 400);
 
     const payload = {
@@ -54,7 +57,7 @@ Deno.serve(async (req: Request) => {
       plan: text(body.plan, 40) || "on-prem",
       features,
       feature_set: 2,  // the newer features are listed: the PC only allows the ones ticked
-      limits: {cameras, drones},
+      limits: {cameras, drones, docks},
     };
     const document = await signLicense(payload, pem);
 
@@ -65,7 +68,7 @@ Deno.serve(async (req: Request) => {
       billing_period: ["one-time", "monthly", "yearly"].includes(body.billing_period) ? body.billing_period : null,
       next_payment_date: /^\d{4}-\d{2}-\d{2}$/.test(body.next_payment_date ?? "") ? body.next_payment_date : null,
       payment_status: ["paid", "pending", "overdue"].includes(body.payment_status) ? body.payment_status : null,
-      machine_id: machine, plan: payload.plan, cameras, drones, features, issued_on: today, expires_on: expires,
+      machine_id: machine, plan: payload.plan, cameras, drones, docks, features, issued_on: today, expires_on: expires,
       status: "active", license_id: payload.license_id, license_document: document,
     };
     const recordId = typeof body.record_id === "string" && /^[0-9a-f-]{36}$/i.test(body.record_id) ? body.record_id : null;

@@ -384,3 +384,55 @@ def test_simulated_dock_alert_reaches_telegram_and_page(d, client, monkeypatch):
         assert not users.allowed("operator", "POST", f"/api/docks/{sn}/fault")
     finally:
         client.delete(f"/api/docks/{sn}")
+
+
+# ---------- dock count on the licence ----------
+
+def test_dock_limit_from_licence(d, monkeypatch):
+    monkeypatch.setattr(d, "onprem_mode", lambda: False)
+    monkeypatch.setitem(d.cloud_state, "features", {"drone_dock": {"enabled": True, "limit_value": 2}})
+    assert d.dock_limit() == 2
+    monkeypatch.setitem(d.cloud_state, "features", {"drone_dock": {"enabled": True, "limit_value": None}})
+    assert d.dock_limit() is None  # no number set: no cap
+    monkeypatch.setattr(d, "onprem_mode", lambda: True)
+    monkeypatch.setitem(d.offline_license, "payload", {"features": ["drone_dock"], "limits": {"cameras": 4, "drones": 1, "docks": 1}})
+    assert d.dock_limit() == 1
+    monkeypatch.setitem(d.offline_license, "payload", {"features": ["drone_dock"], "limits": {"cameras": 4}})
+    assert d.dock_limit() is None
+
+
+def test_dock_count_enforced(d, client, monkeypatch):
+    limit = [1]
+    monkeypatch.setattr(d, "dock_limit", lambda: limit[0])
+    for sn in ("REALDOCK1", "REALDOCK2"):  # two real docks have connected
+        d.dock_hub.handle(f"sys/product/{sn}/status", topo(sn, drone=sn + "U"))
+    sim = client.post("/api/docks/simulate", json={}).get_json()["sn"]
+    try:
+        assert wait_until(lambda: sim in d.dock_hub.state, 10)
+        assert client.post("/api/docks/register", json={"sn": "REALDOCK1", "name": "One"}).get_json()["ok"]
+        r = client.post("/api/docks/register", json={"sn": "REALDOCK2", "name": "Two"})
+        assert r.status_code == 409 and "allows 1 DJI dock." in r.get_json()["error"]
+        assert client.post("/api/docks/register", json={"sn": sim, "name": "Test"}).get_json()["ok"]  # simulated: not counted
+        data = client.get("/api/docks").get_json()
+        assert data["limit"] == 1 and data["used"] == 1
+        limit[0] = 2
+        assert client.post("/api/docks/register", json={"sn": "REALDOCK2", "name": "Two"}).get_json()["ok"]
+        # The licence is lowered: the newest real dock is over it, shown so and no longer watched.
+        limit[0] = 1
+        docks = {x["sn"]: x for x in client.get("/api/docks").get_json()["docks"]}
+        assert docks["REALDOCK2"]["over_limit"] and not docks["REALDOCK1"]["over_limit"] and not docks[sim]["over_limit"]
+        assert d._docks_over_limit() == {"REALDOCK2"}
+        d.dock_hub.started_at -= 10_000
+        d.dock_hub.state["REALDOCK1"]["last_seen"] -= 10_000
+        d.dock_hub.state["REALDOCK2"]["last_seen"] -= 10_000
+        alerted = {a["sn"] for a in d.dock_health.check() if a["active"]}
+        assert "REALDOCK1" in alerted and "REALDOCK2" not in alerted
+        limit[0] = None
+        assert d._docks_over_limit() == set()
+    finally:
+        for sn in ("REALDOCK1", "REALDOCK2", sim):
+            client.delete(f"/api/docks/{sn}")
+        with d.dock_hub.lock:
+            for sn in ("REALDOCK1", "REALDOCK2"):
+                d.dock_hub.state.pop(sn, None)
+        d.dock_health.check()

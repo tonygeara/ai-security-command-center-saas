@@ -523,7 +523,8 @@ const DK_ADMIN=typeof IS_ADMIN!=='undefined'&&IS_ADMIN;
 function dkMsg(t,ok){const e=$('dockMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
 async function dkPost(url,body,method){const r=await fetch(url,{method:method||'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
   let d={};try{d=await r.json()}catch(e){}return d.ok?d:{ok:false,error:d.error||('Failed ('+r.status+')')}}
-function dkCard(x,found){const tags=[];
+let dkFull=false;
+function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE');
   if(x.drone_model)tags.push((x.drone_in_dock===false?'✈ ':'⌂ ')+esc(x.drone_model)+(x.drone_in_dock===false?' out':' in dock'));
   if(x.battery!=null)tags.push('🔋 '+x.battery+'%'+(x.charging?' charging':''));
   if(x.cover)tags.push(x.cover==='cover fault'?'Cover fault':'Cover '+esc(x.cover));if(x.mode)tags.push(esc(x.mode));
@@ -534,13 +535,14 @@ function dkCard(x,found){const tags=[];
   const alerts=al.map(a=>`<div class="dk-alert ${esc(a.level)}">${a.level==='warning'?'⚠':'●'} ${esc(a.text)}</div>`).join('');
   const faults=[['','Test a problem…'],['offline','Goes offline (alert after 1 min)'],['cover','Cover fault'],['rain','Heavy rain'],['wind','Strong wind'],['hot','Too hot'],['battery','Drone battery low'],['hms','DJI warning'],['','All clear']];
   const test=DK_ADMIN&&!found&&x.simulated?`<select data-sn="${esc(x.sn)}" onchange="dockFault(this)" style="max-width:150px">${faults.map(([v,t],i)=>`<option value="${v}" ${i===0?'selected disabled':''}>${t}</option>`).join('')}</select>`:'';
-  const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')">Register</button>`
+  const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')" ${dkFull&&!x.simulated?'disabled title="The licence\'s dock count is used up"':''}>Register</button>`
     :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
-  return `<div class="dk-card${found?' found':''}${sev}" id="dkCard_${esc(x.sn)}"><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
+  return `<div class="dk-card${found?' found':''}${sev}" id="dkCard_${esc(x.sn)}"${x.over_limit?' style="opacity:.55" title="Over the licence\'s dock count: not watched. Remove a dock or ask your provider for more."':''}><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
     <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
     ${alerts}<div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div><div class="actions" style="gap:6px">${btns}${test}</div></div>`}
 async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
-  $('dockState').textContent=!d.allowed?'NOT LICENSED':d.broker.connected?'BROKER READY':d.broker.running?'BROKER STARTING':'BROKER OFF';
+  dkFull=d.limit!=null&&d.used>=d.limit;
+  $('dockState').textContent=(!d.allowed?'NOT LICENSED':d.broker.connected?'BROKER READY':d.broker.running?'BROKER STARTING':'BROKER OFF')+(d.allowed&&d.limit!=null?` · ${d.used} OF ${d.limit} DOCK${d.limit===1?'':'S'}`:'');
   $('dockState').style.color=d.allowed&&d.broker.connected?'':'#ffcf7a';
   const cards=d.docks.map(x=>dkCard(x,false)).concat(d.found.map(x=>dkCard(x,true)));
   const ae=document.activeElement,keep=ae&&((ae.id&&ae.id.startsWith('dkName_'))||(ae.tagName==='SELECT'&&ae.closest('#dockList')));
@@ -550,7 +552,7 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   dockData=d.docks;drawDockFleet();drawDockMap()}catch(e){}}
 // Registered docks in the fleet bar and on the map. Docks don't fly from here yet: a click shows the dock.
 let dockData=[],dockMarks={};
-function dockInfo(x){if(!x.online)return 'offline';
+function dockInfo(x){if(x.over_limit)return 'over licence';if(!x.online)return 'offline';
   const where=x.drone_in_dock===false?'drone out':x.drone_model?'drone in dock':'no drone';
   return where+(x.battery!=null?' · '+x.battery+'%':'')}
 function dkAlertName(k){return k.startsWith('hms:')?'DJI warning':({offline:'offline',cover:'cover fault',rain:'heavy rain',wind:'strong wind',hot:'too hot',cold:'too cold',battery:'battery low'})[k]||k}

@@ -17,7 +17,12 @@ Health alerts (`dock.DockHealth`, checked every 5 s): offline (1 min), cover fau
 ≥ 45 °C or ≤ -20 °C, drone in the dock < 20 % and not charging, and DJI HMS cautions/warnings; each with an
 all-clear. Shown on the dock cards, in the fleet bar and a Health list on the Drone page, sent to Telegram (text)
 and the audit log. DJI's texts are used if their hms.json is put in the data folder, else the code. Simulated
-docks have a "Test a problem" menu. Still to do in Phase 1: docks counted in the licence. Docks become full drone slots (own Drone page, routes, responses) in Phase 3-4,
+docks have a "Test a problem" menu.
+Dock count: "DJI Docks (max)" on the admin licence form; online clients get it as the drone_dock limit, on-prem
+licences as limits.docks (column client_licenses.docks and issue-onprem-license live since 15 Nov). The PC refuses
+to register more real docks than that (simulated docks don't count); if the licence is lowered, the newest docks
+show "over licence" and are no longer watched. A dock has its own drone, so docks don't use the drone count.
+Switching a feature on/off in a client's Feature access now keeps its limit. **Phase 1 is complete.** Docks become full drone slots (own Drone page, routes, responses) in Phase 3-4,
 when they can fly.
 
 ## Goal

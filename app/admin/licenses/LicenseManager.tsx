@@ -11,7 +11,7 @@ const DEFAULT_FEATURES = ["camera_ai","face_ai","lpr","drone_live","drone_ai","d
 const inYear = () => { const d = new Date(); d.setFullYear(d.getFullYear() + 1); return d.toISOString().slice(0, 10); };
 const blank = (): Lic => ({edition:"onprem", client_name:"", company:"", location:"", address:"", contact_name:"", phone:"", email:"", notes:"",
   price:"", currency:"USD", billing_period:"yearly", next_payment_date:"", payment_status:"pending", machine_id:"", plan:"on-prem",
-  cameras:1, drones:1, max_users:5, features:DEFAULT_FEATURES, expires_on:inYear(), organization_id:""});
+  cameras:1, drones:1, docks:0, max_users:5, features:DEFAULT_FEATURES, expires_on:inYear(), organization_id:""});
 const daysLeft = (d?: string) => d ? Math.ceil((new Date(d).getTime() - Date.now()) / 86400000) : null;
 
 function download(l: Lic){
@@ -36,8 +36,9 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
 
   function edit(l: Lic){ setMsg(""); setForm({...blank(), ...Object.fromEntries(Object.entries(l).map(([k, v]) => [k, v ?? ""])), features: l.features?.length ? (l.features.some((f: string) => PREMIUM.includes(f)) ? l.features : [...l.features, ...PREMIUM]) : DEFAULT_FEATURES}); }
   function renew(l: Lic){ edit(l); setForm(f => ({...f!, expires_on: inYear(), renewing: true})); }
-  function fromOrg(o: Lic){ setMsg(""); const cam = orgLimit(o.id, "camera_ai"), dr = orgLimit(o.id, "drone_live");
-    setForm({...blank(), edition: "saas", client_name: o.name, organization_id: o.id, plan: o.plan_code, cameras: cam?.limit_value ?? 1, drones: dr?.enabled === false ? 0 : (dr?.limit_value ?? 1)}); }
+  function fromOrg(o: Lic){ setMsg(""); const cam = orgLimit(o.id, "camera_ai"), dr = orgLimit(o.id, "drone_live"), dk = orgLimit(o.id, "drone_dock");
+    setForm({...blank(), edition: "saas", client_name: o.name, organization_id: o.id, plan: o.plan_code, cameras: cam?.limit_value ?? 1, drones: dr?.enabled === false ? 0 : (dr?.limit_value ?? 1),
+      docks: dk?.enabled ? (dk.limit_value ?? 0) : 0}); }
 
   // Opened from a client page or the overview: ?new=onprem, ?edit=<id>, ?renew=<id>, ?org=<organization id>
   useEffect(() => {
@@ -52,6 +53,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
   async function save(){
     if(!form) return;
     const f = form, cameras = Math.max(1, Math.trunc(Number(f.cameras) || 1)), drones = Math.max(0, Math.trunc(Number(f.drones) || 0));
+    const docks = Math.min(50, Math.max(0, Math.trunc(Number(f.docks) || 0)));
     if(!String(f.client_name).trim()){ setMsg("Client name is required."); return; }
     setBusy(true); setMsg("");
     const sb = createClient();
@@ -63,7 +65,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         const needsNewFile = !f.id || f.renewing || !f.license_document;
         if(needsNewFile){
           const {data, error} = await sb.functions.invoke("issue-onprem-license", {body: {...details, record_id: f.id || undefined, machine_id: f.machine_id,
-            expires_on: f.expires_on, plan: f.plan, cameras, drones, features: f.features}});
+            expires_on: f.expires_on, plan: f.plan, cameras, drones, docks, features: f.features}});
           if(error || !data?.ok) throw new Error(data?.error || (error as any)?.context?.statusText || error?.message || "Could not issue the licence");
           download(data.record); setMsg("Licence issued and downloaded. Send the .lic file to the client.");
         } else {
@@ -74,18 +76,19 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         if(!f.organization_id) throw new Error("Choose the client's portal account.");
         const org = orgs.find(o => o.id === f.organization_id);
         const max_users = Math.min(1000, Math.max(1, Math.trunc(Number(f.max_users) || 5)));
-        const row = {...details, edition: "saas", organization_id: f.organization_id, plan: org?.plan_code ?? f.plan, cameras, drones, max_users, features: f.features,
+        const row = {...details, edition: "saas", organization_id: f.organization_id, plan: org?.plan_code ?? f.plan, cameras, drones, docks, max_users, features: f.features,
           expires_on: f.expires_on || null, issued_on: f.issued_on || new Date().toISOString().slice(0, 10), status: f.status || "active"};
         const {error} = f.id ? await sb.from("client_licenses").update(row).eq("id", f.id) : await sb.from("client_licenses").insert(row);
         if(error) throw error;
         // The Windows app enforces these through the client's portal entitlements.
         for(const [feature] of FEATURES){
-          const on = f.features.includes(feature) && (!feature.startsWith("drone") || drones > 0);
-          const limit = feature === "camera_ai" ? cameras : feature === "drone_live" ? drones : null;
+          // DJI Docks: on only with at least one dock; the dock count is its limit (each dock carries its own drone).
+          const on = f.features.includes(feature) && (feature === "drone_dock" ? docks > 0 : !feature.startsWith("drone") || drones > 0);
+          const limit = feature === "camera_ai" ? cameras : feature === "drone_live" ? drones : feature === "drone_dock" ? docks : null;
           const {error: e} = await sb.rpc("set_feature_override", {target_org: f.organization_id, target_feature: feature, target_enabled: feature === "camera_ai" || on, target_limit: limit});
           if(e) throw e;
         }
-        setMsg(`Saved. ${org?.name ?? "Client"}: ${cameras} camera(s), ${drones} drone(s), ${f.features.length} feature(s).`);
+        setMsg(`Saved. ${org?.name ?? "Client"}: ${cameras} camera(s), ${drones} drone(s), ${docks} dock(s), ${f.features.length} feature(s).`);
       }
       setForm(null); router.refresh();
       if(open?.edit || open?.renew || open?.org) router.push(form.organization_id ? "/admin/clients/org-" + form.organization_id : form.id ? "/admin/clients/lic-" + form.id : "/admin/clients");
@@ -138,6 +141,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
               {orgs.map(o => <option key={o.id} value={o.id}>{o.name} ({String(o.plan_code).toUpperCase()})</option>)}</select></label>}
         {F("cameras", "Cameras (max) *", {type: "number", min: 1, disabled: lockedFile})}
         {F("drones", "Drones (max, 0 = none)", {type: "number", min: 0, disabled: lockedFile})}
+        {F("docks", "DJI Docks (max, 0 = none)", {type: "number", min: 0, max: 50, disabled: lockedFile, title: "Needs “DJI Docks” ticked below. Each dock carries its own drone."})}
         {form.edition === "saas" && F("max_users", "Portal users (max)", {type: "number", min: 1, max: 1000})}
         {F("expires_on", form.edition === "onprem" ? "Expires *" : "Contract ends", {type: "date", disabled: lockedFile})}
         {form.edition === "onprem" && F("plan", "Plan label", {disabled: lockedFile})}
