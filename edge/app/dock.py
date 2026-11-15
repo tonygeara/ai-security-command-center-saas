@@ -16,6 +16,8 @@ MQTT topics used (DJI Cloud API; check names against DJI's current docs when add
     thing/product/{gateway}/requests      dock -> PC  e.g. "config": answered on .../requests_reply
     thing/product/{gateway}/services      PC -> dock  commands (live_start_push, live_stop_push, live_lens_change)
     thing/product/{gateway}/services_reply  dock -> PC  result 0 = done
+    Missions (Phase 3): flighttask_prepare (a KMZ flight plan the dock downloads from this PC) -> flighttask_execute;
+    flighttask_progress events while it flies; return_home to bring it back.
 
 A dock that connects is listed as "found"; an admin registers it (name, slot dock1, dock2, …) before it is part
 of the system. A simulated dock (dock_sim.py) goes through the same hub without a broker, for tests and demos.
@@ -59,6 +61,20 @@ HMS_CLEAR_SECONDS = 60          # a DJI health message not repeated this long ha
 HMS_LEVELS = {0: "notice", 1: "caution", 2: "warning"}
 # Live video (Phase 2): the dock pushes RTMP to this PC's MediaMTX at rtmp://PC:1935/<slot>, the same path as Drone Link.
 LENSES = ("wide", "zoom", "ir", "normal")
+# Mission states reported by flighttask_progress (DJI); these end a mission.
+MISSION_DONE = ("ok", "failed", "canceled", "timeout", "partially_done", "rejected")
+WAYLINE_TTL = 900  # seconds a flight plan's download link works
+_waylines = {}     # token -> (kmz bytes, expires)
+
+
+def publish_wayline(data, ttl=WAYLINE_TTL):
+    """Keep a flight plan for the dock to download from the LAN page server; returns its secret token."""
+    now = time.time()
+    for k in [k for k, (_, exp) in _waylines.items() if exp < now]:
+        _waylines.pop(k, None)
+    token = secrets.token_urlsafe(24)
+    _waylines[token] = (data, now + ttl)
+    return token
 LENS_NAMES = {"wide": "wide", "zoom": "zoom", "ir": "thermal", "normal": "main"}
 # DJI live-stream result codes we expect (from DJI's error list; confirm with real hardware). Others show their number.
 LIVE_ERRORS = {513003: "The video is already streaming.", 513005: "The video is not streaming.",
@@ -176,6 +192,15 @@ class DockStore:
         self.save()
         return docks[sn]
 
+    def set_settings(self, sn, **values):
+        """Per-dock settings: auto_flights (+ who confirmed the site's permission, and when), range_m."""
+        d = self.data["docks"].get(sn)
+        if not d:
+            raise KeyError(sn)
+        d.update(values)
+        self.save()
+        return d
+
     def real_docks(self):
         """Registered real docks, oldest first (simulated docks are for testing and don't count)."""
         docks = self.data["docks"]
@@ -272,6 +297,8 @@ class DockHub:
             self._touch(sn)
             if msg.get("method") == "hms":
                 self._hms(self.drone_of.get(sn, sn), msg.get("data") or {})
+            elif msg.get("method") == "flighttask_progress":
+                self._progress(sn, msg.get("data") or {})
             if msg.get("need_reply"):
                 self._reply(topic, msg, {"result": 0})
         elif kind == "thing" and leaf == "requests":
@@ -293,6 +320,7 @@ class DockHub:
                 s["version"] = str(data.get("version") or "")
             if drone:
                 s["drone_sn"] = str(drone.get("sn") or "")
+                s["drone_enum"] = (int(drone.get("type") or 0), int(drone.get("sub_type") or 0))
                 s["drone_model"] = model_name(drone.get("domain"), drone.get("type"), drone.get("sub_type"))
                 self.drone_of[s["drone_sn"]] = gw
             elif data:
@@ -407,6 +435,72 @@ class DockHub:
                 self.state[gw]["live"]["lens"] = lens
         return ok, msg, out
 
+    # --- missions (Phase 3) ---
+    def payload_enum(self, gw):
+        """The drone camera's DJI type number (the first part of its camera index, e.g. 99 for "99-0-0")."""
+        src = next((v for v in self.video_sources(gw) if v["device"] == "drone"), None)
+        try:
+            return int(src["video_id"].split("/")[1].split("-")[0]) if src else None
+        except ValueError:
+            return None
+
+    def start_mission(self, gw, flight_id, url, md5, rth_alt, name="", points=None):
+        """Hand the dock a flight plan and start it. Returns (ok, message)."""
+        ok, msg, _ = self.call(gw, "flighttask_prepare", {
+            "flight_id": flight_id, "execute_time": int(self.now() * 1000), "task_type": 0, "wayline_type": 0,
+            "file": {"url": url, "fingerprint": md5}, "rth_altitude": int(rth_alt),
+            "out_of_control_action": 0, "exit_wayline_when_rc_lost": 1}, timeout=30.0)
+        if not ok:
+            return False, msg or "The dock didn't accept the flight plan."
+        with self.lock:
+            self.state[gw]["mission"] = {"flight_id": flight_id, "name": name, "status": "starting", "percent": 0,
+                                         "index": 0, "since": self.now(), "points": points or []}
+        ok, msg, _ = self.call(gw, "flighttask_execute", {"flight_id": flight_id}, timeout=30.0)
+        if not ok:
+            self.call(gw, "flighttask_undo", {"flight_ids": [flight_id]}, timeout=10.0)
+            with self.lock:
+                self.state[gw].pop("mission", None)
+            return False, msg or "The dock didn't start the flight."
+        return True, ""
+
+    def return_home(self, gw):
+        """Bring the drone back to the dock now (or cancel a mission that hasn't taken off)."""
+        ok, msg, _ = self.call(gw, "return_home", {}, timeout=15.0)
+        if ok:
+            with self.lock:
+                m = self.state[gw].get("mission")
+                if m:
+                    m["status"] = "returning"
+        return ok, msg
+
+    def _progress(self, sn, data):
+        gw = self.drone_of.get(sn, sn)
+        out = data.get("output") or {}
+        ext, prog = out.get("ext") or {}, out.get("progress") or {}
+        with self.lock:
+            m = (self.state.get(gw) or {}).get("mission")
+            if m is None or (ext.get("flight_id") and ext["flight_id"] != m["flight_id"]):
+                return
+            status = str(out.get("status") or m["status"])
+            if not (m["status"] == "returning" and status == "in_progress"):
+                m["status"] = status
+            m["percent"] = int(prog.get("percent") or m["percent"])
+            m["index"] = int(ext.get("current_waypoint_index") or m["index"])
+            m["updated"] = self.now()
+            if status in MISSION_DONE:
+                m["ended"] = self.now()
+
+    def mission(self, gw):
+        m = (self.state.get(gw) or {}).get("mission")
+        if not m:
+            return None
+        return {k: m.get(k) for k in ("flight_id", "name", "status", "percent", "index", "since", "ended", "points")} | {
+            "active": m["status"] not in MISSION_DONE}
+
+    def clear_mission(self, gw):
+        with self.lock:
+            (self.state.get(gw) or {}).pop("mission", None)
+
     def hms_active(self, gw):
         s = self.state.get(gw) or {}
         return [h for h in (s.get("hms") or {}).values() if self.now() - h["seen"] < HMS_CLEAR_SECONDS]
@@ -448,6 +542,7 @@ class DockHub:
                 "drone_lat": d.get("latitude") if drone_on else None, "drone_lon": d.get("longitude") if drone_on else None,
                 "drone_height": d.get("height") if drone_on else None,
                 "simulated": gw in self.local,
+                "mission": self.mission(gw),
                 "video": {"streaming": bool(s.get("live")), "lens": (s.get("live") or {}).get("lens"),
                           "device": (s.get("live") or {}).get("device"),
                           "lenses": (s.get("live") or {}).get("lenses") or next((v["lenses"] for v in self.video_sources(gw)), []),
@@ -667,6 +762,17 @@ def start_pilot_server(store, creds_fn, host_fn, site_fn=lambda: "this site", po
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             url = urllib.parse.urlparse(self.path)
+            if url.path.startswith("/wayline/") and url.path.endswith(".kmz"):
+                item = _waylines.get(url.path[len("/wayline/"):-4])
+                if not item or item[1] < time.time():
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.google-earth.kmz")
+                self.send_header("Content-Length", str(len(item[0])))
+                self.end_headers()
+                self.wfile.write(item[0])
+                return
             key = (urllib.parse.parse_qs(url.query).get("k") or [""])[0]
             if url.path != "/pilot" or not hmac.compare_digest(key.encode(), str(store.data.get("bind_token") or "").encode()):
                 self.send_error(404)

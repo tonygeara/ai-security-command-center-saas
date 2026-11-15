@@ -102,7 +102,19 @@ exact result codes and camera indexes, and the stream reaching MediaMTX and Frig
   work unchanged. The dock's own outdoor camera can be added as a normal camera.
 
 ### Phase 3: patrols and alarm launches (the dock flies by itself)
-Status: **planned** (15 Nov), not started. The first phase where a drone takes off with nobody on site.
+Status: **3a built** (15 Nov, not merged yet); 3c and 3b planned. The first phase where a drone takes off with nobody
+on site.
+
+3a as built: `edge/app/dock_wayline.py` (route → KMZ: detours round no-fly zones, height 20-120 m above the dock, speed
+1-12 m/s, hover at stops, gimbal 45° down, finish and lost link = return to dock; drone and camera type numbers from
+the dock's topology and live_capacity). The KMZ is served once at `http://PC:8767/wayline/<secret>.kmz` (15 min) with
+its MD5. `dock.py`: `start_mission` (flighttask_prepare → flighttask_execute, undo if execute fails), `return_home`,
+flighttask_progress → mission status/percent/stop. Dashboard: `dock_flight_problem` (pre-flight check),
+`POST /api/docks/<sn>/mission` (operators: fly a saved route / return to dock), `POST /api/docks/<sn>/settings`
+(admins: Automatic flights with the permission confirmation recorded, range 50-2000 m), `dock_missions_tick` (video
+on after take-off, Telegram + audit at the end, video off after landing), docks return home on a crewed-aircraft
+threat. Drone page: route picker + Fly route, Return to dock, mission on the card, fleet bar and map. The simulator
+downloads and flies the KMZ. Tests: `edge/tests/test_docks.py`.
 
 **Principle: docks join the existing machinery, they don't get a copy of it.** Routes, Smart patrol, patrol
 schedules, drone responses (auto-send, handoff, Telegram/dashboard "send a drone") and drone-verified alarms already

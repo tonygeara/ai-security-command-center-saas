@@ -2,8 +2,10 @@
 
 It sends the hub what a real dock sends over MQTT (DJI Cloud API): its topology (update_topo, with the drone in it),
 dock telemetry (cover, weather, drone charging) and the drone's telemetry, once a second, and takes the hub's
-replies. Phase 1 has no flying: the drone stays in the dock and charges.
+replies. It flies the flight plans the PC sends (Phase 3): it downloads the KMZ, takes off, flies the waypoints
+(hovering where the plan says), reports flighttask_progress, returns to the dock and lands. speedup makes tests quick.
 """
+import math
 import random
 import threading
 import time
@@ -31,6 +33,13 @@ class SimulatedDock:
         self.replies = []           # last replies from the hub (tests look at them)
         self.stop_event = threading.Event()
         self.thread = None
+        # Flying (Phase 3)
+        self.fetch = _fetch           # url -> bytes (the PC's flight plan download)
+        self.speedup = 1.0            # tests fly faster
+        self.plan = None              # {"flight_id", "points"} after flighttask_prepare
+        self.flight = None            # {"flight_id", "points", "index", "phase", "hover_until", "status"} while out
+        self.pos = self.home
+        self.height = 0.0
 
     def _msg(self, method=None, data=None, **extra):
         return {"tid": str(uuid.uuid4()), "bid": str(uuid.uuid4()), "timestamp": int(time.time() * 1000),
@@ -64,14 +73,19 @@ class SimulatedDock:
         else:
             charging = self.battery < 100
             self.battery = min(100.0, self.battery + 0.5)
+        out = self.flight is not None
+        if out:
+            self.battery, charging = max(5.0, self.battery - 0.3), False
         self.send(f"thing/product/{self.sn}/osd", self._msg(data={
-            "mode_code": 0, "cover_state": 3 if f == "cover" else 0, "drone_in_dock": 1, "latitude": self.home[0], "longitude": self.home[1],
+            "mode_code": 4 if out else 0, "cover_state": 3 if f == "cover" else 1 if out else 0, "drone_in_dock": 0 if out else 1,
+            "latitude": self.home[0], "longitude": self.home[1],
             "environment_temperature": 47.5 if f == "hot" else round(24 + random.uniform(-0.3, 0.3), 1), "temperature": 28.0,
             "wind_speed": 14.2 if f == "wind" else round(random.uniform(1.0, 3.5), 1), "rainfall": 3 if f == "rain" else 0,
             "network_state": {"type": 2, "quality": 5, "rate": 12000},
             "drone_charge_state": {"state": 1 if charging else 0, "capacity_percent": int(self.battery)}}))
         self.send(f"thing/product/{self.drone_sn}/osd", self._msg(data={
-            "mode_code": 14, "latitude": self.home[0], "longitude": self.home[1], "height": 0, "elevation": 0,
+            "mode_code": (9 if self.flight["phase"] == "returning" else 5) if out else 14,
+            "latitude": self.pos[0], "longitude": self.pos[1], "height": round(self.height, 1), "elevation": round(self.height, 1),
             "horizontal_speed": 0, "vertical_speed": 0, "attitude_head": 0,
             "battery": {"capacity_percent": int(self.battery), "remain_flight_time": int(self.battery * 0.4 * 60)}}))
 
@@ -81,6 +95,51 @@ class SimulatedDock:
         self.send(f"thing/product/{self.sn}/events", self._msg("hms", {"list": [
             {"level": 2, "module": 3, "in_the_sky": 0, "code": "0x19110000", "device_type": f"{dd}-{dt}-{ds}", "imminent": 0,
              "args": {"component_index": 0, "sensor_index": 0}}]}, need_reply=0))
+
+    def fly(self):
+        """One tick of flight: towards the next waypoint (or home), hovering where asked; progress to the PC."""
+        f = self.flight
+        pts = f["points"]
+        step = (pts[0]["speed"] if pts else 5.0) * self.period * self.speedup
+        if f["phase"] == "flying":
+            self.height = pts[f["index"]]["alt"]
+            if time.time() < f["hover_until"]:
+                pass
+            elif self._move_to((pts[f["index"]]["lat"], pts[f["index"]]["lon"]), step):
+                hover = pts[f["index"]]["hover"]
+                if hover and not f.get("hovered") == f["index"]:
+                    f["hovered"] = f["index"]
+                    f["hover_until"] = time.time() + hover / self.speedup
+                elif f["index"] + 1 < len(pts):
+                    f["index"] += 1
+                else:
+                    f.update(phase="returning", status="ok")
+        if f["phase"] == "returning" and self._move_to(self.home, step):
+            self.height, self.pos = 0.0, self.home
+            self.progress(100, f["status"])
+            self.flight = None
+            return
+        pct = 99 if f["phase"] == "returning" else int(100 * f["index"] / max(1, len(pts)))
+        self.progress(pct, "in_progress")
+
+    def _move_to(self, target, step):
+        lat, lon = self.pos
+        dn = (target[0] - lat) * 111320.0
+        de = (target[1] - lon) * 111320.0 * math.cos(math.radians(lat))
+        d = math.hypot(dn, de)
+        if d <= step:
+            self.pos = target
+            return True
+        k = step / d
+        self.pos = (lat + dn * k / 111320.0, lon + de * k / (111320.0 * math.cos(math.radians(lat))))
+        return False
+
+    def progress(self, percent, status):
+        f = self.flight
+        self.send(f"thing/product/{self.sn}/events", self._msg("flighttask_progress", {"result": 0, "output": {
+            "ext": {"flight_id": f["flight_id"], "current_waypoint_index": f["index"], "wayline_mission_state": 5},
+            "progress": {"current_step": 13 if f["phase"] == "returning" else 10, "percent": percent}, "status": status}},
+            need_reply=1))
 
     def set_fault(self, fault):
         """Test alerts on a simulated dock; "" clears. offline: the dock goes silent (no goodbye, like a power cut)."""
@@ -92,12 +151,33 @@ class SimulatedDock:
         self.replies = (self.replies + [(topic, payload)])[-20:]
         if topic.endswith("/services"):  # a command: say it's done (there is no real picture to send)
             method, data = payload.get("method"), payload.get("data") or {}
+            result = 0
+            if method == "flighttask_prepare":
+                try:
+                    import dock_wayline
+                    pts = dock_wayline.read_kmz(self.fetch(data["file"]["url"]))
+                    self.plan = {"flight_id": data.get("flight_id"), "points": pts}
+                except Exception:  # noqa: BLE001 - like a dock that can't download or read the file
+                    result = 314001
+            elif method == "flighttask_execute":
+                if self.flight or not self.plan or self.plan["flight_id"] != data.get("flight_id"):
+                    result = 314002
+                else:
+                    self.flight = {**self.plan, "index": 0, "phase": "flying", "hover_until": 0.0, "status": "in_progress"}
+                    self.plan = None
+            elif method == "flighttask_undo":
+                self.plan = None
+            elif method == "return_home":
+                if self.flight:
+                    self.flight.update(phase="returning", status="canceled")
+                else:
+                    result = 314003
             if method == "live_start_push":
                 self.streaming = data.get("video_id")
             elif method == "live_stop_push":
                 self.streaming = None
             self.send(topic + "_reply", {"tid": payload.get("tid"), "bid": payload.get("bid"), "method": method,
-                                         "timestamp": int(time.time() * 1000), "data": {"result": 0}})
+                                         "timestamp": int(time.time() * 1000), "data": {"result": result}})
             return
         if topic.endswith("/status_reply") and (payload.get("data") or {}).get("result") == 0:
             self.topo_acked = True
@@ -108,6 +188,8 @@ class SimulatedDock:
         if not self.topo_acked:
             self.topology()
             self.capacity()
+        if self.flight:
+            self.fly()
         self.osd()
         if self.fault == "hms":
             self.hms()
@@ -132,3 +214,9 @@ class SimulatedDock:
             except Exception:  # noqa: BLE001 - a demo must never take the dashboard down
                 pass
             self.stop_event.wait(self.period)
+
+
+def _fetch(url):
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=10) as r:
+        return r.read()

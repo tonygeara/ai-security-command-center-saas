@@ -11,7 +11,7 @@ import urllib.request
 
 import pytest
 
-from conftest import wait_until
+from conftest import square, wait_until
 
 
 def _free_port():
@@ -536,3 +536,154 @@ def test_registering_real_dock_adds_its_camera(d, client, monkeypatch):
         d.dock_store.unregister("REALDOCK7")
         with d.dock_hub.lock:
             d.dock_hub.state.pop("REALDOCK7", None)
+
+
+# ---------- Phase 3a: the dock flies a route by itself ----------
+
+def test_flight_plan_file(d):
+    import zipfile, io
+    import dock_wayline as w
+    home = (45.5, -75.66)
+    stops = [{"lat": 45.5005, "lon": -75.66}, {"lat": 45.5005, "lon": -75.659}]
+    detours = {(home, (45.5005, -75.66)): [(45.5002, -75.6605)]}
+    pts = w.plan_points(home, stops, lambda a, b: detours.get((a, b), []))
+    assert [p["stop"] for p in pts] == [False, True, True] and pts[0]["lat"] == 45.5002
+    kmz = w.build_kmz(pts, alt=300, speed=50, pause_s=5, drone_enum=(100, 1), payload_enum=99)
+    names = zipfile.ZipFile(io.BytesIO(kmz)).namelist()
+    assert set(names) == {"wpmz/template.kml", "wpmz/waylines.wpml"}
+    wp = zipfile.ZipFile(io.BytesIO(kmz)).read("wpmz/waylines.wpml").decode()
+    assert "<wpml:finishAction>goHome</wpml:finishAction>" in wp and "<wpml:executeRCLostAction>goBack</wpml:executeRCLostAction>" in wp
+    assert "<wpml:droneEnumValue>100</wpml:droneEnumValue>" in wp and "<wpml:payloadEnumValue>99</wpml:payloadEnumValue>" in wp
+    back = w.read_kmz(kmz)
+    assert [round(p["lat"], 4) for p in back] == [45.5002, 45.5005, 45.5005]
+    assert all(p["alt"] == w.MAX_ALT and p["speed"] == w.MAX_SPEED for p in back)  # clamped to 120 m and 12 m/s
+    assert [p["hover"] for p in back] == [0.0, 5.0, 5.0]  # hover only at the real stops
+    assert len(w.fingerprint(kmz)) == 32
+    with pytest.raises(ValueError):
+        w.plan_points(home, stops, lambda a, b: None)
+    with pytest.raises(ValueError):
+        w.build_kmz([], 30, 5)
+
+
+@pytest.fixture
+def flying_dock(d, client, monkeypatch):
+    """A registered simulated dock with automatic flights on, a fast simulator and the flight-plan server running."""
+    port = _free_port()
+    monkeypatch.setattr(d, "DOCK_PILOT_PORT", port)
+    monkeypatch.setattr(d, "_lan_ip", lambda: "127.0.0.1")
+    server = d.dock_lib.start_pilot_server(d.dock_store, d._dock_creds, lambda: "127.0.0.1", port=port, bind="127.0.0.1")
+    sent = []
+    monkeypatch.setattr(d, "queue_telegram_alert", lambda kind, text, key, snapshot_bytes=None, buttons=None: sent.append(text))
+    home = (45.5048, -75.6636)
+    sn = client.post("/api/docks/simulate", json={"lat": home[0], "lon": home[1]}).get_json()["sn"]
+    sim = d.dock_hub.local[sn]
+    sim.speedup, sim.period = 40.0, 0.2
+    assert wait_until(lambda: d.dock_hub.summary(sn)["lat"] and d.dock_hub.video_sources(sn), 10)
+    assert client.post("/api/docks/register", json={"sn": sn, "name": "Patrol dock"}).get_json()["ok"]
+    r = client.post("/api/docks/" + sn + "/settings", json={"auto_flights": True})
+    assert r.status_code == 400  # the site's permission must be confirmed
+    assert client.post("/api/docks/" + sn + "/settings", json={"auto_flights": True, "confirm": True}).get_json()["auto_flights"]
+    stops = [{"lat": home[0] + 0.0003, "lon": home[1]}, {"lat": home[0] + 0.0003, "lon": home[1] + 0.0004}]
+    assert client.post("/api/routes", json={"name": "Dock loop", "points": stops, "alt": 40, "speed": 8, "pause": 2}).get_json()["ok"]
+    yield d, client, sn, sim, sent
+    client.delete("/api/routes", json={"name": "Dock loop"})
+    client.delete(f"/api/docks/{sn}")
+    server.shutdown()
+
+
+def test_dock_flies_a_route_and_lands(flying_dock):
+    d, client, sn, sim, sent = flying_dock
+    r = client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).get_json()
+    assert r["ok"], r
+    assert any("route Dock loop started" in t for t in sent)
+    assert wait_until(lambda: d.dock_hub.summary(sn)["drone_in_dock"] is False, 10)  # took off
+    m = d.dock_hub.mission(sn)
+    assert m["active"] and m["name"] == "Dock loop" and len(m["points"]) == 2
+    d.dock_missions_tick()
+    assert d.dock_hub.summary(sn)["video"]["streaming"]  # the AI watches the patrol
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).status_code == 409  # busy
+    seen = set()
+
+    def landed():
+        x = d.dock_hub.summary(sn)
+        if x["drone_lat"]:
+            seen.add((round(x["drone_lat"], 4), round(x["drone_lon"], 4)))
+        return not d.dock_hub.mission(sn)["active"] and x["drone_in_dock"]
+    assert wait_until(landed, 20)
+    assert d.dock_hub.mission(sn)["status"] == "ok"
+    assert (45.5051, -75.6636) in seen or (45.5051, -75.6632) in seen  # it went to the stops
+    d.dock_missions_tick()
+    assert any("route Dock loop finished and is back in the dock" in t for t in sent)
+    assert not d.dock_hub.summary(sn)["video"]["streaming"]  # video stopped after landing
+    page = [x for x in client.get("/api/docks").get_json()["docks"] if x["sn"] == sn][0]
+    assert page["mission"]["status"] == "ok" and page["auto_flights"] and page["range_m"] == 500
+
+
+def test_dock_called_back(flying_dock):
+    d, client, sn, sim, sent = flying_dock
+    sim.speedup = 2.0  # slow enough to call it back mid-route
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).status_code == 409  # nothing to stop
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).get_json()["ok"]
+    assert wait_until(lambda: d.dock_hub.summary(sn)["drone_in_dock"] is False, 10)
+    r = client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()
+    assert r["ok"] and d.dock_hub.mission(sn)["status"] == "returning"
+    sim.speedup = 40.0
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+    assert d.dock_hub.mission(sn)["status"] == "canceled"
+    d.dock_missions_tick()
+    assert any("was called back and is back in the dock" in t for t in sent)
+
+
+def test_dock_preflight_refusals(flying_dock, monkeypatch):
+    d, client, sn, sim, sent = flying_dock
+    fly = lambda: client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"})  # noqa: E731
+    assert "No saved route" in client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Nope"}).get_json()["error"]
+    assert client.post(f"/api/docks/{sn}/settings", json={"range_m": 20}).get_json()["range_m"] == 50  # at least 50 m
+    assert client.post(f"/api/docks/{sn}/settings", json={"range_m": 9000}).get_json()["range_m"] == 2000  # at most 2 km
+    client.post(f"/api/docks/{sn}/settings", json={"range_m": 100})
+    far = {"name": "Dock far", "points": [{"lat": 45.5048 + 0.003, "lon": -75.6636}], "alt": 40, "speed": 8}
+    assert client.post("/api/routes", json=far).get_json()["ok"]
+    try:
+        r = client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock far"}).get_json()
+        assert "Stop 1 is 333 m from Patrol dock (its range is 100 m)" in r["error"]
+    finally:
+        client.delete("/api/routes", json={"name": "Dock far"})
+    client.post(f"/api/docks/{sn}/settings", json={"range_m": 500})
+    monkeypatch.setitem(d.load_response_settings(), "min_battery", 35)
+    sim.battery = 20.0
+    sim.fault = "battery"
+    assert wait_until(lambda: (d.dock_hub.summary(sn)["battery"] or 99) < 35, 5)
+    assert "battery" in fly().get_json()["error"]
+    sim.fault = "wind"
+    sim.battery = 90.0
+    assert wait_until(lambda: (d.dock_hub.summary(sn)["wind"] or 0) > 12, 5)
+    assert "Wind at the dock" in fly().get_json()["error"]
+    sim.fault = "cover"
+    assert wait_until(lambda: d.dock_hub.summary(sn)["cover"] == "cover fault", 5)
+    assert "cover" in fly().get_json()["error"]
+    sim.fault = ""
+    assert wait_until(lambda: d.dock_hub.summary(sn)["cover"] == "closed", 5)
+    d.nofly.save_zones(d.NOFLY_FILE, [square({"lat": 45.5051, "lon": -75.6636}, 10, "School")])
+    try:
+        assert "School" in fly().get_json()["error"]
+    finally:
+        d.nofly.save_zones(d.NOFLY_FILE, [])
+    client.post(f"/api/docks/{sn}/settings", json={"auto_flights": False})
+    assert "Automatic flights are off" in fly().get_json()["error"]
+    import users
+    assert users.allowed("operator", "POST", f"/api/docks/{sn}/mission") and not users.allowed("operator", "POST", f"/api/docks/{sn}/settings")
+    assert not users.allowed("viewer", "POST", f"/api/docks/{sn}/mission")
+
+
+def test_aircraft_sends_dock_home(flying_dock, monkeypatch):
+    d, client, sn, sim, sent = flying_dock
+    sim.speedup = 1.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).get_json()["ok"]
+    assert wait_until(lambda: d.dock_hub.summary(sn)["drone_in_dock"] is False, 10)
+    monkeypatch.setattr(d, "send_telegram", lambda *a, **k: {"ok": True})
+    d._traffic_alerted.clear()
+    d._traffic_respond([{"hex": "abc123", "call": "TEST1", "type": "C172", "dist_m": 1000, "bearing": 90, "height_ft": 800}],
+                       {**d.load_safety()["traffic"], "action": "descend"})
+    assert d.dock_hub.mission(sn)["status"] == "returning"
+    sim.speedup = 40.0
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)

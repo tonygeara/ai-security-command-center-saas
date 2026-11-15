@@ -5520,6 +5520,7 @@ def _dock_health_worker():
     while True:
         try:
             dock_health_tick()
+            dock_missions_tick()
         except Exception as e:  # noqa: BLE001 - keep watching
             print("Dock health check error:", e)
         time.sleep(DOCK_HEALTH_SECONDS)
@@ -5599,8 +5600,12 @@ def api_docks():
     """Registered docks with their live state, and docks that connected but aren't registered yet (anyone signed in)."""
     snap = dock_hub.snapshot()
     over = _docks_over_limit()
+    stored = dock_store.docks()
     for x in snap["docks"]:
         x["over_limit"] = x["sn"] in over
+        st = stored.get(x["sn"]) or {}
+        x["auto_flights"] = bool(st.get("auto_flights"))
+        x["range_m"] = int(st.get("range_m") or DOCK_RANGE_DEFAULT)
         x["alerts"] = [{"key": a["key"], "level": a["level"], "text": a["text"], "t": a["t"]} for a in dock_health.active(x["sn"])]
     snap["health_log"] = dock_health.recent(15)
     return jsonify({"ok": True, "allowed": dock_allowed(), "cloud_ready": dock_store.cloud_ready(),
@@ -5738,6 +5743,179 @@ def api_dock_video(sn):
         return jsonify({"ok": False, "error": msg}), 409
     audit_record(f"dock: video {action}", target=sn, detail={"name": d["name"], "lens": data.get("lens"), "device": data.get("device")})
     return jsonify({"ok": True, "video": dock_hub.summary(sn)["video"], "camera": d["slot"]})
+
+
+# ---------- Phase 3: the dock flies routes by itself (DJI flight plans) ----------
+import uuid  # noqa: E402
+
+import dock_wayline  # noqa: E402
+
+DOCK_RANGE_DEFAULT, DOCK_RANGE_MAX = 500, 2000   # m from the dock
+
+
+def dock_flight_problem(sn, points=None, loop=False):
+    """Why this dock can't take off now for these stops ('' = clear to fly). Every check is shown and logged."""
+    d = dock_store.docks().get(sn)
+    if not d:
+        return "Register this dock first."
+    name = d["name"]
+    if not dock_allowed():
+        return "DJI Docks aren't included in this PC's licence."
+    if sn in _docks_over_limit():
+        return f"{name} is over the licence's dock count."
+    if not d.get("auto_flights"):
+        return f"Automatic flights are off for {name}. An admin can switch them on (Drone page → {name})."
+    if not dock_hub.online(sn):
+        return f"{name} is offline."
+    m = dock_hub.mission(sn)
+    if m and m["active"]:
+        return f"{name}'s drone is already on a mission."
+    x = dock_hub.summary(sn)
+    if not x["drone_sn"]:
+        return f"There is no drone in {name}."
+    if x["drone_in_dock"] is False:
+        return f"{name}'s drone isn't in the dock."
+    if x["mode"] not in ("", "idle"):
+        return f"{name} is busy ({x['mode']})."
+    if x["cover"] == "cover fault":
+        return f"{name}'s cover reports a fault."
+    warn = [a for a in dock_health.active(sn) if a["level"] == "warning"]
+    if warn:
+        return "Dock warning: " + warn[0]["text"]
+    battery, need = x["battery"], load_response_settings()["min_battery"]
+    if battery is None or battery < need:
+        return f"The drone's battery is {battery if battery is not None else '?'}% (needs {need}%)."
+    if x["wind"] is not None and x["wind"] >= dock_lib.WIND_ALERT:
+        return f"Wind at the dock is {x['wind']:.1f} m/s."
+    if x["rain"] in ("moderate", "heavy"):
+        return f"{x['rain'].capitalize()} rain at the dock."
+    if not x["lat"]:
+        return f"{name} hasn't reported its position yet."
+    home = (x["lat"], x["lon"])
+    limit = int(d.get("range_m") or DOCK_RANGE_DEFAULT)
+    for i, p in enumerate(points or [], 1):
+        dist = _distance_m(home[0], home[1], p["lat"], p["lon"])
+        if dist > limit:
+            return f"Stop {i} is {int(dist)} m from {name} (its range is {limit} m)."
+    if points:
+        problem = nofly.route_problem(nofly_zones(), points, loop, home, True)
+        if problem:
+            return problem
+    return flight_conditions(home)[0]  # weather forecast and crewed aircraft, as for every automatic flight
+
+
+def dock_fly_route(sn, name, by="dashboard"):
+    """Fly a saved route from a dock: pre-flight check, flight plan, start. {"ok", "error"|"message"}."""
+    route = load_routes().get(name or "")
+    if not route:
+        return {"ok": False, "error": f"No saved route named “{name}”."}
+    route = _clean_route(route)
+    problem = dock_flight_problem(sn, route["points"], route["loop"])
+    if problem:
+        _dock_refusal(sn, f"route {name}", problem, by)
+        return {"ok": False, "error": problem}
+    x, s = dock_hub.summary(sn), dock_hub.state.get(sn) or {}
+    try:
+        pts = dock_wayline.plan_points((x["lat"], x["lon"]), route["points"],
+                                       lambda a, b: nofly.detour(nofly_zones(), a, b), route["loop"])
+        kmz = dock_wayline.build_kmz(pts, route["alt"], route["speed"], route["pause"],
+                                     s.get("drone_enum") or (100, 1), dock_hub.payload_enum(sn) or 99, name=name)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    token = dock_lib.publish_wayline(kmz)
+    url = f"http://{_lan_ip()}:{DOCK_PILOT_PORT}/wayline/{token}.kmz"
+    flight_id = str(uuid.uuid4())
+    ok, msg = dock_hub.start_mission(sn, flight_id, url, dock_wayline.fingerprint(kmz), max(dock_wayline.RTH_ALT, route["alt"]),
+                                     name=name, points=[{"lat": p["lat"], "lon": p["lon"]} for p in pts])
+    dname = dock_store.docks()[sn]["name"]
+    if not ok:
+        _dock_refusal(sn, f"route {name}", msg, by)
+        return {"ok": False, "error": msg}
+    audit_record("dock: route started", target=sn, detail={"name": dname, "route": name, "stops": len(route["points"]), "by": by,
+                                                           "flight_id": flight_id})
+    queue_telegram_alert("dock_mission", f"🛫 {dname}: route {name} started ({len(route['points'])} stops).",
+                         f"dock:{sn}:mission:{flight_id}", snapshot_bytes=b"")
+    warnings = flight_conditions((x["lat"], x["lon"]))[1]
+    return {"ok": True, "flight_id": flight_id,
+            "message": f"{dname}: route {name} started." + "".join(f" ⚠ {w}" for w in warnings)}
+
+
+def _dock_refusal(sn, what, why, by):
+    audit_record("dock: flight refused", target=sn, detail={"what": what, "why": why, "by": by}, result="refused")
+
+
+_dock_mission_seen = {}  # flight_id -> what has been done for it (video started, end reported)
+
+
+def dock_missions_tick():
+    """While docks fly: start the video once the drone is out, report the end, and forget finished missions."""
+    for sn, d in dock_store.docks().items():
+        m = dock_hub.mission(sn)
+        if not m:
+            continue
+        seen = _dock_mission_seen.setdefault(m["flight_id"], set())
+        x = dock_hub.summary(sn)
+        if m["active"] and x["drone_in_dock"] is False and "video" not in seen and not x["video"]["streaming"]:
+            seen.add("video")
+            ok, msg, _ = dock_hub.start_video(sn, f"rtmp://{_lan_ip()}:1935/{d['slot']}", "drone")
+            if not ok:
+                print(f"{d['name']}: video not started: {msg}")
+        if not m["active"] and "end" not in seen:
+            seen.add("end")
+            how = {"ok": "finished and is back in the dock", "canceled": "was called back and is back in the dock"}.get(
+                m["status"], f"ended: {m['status']}")
+            audit_record("dock: route ended", target=sn, detail={"name": d["name"], "route": m["name"], "status": m["status"]})
+            queue_telegram_alert("dock_mission", f"{'🛬' if m['status'] in ('ok', 'canceled') else '⚠️'} {d['name']}: route {m['name']} {how}.",
+                                 f"dock:{sn}:mission-end:{m['flight_id']}", snapshot_bytes=b"")
+            if x["video"]["streaming"] and x["video"]["device"] == "drone":
+                dock_hub.stop_video(sn)
+        if not m["active"] and m.get("ended") and dock_hub.now() - m["ended"] > 600:
+            dock_hub.clear_mission(sn)
+            _dock_mission_seen.pop(m["flight_id"], None)
+
+
+@app.route("/api/docks/<sn>/mission", methods=["POST"])
+def api_dock_mission(sn):
+    """Operators: {"action": "fly", "route": name} flies a saved route from the dock; {"action": "stop"} brings it back."""
+    data = request.get_json(silent=True) or {}
+    by = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    if data.get("action") == "fly":
+        r = dock_fly_route(sn, str(data.get("route") or ""), by=by)
+        return jsonify(r), (200 if r["ok"] else 409)
+    if data.get("action") == "stop":
+        m = dock_hub.mission(sn)
+        if not m or not m["active"]:
+            return jsonify({"ok": False, "error": "The drone isn't on a mission."}), 409
+        ok, msg = dock_hub.return_home(sn)
+        audit_record("dock: return to dock", target=sn, detail={"route": m["name"], "by": by}, result="ok" if ok else "failed")
+        return jsonify({"ok": ok, "error": msg} if not ok else {"ok": True, "message": "Returning to the dock."}), (200 if ok else 409)
+    return jsonify({"ok": False, "error": "Unknown action."}), 400
+
+
+@app.route("/api/docks/<sn>/settings", methods=["POST"])
+def api_dock_settings(sn):
+    """Admins: {"auto_flights": bool, "confirm": true} (switching on needs the site's permission confirmed), {"range_m"}."""
+    d = dock_store.docks().get(sn)
+    if not d:
+        return jsonify({"ok": False, "error": "Unknown dock."}), 404
+    data = request.get_json(silent=True) or {}
+    who = (getattr(g, "user", None) or {}).get("username") or "admin at this PC"
+    values = {}
+    if "auto_flights" in data:
+        on = bool(data["auto_flights"])
+        if on and not data.get("confirm"):
+            return jsonify({"ok": False, "error": "Confirm that this site has permission for automated flights."}), 400
+        values.update(auto_flights=on, auto_flights_by=who if on else "", auto_flights_at=time.time() if on else 0)
+    if "range_m" in data:
+        try:
+            values["range_m"] = max(50, min(DOCK_RANGE_MAX, int(float(data["range_m"]))))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Range must be a number of metres."}), 400
+    if not values:
+        return jsonify({"ok": False, "error": "Nothing to change."}), 400
+    d = dock_store.set_settings(sn, **values)
+    audit_record("dock: settings changed", target=sn, detail={"name": d["name"], **{k: v for k, v in values.items() if k != "auto_flights_at"}})
+    return jsonify({"ok": True, "auto_flights": bool(d.get("auto_flights")), "range_m": int(d.get("range_m") or DOCK_RANGE_DEFAULT)})
 
 
 DOCK_SIM_FAULTS = ("", "offline", "cover", "rain", "wind", "hot", "battery", "hms")
@@ -7884,8 +8062,10 @@ def flight_conditions(loc=None):
 def _traffic_respond(threats, settings):
     """A crewed aircraft is close and low: tell everyone and get the flying drones out of its way."""
     flying = [d for d in drone_slots() if link_fresh(d, 5) and get_link(d)["telemetry"].get("flying")]
+    docks_out = [sn for sn in dock_store.docks() if (dock_hub.mission(sn) or {}).get("active")
+                 and (dock_hub.mission(sn) or {}).get("status") != "returning"]
     new = [a for a in threats if time.time() - _traffic_alerted.get(a["hex"] or a["call"], 0) > 600]
-    if not flying or not new:
+    if not (flying or docks_out) or not new:
         return
     for a in new:
         _traffic_alerted[a["hex"] or a["call"]] = time.time()
@@ -7911,6 +8091,10 @@ def _traffic_respond(threats, settings):
             drone_command("land", timeout=8.0, slot=slot)
         elif act == "home":
             _go_home_safe(slot, "crewed aircraft nearby")
+    if act != "warn":  # a dock's drone flying a mission: always back to its dock (it can't hold a hover there)
+        for sn in docks_out:
+            ok, msg = dock_hub.return_home(sn)
+            audit_record("dock: return to dock", target=sn, detail={"why": "crewed aircraft nearby"}, result="ok" if ok else "failed")
     traffic_state["actions"] = (traffic_state["actions"] + [{"at": time.time(), "text": airtraffic.describe(new[0]), "action": act}])[-10:]
     if telegram_ready():
         send_telegram(f"✈ Crewed aircraft near the site: {airtraffic.describe(new[0])}. {what}".strip())
