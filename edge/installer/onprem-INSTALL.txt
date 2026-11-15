@@ -2,7 +2,7 @@ AI COMMAND CENTRE LEBANON - INSTALLATION GUIDE (on-prem, no cloud account needed
 ==================================================================================
 
 WHAT IS IN THIS PACKAGE
-  AI-Command-Centre-Lebanon-Setup-<version>.exe   the program
+  On-prem-AI-Command-Centre-Setup-<version>.exe   the program
   ai-command-centre-images.tar                    the local AI services (Frigate, MQTT,
                                                   drone receiver) - no internet needed for them
   INSTALL.txt                                     this guide
@@ -26,7 +26,7 @@ STEP 1 - INSTALL DOCKER DESKTOP (one time)
   this step works offline.
 
 STEP 2 - INSTALL THE PROGRAM
-  - Run AI-Command-Centre-Lebanon-Setup-<version>.exe FROM THIS FOLDER (keep the .tar file
+  - Run On-prem-AI-Command-Centre-Setup-<version>.exe FROM THIS FOLDER (keep the .tar file
     next to it so the AI services install without internet).
   - Windows may show "Windows protected your PC": click More info > Run anyway.
   - No administrator rights are needed.

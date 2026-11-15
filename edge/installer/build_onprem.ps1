@@ -2,7 +2,7 @@
 # compiled (native) application code, plus a USB package for laptops without internet.
 #   powershell -ExecutionPolicy Bypass -File edge\installer\build_onprem.ps1 [-SkipImages]
 # Output: edge\installer\output\onprem-usb\
-#   AI-Command-Centre-Lebanon-Setup-<version>.exe
+#   On-prem-AI-Command-Centre-Setup-<version>.exe
 #   ai-command-centre-images.tar      (AI services, so the first start needs no internet)
 #   INSTALL.txt
 param([switch]$SkipImages)
@@ -47,7 +47,7 @@ Copy-Item (Join-Path $App 'launcher.pyw') $Stage
 Copy-Item (Join-Path $App 'dashboard.py') $Stage
 Copy-Item (Join-Path $App 'licensing.py') $Stage
 Copy-Item (Join-Path $App 'browser_mode.py') $Stage
-foreach ($m in 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf') { Copy-Item (Join-Path $App "$m.py") $Stage }
+foreach ($m in 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dock', 'dock_sim', 'dock_wayline', 'dock_media') { Copy-Item (Join-Path $App "$m.py") $Stage }
 Copy-Item (Join-Path $App 'pages') $Stage -Recurse
 Copy-Item (Join-Path $App 'static') $Stage -Recurse  # map + 3D viewer libraries (data, not code)
 Get-ChildItem $Stage -Recurse -Directory -Filter '__pycache__' | Remove-Item -Recurse -Force
@@ -64,7 +64,7 @@ DATA_DIR_NAME = "$Slug"
 # 2. Compile the application modules to native code; then remove their sources.
 Push-Location $Stage
 try {
-    foreach ($m in 'edition', 'licensing', 'geo', 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dashboard') {
+    foreach ($m in 'edition', 'licensing', 'geo', 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dock', 'dock_sim', 'dock_wayline', 'dock_media', 'dashboard') {
         Write-Host "Compiling $m to native code..."
         & $python -m nuitka --module "$m.py" $compiler --assume-yes-for-downloads --remove-output --quiet
         if ($LASTEXITCODE) { throw "Nuitka failed for $m" }
@@ -85,7 +85,7 @@ try {
     & $python -m PyInstaller --clean --noconfirm --distpath dist --workpath build\pyi-onprem onprem.spec
     if ($LASTEXITCODE) { throw 'PyInstaller build failed' }
 } finally { Pop-Location }
-$own = 'dashboard', 'licensing', 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'main_page', 'drone_control', 'maps', 'safety'
+$own = 'dashboard', 'licensing', 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dock', 'dock_sim', 'dock_wayline', 'dock_media', 'main_page', 'drone_control', 'maps', 'safety'
 $leak = Get-ChildItem (Join-Path $Installer "dist\$Slug") -Recurse -Include ($own | ForEach-Object { "$_.py"; "$_.pyc" }) -ErrorAction SilentlyContinue
 if ($leak) { throw "Source/bytecode leaked into the package: $($leak.FullName -join ', ')" }
 
@@ -98,7 +98,9 @@ if ($LASTEXITCODE) { throw 'Installer build failed' }
 
 # 5. USB package.
 New-Item -ItemType Directory -Force $Usb | Out-Null
-Copy-Item (Join-Path $Installer "output\$Slug-Setup-$($version.TrimStart('V')).exe") $Usb -Force
+# Published as "On-prem AI Command Centre"; the app inside keeps its name and install ID, so PCs upgrade in place.
+Get-ChildItem $Usb -Filter '*-Setup-*.exe' -ErrorAction SilentlyContinue | Remove-Item -Force
+Copy-Item (Join-Path $Installer "output\$Slug-Setup-$($version.TrimStart('V')).exe") (Join-Path $Usb "On-prem-AI-Command-Centre-Setup-$($version.TrimStart('V')).exe") -Force
 Copy-Item (Join-Path $Installer 'onprem-INSTALL.txt') (Join-Path $Usb 'INSTALL.txt') -Force
 if (-not $SkipImages) {
     $env:AI_SECURITY_DATA = 'C:/unused'

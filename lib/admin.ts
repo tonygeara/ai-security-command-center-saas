@@ -5,14 +5,20 @@ import type {SupabaseClient} from "@supabase/supabase-js";
 // The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
 // new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
 // published automatically when that version reaches main (.github/workflows/edge-installer.yml).
-export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.10.0";
-// Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>
-// (private repository: open the links signed in to GitHub).
-export const RELEASE_URL = `https://github.com/tonygeara/ai-security-command-center-saas/releases/tag/edge-v${LATEST_APP_VERSION}`;
+export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.10.1";
+// Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>, marked
+// "latest", with copies whose names carry no version. The links below go to GitHub's latest release, so they always
+// give the newest installers that were actually published: right after a merge (build still running) or if a build
+// fails, they keep giving the previous ones instead of a missing file. Private repository: sign in to GitHub.
+const REPO = "https://github.com/tonygeara/ai-security-command-center-saas";
+export const RELEASE_URL = `${REPO}/releases/latest`;
+const latest = (file: string) => `${REPO}/releases/latest/download/${file}`;
 export const INSTALLERS = [
-  {edition: "Online (cloud)", file: `AI-Security-Command-Center-Setup-${LATEST_APP_VERSION}.exe`, note: "Paired with this portal: features, limits and drone control are set per client here."},
-  {edition: "On-prem", file: `AI-Command-Centre-Lebanon-Setup-${LATEST_APP_VERSION}.exe`, note: "Works offline with a licence file from Licences. For a USB install without internet, add the AI-services file made with build_onprem.ps1."},
-].map(i => ({...i, url: `https://github.com/tonygeara/ai-security-command-center-saas/releases/download/edge-v${LATEST_APP_VERSION}/${i.file}`}));
+  {edition: "Online (cloud)", file: "AI-Security-Command-Center-Setup.exe", guide: latest("Online-INSTALL.txt"),
+   note: "Paired with this portal: features, limits and drone control are set per client here."},
+  {edition: "On-prem AI Command Centre", file: "On-prem-AI-Command-Centre-Setup.exe", guide: latest("On-prem-INSTALL.txt"),
+   note: "Works offline with a licence file from Licences. For a USB install without internet, add the AI-services file made with build_onprem.ps1."},
+].map(i => ({...i, url: latest(i.file)}));
 const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
 
 export type Row = Record<string, any>;
