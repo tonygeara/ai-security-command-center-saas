@@ -4,7 +4,7 @@ import {useRouter} from "next/navigation";
 import {createClient} from "../../../lib/supabase/client";
 
 type Lic = Record<string, any>;
-const FEATURES: [string, string][] = [["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","Plate reading (LPR)"],["drone_live","Drone live"],["drone_ai","Drone AI"],["drone_tracking","Drone tracking"],["drone_control","Fly drone from PC"],["handoff","Camera-to-drone handoff"],["smart_patrol","Smart patrol"],["verified_alarms","Drone-verified alarms"],["incident_replay","4D incident replay"],["phone_access","Phone access"]];
+const FEATURES: [string, string][] = [["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","Plate reading (LPR)"],["drone_live","Drone live"],["drone_ai","Drone AI"],["drone_tracking","Drone tracking"],["drone_control","Fly drone from PC"],["drone_dock","DJI Docks"],["handoff","Camera-to-drone handoff"],["smart_patrol","Smart patrol"],["verified_alarms","Drone-verified alarms"],["incident_replay","4D incident replay"],["phone_access","Phone access"]];
 // The newer features: a licence record saved before they were listed had them all (nothing could turn them off).
 const PREMIUM = ["handoff","smart_patrol","verified_alarms","incident_replay","phone_access"];
 const DEFAULT_FEATURES = ["camera_ai","face_ai","lpr","drone_live","drone_ai","drone_tracking","handoff","smart_patrol","verified_alarms","incident_replay","phone_access"];

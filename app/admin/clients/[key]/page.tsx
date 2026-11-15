@@ -9,7 +9,7 @@ import RemoveButton from "../../RemoveButton";
 import UserManager from "../../../components/UserManager";
 import {BlockClient, PcName, PcSwitch, RenameClient, SourceSwitch} from "../../DeviceControls";
 
-const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"],
+const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"], ["drone_dock", "DJI Docks"],
   ["handoff", "Camera-to-drone handoff"], ["smart_patrol", "Smart patrol"], ["verified_alarms", "Drone-verified alarms"],
   ["incident_replay", "4D incident replay"], ["phone_access", "Phone access"]];
 // Newer features: until set for a client, they are included (as before these switches existed).
@@ -56,7 +56,7 @@ export default async function ClientPage({params}: {params: Promise<{key: string
           const follows = k === "drone_control" && !ov && !def;
           const included = PREMIUM.has(k) && !ov && !def;
           const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : included);
-          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial}/></p>; })}</article>
+          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}{k === "drone_dock" && !ov && !def && <span className="muted"> · off until switched on</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial}/></p>; })}</article>
       </section>
       <h2>PCs (Edge Agents)</h2>
       <div className="card tableWrap"><table className="adminTable"><thead><tr><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>

@@ -175,8 +175,28 @@ def test_only_admins_set_up_docks(d):
     assert not users.allowed("operator", "DELETE", "/api/docks/SIMDOCK1")
 
 
+def test_licence_switch(d, monkeypatch):
+    """drone_dock is off unless switched on: per client in the portal (cloud) or ticked on an on-prem licence."""
+    monkeypatch.setattr(d, "onprem_mode", lambda: False)
+    monkeypatch.setitem(d.cloud_state, "licensed", True)
+    monkeypatch.setitem(d.cloud_state, "features", {"drone_control": {"enabled": True, "limit_value": None}})
+    assert not d._dock_licensed()  # never set for this client: off, even with drone control on
+    monkeypatch.setitem(d.cloud_state, "features", {"drone_dock": {"enabled": True, "limit_value": None}})
+    assert d._dock_licensed()
+    monkeypatch.setitem(d.cloud_state, "features", {"drone_dock": {"enabled": False, "limit_value": None}})
+    assert not d._dock_licensed()
+    monkeypatch.setattr(d, "onprem_mode", lambda: True)
+    monkeypatch.setitem(d.offline_license, "payload", {"features": ["camera_ai", "drone_control"], "feature_set": 2})
+    assert not d._dock_licensed()
+    monkeypatch.setitem(d.offline_license, "payload", {"features": ["camera_ai", "drone_dock"], "feature_set": 2})
+    assert d._dock_licensed()
+    import licensing
+    assert "drone_dock" in licensing.FEATURES and "drone_dock" in licensing.OPT_IN_FEATURES
+    assert licensing.features_for_dashboard({"features": ["drone_dock"]})["drone_dock"]["enabled"]
+
+
 def test_not_licensed(d, client, monkeypatch):
-    monkeypatch.setattr(d, "drone_control_allowed", lambda: False)
+    monkeypatch.setattr(d, "dock_allowed", lambda: False)
     assert client.post("/api/docks/simulate", json={}).status_code == 403
     assert client.post("/api/docks/register", json={"sn": "DOCK1"}).status_code == 403
     assert client.get("/api/docks").get_json()["allowed"] is False

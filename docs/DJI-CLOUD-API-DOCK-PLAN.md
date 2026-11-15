@@ -9,8 +9,10 @@ port 8767), `edge/app/dock_sim.py` (simulated Dock 3 + Matrice 4TD), the `dock-m
 panel on the Drone page (Found → Register, rename, remove; admin setup with Cloud API keys and the Pilot 2
 link/QR; simulated dock); registered docks in the Drone page's fleet bar and on its map (dock marker, and the
 drone with its height when it is out; a click on either shows the other). Tests: `edge/tests/test_docks.py`.
-Still to do in Phase 1: docks counted in the licence, the `drone_dock` switch in Supabase/admin portal/on-prem
-licence, and health (HMS) alerts. Docks become full drone slots (own Drone page, routes, responses) in Phase 3-4,
+Licence switch **`drone_dock`** ("DJI Docks"): off for every client until switched on, in the admin portal
+(client → Feature access) or ticked on an on-prem licence. Supabase part is live (15 Nov: `set_feature_override`
+accepts it; `issue-onprem-license` and `edge-agent-control` redeployed with it in `license.ts`); the portal and
+the PC need this branch merged. Still to do in Phase 1: docks counted in the licence, and health (HMS) alerts. Docks become full drone slots (own Drone page, routes, responses) in Phase 3-4,
 when they can fly.
 
 ## Goal

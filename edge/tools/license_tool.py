@@ -9,7 +9,7 @@ Setup, once:
 Issue a license for a customer laptop (they read the Machine ID from the app's License page):
     python license_tool.py issue --customer "Karim" --machine XXXX-XXXX-XXXX-XXXX-XXXX \
         --expires 2027-10-20 --cameras 4 --drones 1 \
-        --features camera_ai face_ai lpr drone_live drone_ai drone_tracking [drone_control]
+        --features camera_ai face_ai lpr drone_live drone_ai drone_tracking [drone_control] [drone_dock]
     -> writes license-<customer>-<machine>.lic; give that file to the customer.
 
 Check a license file:

@@ -5492,13 +5492,15 @@ _dock_status = {"pilot_page": ""}
 
 
 def dock_allowed():
-    """DJI Docks: the per-client switch drone_dock once the provider has set it; until then they follow drone control."""
-    if not onprem_mode():
-        with cloud_lock:
-            explicit = "drone_dock" in (cloud_state.get("features") or {})
-        if explicit:
-            return cloud_feature_enabled("drone_dock")
-    return drone_control_allowed()
+    return _dock_licensed()
+
+
+def _dock_licensed():
+    """DJI Docks: the per-client licence switch drone_dock (admin portal → client → Feature access, or "DJI Docks"
+    ticked on an on-prem licence). Off unless the provider switches it on."""
+    if onprem_mode():
+        return "drone_dock" in set((offline_license.get("payload") or {}).get("features") or [])
+    return cloud_feature_enabled("drone_dock")
 
 
 def _dock_creds():
