@@ -63,6 +63,11 @@ BODY = r"""
 .dk-video .dk-sim{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffcf7a;font:bold 12px Arial;letter-spacing:1px;text-align:center;padding:10px}
 .dk-launch{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px;padding:10px 12px;border:1px solid #a3303f;border-radius:5px;background:rgba(125,12,28,.22);color:#ffd5da}
 .dk-launch b{color:#fff}
+.dk-media{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:6px}
+.dk-media a{display:block;border:1px solid #153c56;border-radius:4px;background:#05131d;color:#9edfff;text-decoration:none;font-size:11px;overflow:hidden}
+.dk-media img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#000}
+.dk-media .dk-mvid{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;background:#020a10;font-size:28px}
+.dk-media span{display:block;padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dk-card.flash{box-shadow:0 0 0 2px #ffb23c}
 .dk-mark{width:22px;height:22px;border:2px solid #ffb23c;border-radius:4px;background:rgba(3,16,26,.9);color:#ffcf7a;font:bold 12px/18px Arial;text-align:center}
 .dk-mark.off{border-color:#53636d;color:#8aa0ad}
@@ -236,6 +241,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div id="dockMsg" class="hud-msg"></div>
 <div class="dk-videos" id="dockVideos"></div>
 <div class="dk-health" id="dockHealth"></div>
+<div id="dockMedia" style="margin-top:12px"></div>
 <details class="dk-setup" id="dockSetup" style="display:none"><summary>Set up a dock (admins)</summary>
 <div class="muted" style="margin-top:10px"><b>1. DJI Cloud API keys</b> (once): developer.dji.com → Apps → Create App, App Type <b>Cloud API</b>. Paste the three values here.</div>
 <div class="dk-form"><label>App ID<input id="dkAppId" autocomplete="off"></label>
@@ -631,6 +637,15 @@ function drawDockMissions(){if(!map||!window.L)return;const seen=new Set();
     if(!dkMissionLines[x.sn])dkMissionLines[x.sn]=L.polyline(pts,{color:'#ffb23c',weight:2,dashArray:'6 6'}).addTo(map);else dkMissionLines[x.sn].setLatLngs(pts)});
   Object.keys(dkMissionLines).forEach(sn=>{if(!seen.has(sn)){dkMissionLines[sn].remove();delete dkMissionLines[sn]}})}
 loadDockRoutes();setInterval(loadDockRoutes,30000);
+// Phase 5: photos and videos the docks uploaded
+let dkMediaSig='';
+async function loadDockMedia(){try{const d=await fetch('/api/docks/media',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  const sig=d.items.map(x=>x.id).join();if(sig===dkMediaSig)return;dkMediaSig=sig;
+  $('dockMedia').innerHTML=d.items.length?`<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">PHOTOS AND VIDEOS FROM THE DOCKS</b> <span class="muted" style="font-size:11px">(kept ${d.keep_days} days on this PC)</span><div class="dk-media">`
+    +d.items.slice(0,24).map(x=>`<a href="/api/docks/media/${esc(x.id)}${x.kind==='photo'?'':'?download=1'}" target="_blank" title="${esc(x.name)}">`
+      +(x.kind==='photo'&&x.present?`<img loading="lazy" src="/api/docks/media/${esc(x.id)}" alt="">`:`<div class="dk-mvid">${x.kind==='video'?'🎞':'📄'}</div>`)
+      +`<span>${esc(x.dock_name)} · ${esc(x.taken?x.taken.replace('T',' ').slice(5,16):new Date(x.added*1000).toLocaleString())}</span></a>`).join('')+'</div>':''}catch(e){}}
+loadDockMedia();setInterval(loadDockMedia,15000);
 // One player per streaming dock, kept across polls (the cards above are redrawn every 3 s).
 function drawDockVideos(){const box=$('dockVideos');if(!box)return;
   const live=dockData.filter(x=>(x.video||{}).streaming&&!x.over_limit);const want=new Set(live.map(x=>x.sn));

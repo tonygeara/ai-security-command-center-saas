@@ -80,7 +80,8 @@ def test_hub_topology_telemetry_and_replies(hub):
     hub.handle("thing/product/DOCK1/events", json.dumps({"tid": "e", "bid": "e", "method": "hms", "need_reply": 1, "data": {}}))
     assert sent[-1][0] == "thing/product/DOCK1/events_reply" and sent[-1][1]["data"]["result"] == 0
     hub.handle("thing/product/DOCK1/requests", json.dumps({"tid": "r", "bid": "r", "method": "config", "data": {}}))
-    assert sent[-1][0] == "thing/product/DOCK1/requests_reply" and sent[-1][1]["data"]["app_id"] == "123"
+    assert sent[-1][0] == "thing/product/DOCK1/requests_reply" and sent[-1][1]["data"]["output"]["app_id"] == "123"
+    assert sent[-1][1]["data"]["result"] == 0
     # Garbage is ignored.
     hub.handle("thing/product/DOCK1/osd", b"not json")
     hub.handle("weird/topic", b"{}")
@@ -931,3 +932,73 @@ def test_keyboard_sticks(flying_dock, monkeypatch):
     assert not d.dock_hub.drc_active(sn) and not sim.drc
     sim.speedup = 40.0
     assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+# ---------- Phase 5: photos and videos ----------
+
+def test_dock_photo_uploaded_listed_and_sent(alarm_dock, monkeypatch):
+    """A photo during an alarm launch: the dock asks where to upload, uploads it (signed S3), reports it; the PC lists it,
+    serves it, and sends the first one to Telegram and the incident."""
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    port = _free_port()
+    server = d.dock_media.start_server(d.DOCK_MEDIA, port=port, bind="127.0.0.1")
+    monkeypatch.setattr(d.dock_media, "PORT", port)
+    try:
+        d.dock_store.data["launch_without_asking"] = True
+        assert d.dispatch_drone("gate", by="auto: person seen")["launched"]
+        assert wait_until(lambda: (d.dock_missions_tick(), d._alarm_arrived(d.dock_store.docks()[sn]["slot"]))[1], 15)
+        assert client.post(f"/api/docks/{sn}/control", json={"action": "photo"}).get_json()["ok"]
+        assert wait_until(lambda: getattr(sim, "uploaded", 0) == 1, 10), getattr(sim, "upload_error", "")
+        items = client.get("/api/docks/media").get_json()["items"]
+        mine = [x for x in items if x["dock"] == sn]
+        assert mine and mine[0]["kind"] == "photo" and mine[0]["present"] and mine[0]["dock_name"] == "Patrol dock"
+        assert mine[0]["flight_id"] == d.dock_hub.mission(sn)["flight_id"] and mine[0]["lat"]
+        body = client.get(f"/api/docks/media/{mine[0]['id']}").data
+        assert body.startswith(b"\xff\xd8") and b"simulated photo" in body
+        assert any(t.startswith("📷 Patrol dock over gate") for t, _ in asked)  # the first photo goes to Telegram
+        assert client.post(f"/api/docks/{sn}/control", json={"action": "photo"}).get_json()["ok"]
+        assert wait_until(lambda: getattr(sim, "uploaded", 0) == 2, 10)
+        assert len([t for t, _ in asked if t.startswith("📷 Patrol dock over gate")]) == 1  # only the first
+        assert client.get("/api/docks/media/nope").status_code == 404
+    finally:
+        client.post(f"/api/docks/{sn}/mission", json={"action": "stop"})
+        wait_until(lambda: not (d.dock_hub.mission(sn) or {}).get("active"), 20)
+        server.shutdown()
+
+
+def test_media_receiver_with_aws_sdk(d, tmp_path):
+    """The receiver works with a real S3 client (boto3): bucket check, upload, multipart upload, download; wrong keys are refused."""
+    boto3 = pytest.importorskip("boto3")
+    from botocore.config import Config
+    from boto3.s3.transfer import TransferConfig
+    store = d.dock_media.MediaStore(str(tmp_path / "media"))
+    port = _free_port()
+    done = []
+    server = d.dock_media.start_server(store, lambda k, n: done.append((k, n)), port=port, bind="127.0.0.1")
+    try:
+        def s3(secret):
+            return boto3.client("s3", endpoint_url=f"http://127.0.0.1:{port}", aws_access_key_id=store.access_key,
+                                aws_secret_access_key=secret, region_name="us-east-1",
+                                config=Config(s3={"addressing_style": "path"}, signature_version="s3v4", retries={"max_attempts": 1}))
+        c = s3(store.secret_key)
+        c.head_bucket(Bucket="dock-media")
+        c.put_object(Bucket="dock-media", Key="DOCK1/f1/DJI_0001.jpg", Body=b"\xff\xd8x")
+        big = os.urandom(11 * 1024 * 1024)
+        src = tmp_path / "v.mp4"
+        src.write_bytes(big)
+        c.upload_file(str(src), "dock-media", "DOCK1/f1/DJI_0002.mp4",
+                      Config=TransferConfig(multipart_threshold=5 * 1024 * 1024, multipart_chunksize=5 * 1024 * 1024))
+        assert c.get_object(Bucket="dock-media", Key="DOCK1/f1/DJI_0002.mp4")["Body"].read() == big
+        assert done == [("DOCK1/f1/DJI_0001.jpg", 3), ("DOCK1/f1/DJI_0002.mp4", len(big))]
+        with pytest.raises(Exception):
+            s3("wrong").put_object(Bucket="dock-media", Key="x.jpg", Body=b"x")
+        with pytest.raises(Exception):
+            c.put_object(Bucket="dock-media", Key="../escape.jpg", Body=b"x")
+        assert not (tmp_path / "escape.jpg").exists()
+        store.add({"key": "DOCK1/f1/DJI_0001.jpg", "dock": "DOCK1"})
+        store.items[0]["added"] -= 40 * 86400
+        assert store.prune() == 1 and not (tmp_path / "media" / "files" / "DOCK1" / "f1" / "DJI_0001.jpg").exists()
+        cfg = store.storage_config("192.168.1.20", "DOCK1")
+        assert cfg["endpoint"] == "http://192.168.1.20:8769" and cfg["credentials"]["access_key_id"] == store.access_key
+    finally:
+        server.shutdown()

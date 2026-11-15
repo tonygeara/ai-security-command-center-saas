@@ -5590,6 +5590,12 @@ def start_docks():
             _start_sim_dock(sn)
     threading.Thread(target=_dock_health_worker, name="dock-health", daemon=True).start()
     threading.Thread(target=_dock_drc_worker, name="dock-sticks", daemon=True).start()
+    try:
+        dock_media.start_server(DOCK_MEDIA, port=DOCK_MEDIA_PORT)
+        _dock_media_status["server"] = "ok"
+    except OSError as e:
+        _dock_media_status["server"] = f"Port {DOCK_MEDIA_PORT} is in use: {e}"
+        print("Dock media receiver not started:", e)
 
 
 def _dock_refused():
@@ -5919,7 +5925,11 @@ def _dock_launch_now(sn, camera, loc, by):
 
 
 def dock_missions_tick():
-    """While docks fly: start the video once the drone is out, report the end, and forget finished missions."""
+    """While docks fly: start the video once the drone is out, report the end, and forget finished missions.
+    Once an hour: delete dock photos and videos older than dock_media.KEEP_DAYS."""
+    if time.time() - _dock_media_status["pruned_at"] > 3600:
+        _dock_media_status["pruned_at"] = time.time()
+        DOCK_MEDIA.prune()
     for sn, d in dock_store.docks().items():
         m = dock_hub.mission(sn)
         if not m:
@@ -5975,6 +5985,67 @@ def api_dock_mission(sn):
         audit_record("dock: return to dock", target=sn, detail={"route": m["name"], "by": by}, result="ok" if ok else "failed")
         return jsonify({"ok": ok, "error": msg} if not ok else {"ok": True, "message": "Returning to the dock."}), (200 if ok else 409)
     return jsonify({"ok": False, "error": "Unknown action."}), 400
+
+
+# ---------- Phase 5: photos and videos the docks upload ----------
+import dock_media  # noqa: E402
+
+DOCK_MEDIA = dock_media.MediaStore(os.path.join(DATA_FOLDER, "dock-media"))
+DOCK_MEDIA_PORT = dock_media.PORT
+dock_hub.storage_config = lambda gw: DOCK_MEDIA.storage_config(_lan_ip(), gw)
+_dock_media_status = {"server": "", "pruned_at": 0.0}
+
+
+def _dock_media_reported(gw, f):
+    """The dock says a file is uploaded: list it; an alarm launch's first photo goes to Telegram and the incident."""
+    key = str(f["object_key"]).lstrip("/")
+    if key.startswith(dock_media.BUCKET + "/"):
+        key = key[len(dock_media.BUCKET) + 1:]
+    try:
+        path = DOCK_MEDIA.path_for(key)
+    except ValueError:
+        return
+    d = dock_store.docks().get(gw) or {}
+    meta, ext = f.get("metadata") or {}, f.get("ext") or {}
+    pos = meta.get("shoot_position") or {}
+    item = DOCK_MEDIA.add({"key": key, "dock": gw, "dock_name": d.get("name") or gw, "name": str(f.get("name") or os.path.basename(key))[:120],
+                           "kind": dock_media.media_kind(f.get("name") or key), "flight_id": str(ext.get("flight_id") or ""),
+                           "lat": pos.get("lat"), "lon": pos.get("lng"), "height": meta.get("relative_altitude"),
+                           "taken": str(meta.get("created_time") or ""), "size": os.path.getsize(path) if os.path.exists(path) else 0,
+                           "present": os.path.exists(path)})
+    m = (dock_hub.state.get(gw) or {}).get("mission") or {}
+    if item["kind"] == "photo" and item["present"] and m.get("kind") == "alarm" and m.get("flight_id") == item["flight_id"] \
+            and not m.get("photo_sent"):
+        m["photo_sent"] = True
+        with open(path, "rb") as fh:
+            photo = fh.read()
+        send_telegram(f"📷 {item['dock_name']} over {m.get('camera')}: photo {item['name']}", photo)
+        INCIDENTS.add(m.get("camera") or "", time.time(), "alarm", f"Photo from {item['dock_name']}: {item['name']}", 2, {"dock_media": item["id"]})
+
+
+dock_hub.on_media = _dock_media_reported
+
+
+@app.route("/api/docks/media")
+def api_dock_media():
+    """Photos and videos the docks uploaded (newest first); ?dock=<sn> for one dock."""
+    return jsonify({"ok": True, "items": DOCK_MEDIA.recent(60, request.args.get("dock") or None),
+                    "server": _dock_media_status["server"], "keep_days": dock_media.KEEP_DAYS})
+
+
+@app.route("/api/docks/media/<mid>")
+def api_dock_media_file(mid):
+    item = DOCK_MEDIA.get(mid)
+    if not item:
+        return jsonify({"ok": False, "error": "Not found."}), 404
+    try:
+        path = DOCK_MEDIA.path_for(item["key"])
+    except ValueError:
+        return jsonify({"ok": False, "error": "Not found."}), 404
+    if not os.path.exists(path):
+        return jsonify({"ok": False, "error": "The file is no longer on this PC."}), 404
+    return send_from_directory(os.path.dirname(path), os.path.basename(path), as_attachment=request.args.get("download") == "1",
+                               download_name=item["name"])
 
 
 # ---------- Phase 4: live control of a dock's drone ----------

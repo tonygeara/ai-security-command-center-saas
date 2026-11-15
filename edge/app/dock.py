@@ -252,6 +252,8 @@ class DockHub:
         self.on_change = None  # called with (event, gateway sn): "online", "offline", "found"
         self.started_at = now()
         self.pending = {}     # tid -> {"event", "reply"} for services waiting for the dock's answer
+        self.storage_config = None  # (gateway sn) -> where the dock uploads media (Phase 5)
+        self.on_media = None        # (gateway sn, file dict) when the dock reports an uploaded file
 
     # --- outgoing ---
     def publish(self, topic, payload):
@@ -302,6 +304,13 @@ class DockHub:
                 self._hms(self.drone_of.get(sn, sn), msg.get("data") or {})
             elif msg.get("method") == "flighttask_progress":
                 self._progress(sn, msg.get("data") or {})
+            elif msg.get("method") == "file_upload_callback" and self.on_media:
+                f = (msg.get("data") or {}).get("file")
+                if isinstance(f, dict) and f.get("object_key"):
+                    try:
+                        self.on_media(self.drone_of.get(sn, sn), f)
+                    except Exception as e:  # noqa: BLE001 - the dock still gets its reply
+                        print("Dock media error:", e)
             if msg.get("need_reply"):
                 self._reply(topic, msg, {"result": 0})
         elif kind == "thing" and leaf == "requests":
@@ -605,10 +614,13 @@ class DockHub:
                 self.state[gw]["last_seen"] = self.now()
 
     def _request(self, topic, msg):
+        gw = _topic_sn(topic)
         if msg.get("method") == "config":  # the dock asks for the time server and the Cloud API app it should use
             c = self.store.cloud()
-            self._reply(topic, msg, {"ntp_server_host": "pool.ntp.org", "app_id": c["app_id"],
-                                     "app_key": c["app_key"], "app_license": c["app_license"]})
+            self._reply(topic, msg, {"result": 0, "output": {"ntp_server_host": "pool.ntp.org", "app_id": c["app_id"],
+                                                             "app_key": c["app_key"], "app_license": c["app_license"]}})
+        elif msg.get("method") == "storage_config_get" and self.storage_config:  # where to upload photos and videos
+            self._reply(topic, msg, {"result": 0, "output": self.storage_config(gw)})
         else:
             self._reply(topic, msg, {"result": 0})
 

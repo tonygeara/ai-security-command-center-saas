@@ -161,6 +161,33 @@ class SimulatedDock:
             "progress": {"current_step": 13 if f["phase"] == "returning" else 10, "percent": percent}, "status": status}},
             need_reply=1))
 
+    def upload_photo(self):
+        """Like a real dock after a photo: ask where to upload, upload it (signed S3 PUT), report it to the PC."""
+        try:
+            import dock_media
+            self.storage = None
+            self.send(f"thing/product/{self.sn}/requests", self._msg("storage_config_get", {"module": 0}))
+            cfg = self.storage
+            if not cfg:
+                return
+            name = f"DJI_{self.photos:04d}.jpg"
+            key = f"{cfg['object_key_prefix']}/{(self.flight or {}).get('flight_id') or 'manual'}/{name}"
+            url = f"{cfg['endpoint']}/{cfg['bucket']}/{key}"
+            body = b"\xff\xd8\xff\xe0 simulated photo " + name.encode()
+            cred = cfg["credentials"]
+            import urllib.request
+            req = urllib.request.Request(url, data=body, method="PUT",
+                                         headers=dock_media.sign_headers(cred["access_key_id"], cred["access_key_secret"], "PUT", url, body))
+            urllib.request.urlopen(req, timeout=10).read()
+            self.send(f"thing/product/{self.sn}/events", self._msg("file_upload_callback", {"file": {
+                "object_key": key, "path": key.rsplit("/", 1)[0], "name": name,
+                "ext": {"flight_id": (self.flight or {}).get("flight_id") or "", "is_original": True},
+                "metadata": {"shoot_position": {"lat": self.pos[0], "lng": self.pos[1]}, "relative_altitude": self.height,
+                             "created_time": time.strftime("%Y-%m-%dT%H:%M:%S")}}}, need_reply=1))
+            self.uploaded = getattr(self, "uploaded", 0) + 1
+        except Exception as e:  # noqa: BLE001
+            self.upload_error = str(e)
+
     def set_fault(self, fault):
         """Test alerts on a simulated dock; "" clears. offline: the dock goes silent (no goodbye, like a power cut)."""
         self.fault = fault
@@ -169,6 +196,9 @@ class SimulatedDock:
 
     def on_message(self, topic, payload):
         self.replies = (self.replies + [(topic, payload)])[-20:]
+        if topic.endswith("/requests_reply") and payload.get("method") == "storage_config_get":
+            self.storage = (payload.get("data") or {}).get("output")
+            return
         if topic.endswith("/drc/down"):
             if payload.get("method") == "stick_control" and self.drc:
                 d = payload.get("data") or {}
@@ -219,8 +249,7 @@ class SimulatedDock:
                     self.flight["phase"] = "holding"
             elif method == "camera_photo_take":
                 self.photos += 1
-                if hasattr(self, "on_photo"):
-                    self.on_photo()
+                threading.Thread(target=self.upload_photo, daemon=True).start()
             elif method in ("camera_recording_start", "camera_recording_stop"):
                 self.recording = method.endswith("start")
             elif method == "gimbal_reset":
