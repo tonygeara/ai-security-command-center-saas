@@ -19,6 +19,7 @@ A dock that connects is listed as "found"; an admin registers it (name, slot doc
 of the system. A simulated dock (dock_sim.py) goes through the same hub without a broker, for tests and demos.
 """
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -45,6 +46,15 @@ MODELS = {
 }
 DOCK_MODES = {0: "idle", 1: "on-site debugging", 2: "remote debugging", 3: "updating firmware", 4: "working"}
 COVER_STATES = {0: "closed", 1: "open", 2: "half open", 3: "cover fault"}
+# Health alerts (Telegram and the Drone page). A condition must clear past its "back" value to end (no flapping).
+OFFLINE_ALERT_SECONDS = 60     # a registered dock silent this long
+STARTUP_GRACE_SECONDS = 120    # after the PC starts, a dock that never connected
+WIND_ALERT, WIND_BACK = 12.0, 9.0          # m/s: DJI docks don't take off above about 12 m/s
+HOT_ALERT, HOT_BACK = 45.0, 42.0           # °C outside the dock
+COLD_ALERT, COLD_BACK = -20.0, -17.0
+LOW_BATTERY = 20                            # % of the drone in the dock, not charging
+HMS_CLEAR_SECONDS = 60          # a DJI health message not repeated this long has cleared
+HMS_LEVELS = {0: "notice", 1: "caution", 2: "warning"}
 RAIN = {0: "none", 1: "light", 2: "moderate", 3: "heavy"}
 
 
@@ -195,6 +205,7 @@ class DockHub:
         self.local = {}       # gateway sn -> simulated dock
         self.publish_mqtt = None
         self.on_change = None  # called with (event, gateway sn): "online", "offline", "found"
+        self.started_at = now()
 
     # --- outgoing ---
     def publish(self, topic, payload):
@@ -230,6 +241,8 @@ class DockHub:
             self._touch(self.drone_of.get(sn, sn))
         elif kind == "thing" and leaf == "events":
             self._touch(sn)
+            if msg.get("method") == "hms":
+                self._hms(self.drone_of.get(sn, sn), msg.get("data") or {})
             if msg.get("need_reply"):
                 self._reply(topic, msg, {"result": 0})
         elif kind == "thing" and leaf == "requests":
@@ -278,6 +291,25 @@ class DockHub:
             s["osd"] = {**s["osd"], **data}  # docks send their fields in several partial messages
             s["last_seen"] = self.now()
             s.pop("offline_at", None)
+
+    def _hms(self, gw, data):
+        """DJI health messages (HMS): the dock sends the current list again while a problem lasts."""
+        items = data.get("list") if isinstance(data.get("list"), list) else []
+        with self.lock:
+            s = self.state.get(gw)
+            if s is None:
+                return
+            hms = s.setdefault("hms", {})
+            for it in items:
+                if not isinstance(it, dict) or not it.get("code"):
+                    continue
+                code = str(it["code"])[:20]
+                hms[code] = {"code": code, "level": it.get("level"), "device_type": str(it.get("device_type") or ""),
+                             "in_the_sky": bool(it.get("in_the_sky")), "seen": self.now()}
+
+    def hms_active(self, gw):
+        s = self.state.get(gw) or {}
+        return [h for h in (s.get("hms") or {}).values() if self.now() - h["seen"] < HMS_CLEAR_SECONDS]
 
     def _touch(self, gw):
         with self.lock:
@@ -335,6 +367,105 @@ def _flag(v):
 def _topic_sn(topic):
     parts = str(topic).split("/")
     return parts[2] if len(parts) >= 3 else ""
+
+
+# ---------- health alerts ----------
+
+class DockHealth:
+    """Watches the registered docks and says when a problem starts and when it ends. check() returns the changes:
+    [{"sn", "name", "key", "level", "text", "active", "t"}]; active() lists what is wrong now (for the Drone page)."""
+
+    def __init__(self, hub, hms_text=None):
+        self.hub = hub
+        self.hms_text = hms_text or {}   # optional DJI code -> text (DJI's hms.json, if provided)
+        self.current = {}                 # (sn, key) -> alert
+        self.log = collections.deque(maxlen=50)
+        self.lock = threading.Lock()
+
+    def _conditions(self, sn, x, name):
+        """{key: (level, text)} of what is wrong now, using the previous state for the "back" thresholds."""
+        now, was = self.hub.now(), lambda k: (sn, k) in self.current
+        out = {}
+        seen = x.get("last_seen")
+        if not x["online"]:
+            if seen and now - seen >= OFFLINE_ALERT_SECONDS:
+                out["offline"] = ("warning", f"{name} is offline: no message for {int((now - seen) // 60) or 1} min. Check its power and network.")
+            elif not seen and now - self.hub.started_at >= STARTUP_GRACE_SECONDS:
+                out["offline"] = ("warning", f"{name} hasn't connected since AI Security started. Check its power and network.")
+            return out  # nothing else is known about an offline dock
+        if x.get("cover") == "cover fault":
+            out["cover"] = ("warning", f"{name}: the dock cover reports a fault. The drone can't take off or land.")
+        if x.get("rain") == "heavy":
+            out["rain"] = ("caution", f"{name}: heavy rain. Flights from this dock are not safe.")
+        w = x.get("wind")
+        if w is not None and (w >= WIND_ALERT or (was("wind") and w > WIND_BACK)):
+            out["wind"] = ("caution", f"{name}: strong wind, {w:.1f} m/s. Flights from this dock are not safe.")
+        t = x.get("temperature")
+        if t is not None and (t >= HOT_ALERT or (was("hot") and t > HOT_BACK)):
+            out["hot"] = ("caution", f"{name}: {t:.0f} °C outside the dock. Too hot for flights.")
+        if t is not None and (t <= COLD_ALERT or (was("cold") and t < COLD_BACK)):
+            out["cold"] = ("caution", f"{name}: {t:.0f} °C outside the dock. Too cold for flights.")
+        b = x.get("battery")
+        if x.get("drone_in_dock") and b is not None and b < LOW_BATTERY and not x.get("charging"):
+            out["battery"] = ("warning", f"{name}: the drone in the dock is at {b}% and not charging.")
+        for h in self.hub.hms_active(sn):
+            level = HMS_LEVELS.get(h["level"], "notice")
+            if level == "notice":
+                continue
+            what = "drone" if h["device_type"].startswith("0-") else "dock"
+            detail = self.hms_text.get(h["code"].lower()) or self.hms_text.get(h["code"]) or f"code {h['code']} (see DJI Pilot 2 or DJI's HMS list)"
+            out["hms:" + h["code"]] = (level, f"{name}: DJI {level} on the {what}{' in flight' if h['in_the_sky'] else ''}: {detail}")
+        return out
+
+    def check(self):
+        changes, now = [], self.hub.now()
+        registered = self.hub.store.docks()
+        with self.lock:
+            live = set()
+            for sn, d in registered.items():
+                x = self.hub.summary(sn)
+                for key, (level, text) in self._conditions(sn, x, d["name"]).items():
+                    live.add((sn, key))
+                    if (sn, key) not in self.current:
+                        a = {"sn": sn, "name": d["name"], "key": key, "level": level, "text": text, "active": True, "t": now}
+                        self.current[(sn, key)] = a
+                        changes.append(a)
+                    else:
+                        self.current[(sn, key)]["text"] = text
+            for k in [k for k in self.current if k not in live]:
+                a = self.current.pop(k)
+                gone = k[0] not in registered
+                if not gone:
+                    changes.append({**a, "active": False, "t": now, "text": _cleared_text(a)})
+            self.log.extend(changes)
+        return changes
+
+    def active(self, sn=None):
+        with self.lock:
+            return [dict(a) for (s, _), a in self.current.items() if sn is None or s == sn]
+
+    def recent(self, n=20):
+        with self.lock:
+            return [dict(a) for a in list(self.log)[-n:]][::-1]
+
+
+def _cleared_text(a):
+    return {"offline": f"{a['name']} is back online.", "cover": f"{a['name']}: the cover fault has cleared.",
+            "rain": f"{a['name']}: the heavy rain has stopped.", "wind": f"{a['name']}: the wind has dropped.",
+            "hot": f"{a['name']}: the temperature is back to normal.", "cold": f"{a['name']}: the temperature is back to normal.",
+            "battery": f"{a['name']}: the drone is charging again."}.get(a["key"], f"{a['name']}: the DJI message has cleared ({a['key'][4:]}).")
+
+
+def load_hms_text(path):
+    """DJI's HMS message list (hms.json from DJI's Cloud API docs), if the owner put it in the data folder:
+    {"0x16100083": {"en": "..."}} or {"code": "text"}. Without it alerts show the code."""
+    data = _read_json(path)
+    out = {}
+    for code, v in data.items():
+        text = v.get("en") or v.get("tipEn") if isinstance(v, dict) else v
+        if isinstance(text, str) and text.strip():
+            out[str(code).lower() if str(code).lower().startswith("0x") else str(code)] = text.strip()[:200]
+    return out
 
 
 # ---------- MQTT ----------

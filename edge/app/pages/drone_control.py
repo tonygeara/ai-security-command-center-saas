@@ -50,10 +50,16 @@ BODY = r"""
 .fs-cell.ok{color:#7dffc1}.fs-link{margin-left:auto;border-right:0;color:#5bd9ff;text-decoration:none}.fs-link:hover{color:#fff}
 #m3d{display:none;width:100%;height:760px;border:1px solid #155879;border-radius:5px;background:#020a10}
 .dc-fleet button.dk-chip{border-color:#7a5a12;color:#ffcf7a}.dc-fleet button.dk-chip small{color:#9a8a6a;font-weight:normal}
+.dk-card.dk-bad{border-color:#a3303f;box-shadow:0 0 0 1px #a3303f inset}.dk-card.dk-careful{border-color:#7a5a12}
+.dk-alert{margin:0 0 6px;padding:5px 8px;border-radius:3px;font-size:12px;line-height:1.35}
+.dk-alert.warning{background:rgba(125,12,28,.25);color:#ffb3bb;border:1px solid #7a2935}
+.dk-alert.caution{background:rgba(125,90,12,.18);color:#ffcf7a;border:1px solid #7a5a12}
+.dk-health{margin-top:12px;max-height:160px;overflow:auto;font-size:12px}
+.dk-health div{padding:3px 0;border-bottom:1px solid #0f2a3b;color:#9edfff}.dk-health div.on{color:#ffb3bb}.dk-health small{color:#6d8b9d;margin-right:8px}
 .dk-card.flash{box-shadow:0 0 0 2px #ffb23c}
 .dk-mark{width:22px;height:22px;border:2px solid #ffb23c;border-radius:4px;background:rgba(3,16,26,.9);color:#ffcf7a;font:bold 12px/18px Arial;text-align:center}
 .dk-mark.off{border-color:#53636d;color:#8aa0ad}
-.dk-card{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.dk-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
 .dk-card{border:1px solid #155879;border-radius:5px;background:#05131d;padding:10px 12px}
 .dk-card.found{border-style:dashed;border-color:#7a5a12}
 .dk-card h4{margin:0 0 4px;font:bold 13px Arial,sans-serif;color:#e9f8ff;display:flex;align-items:center;gap:7px}
@@ -220,6 +226,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div class="panel-body"><div class="muted" style="margin-bottom:10px">A dock launches its drone with no pilot on site (DJI Cloud API). It connects to this PC over the site network; once it shows under <b>Found</b>, register it. Flying from a dock comes in the next update.</div>
 <div class="dk-list" id="dockList"></div>
 <div id="dockMsg" class="hud-msg"></div>
+<div class="dk-health" id="dockHealth"></div>
 <details class="dk-setup" id="dockSetup" style="display:none"><summary>Set up a dock (admins)</summary>
 <div class="muted" style="margin-top:10px"><b>1. DJI Cloud API keys</b> (once): developer.dji.com → Apps → Create App, App Type <b>Cloud API</b>. Paste the three values here.</div>
 <div class="dk-form"><label>App ID<input id="dkAppId" autocomplete="off"></label>
@@ -519,20 +526,25 @@ async function dkPost(url,body,method){const r=await fetch(url,{method:method||'
 function dkCard(x,found){const tags=[];
   if(x.drone_model)tags.push((x.drone_in_dock===false?'✈ ':'⌂ ')+esc(x.drone_model)+(x.drone_in_dock===false?' out':' in dock'));
   if(x.battery!=null)tags.push('🔋 '+x.battery+'%'+(x.charging?' charging':''));
-  if(x.cover)tags.push('Cover '+esc(x.cover));if(x.mode)tags.push(esc(x.mode));
+  if(x.cover)tags.push(x.cover==='cover fault'?'Cover fault':'Cover '+esc(x.cover));if(x.mode)tags.push(esc(x.mode));
   if(x.temperature!=null)tags.push('🌡 '+fmt(x.temperature)+' °C');if(x.wind!=null)tags.push('💨 '+fmt(x.wind)+' m/s');
   if(x.rain&&x.rain!=='none')tags.push('🌧 '+esc(x.rain));if(x.simulated)tags.push('SIMULATED');
-  const dot=x.online?'good':'bad';
+  const dot=x.online?'good':'bad',al=x.alerts||[];
+  const sev=al.some(a=>a.level==='warning')?' dk-bad':al.length?' dk-careful':'';
+  const alerts=al.map(a=>`<div class="dk-alert ${esc(a.level)}">${a.level==='warning'?'⚠':'●'} ${esc(a.text)}</div>`).join('');
+  const faults=[['','Test a problem…'],['offline','Goes offline (alert after 1 min)'],['cover','Cover fault'],['rain','Heavy rain'],['wind','Strong wind'],['hot','Too hot'],['battery','Drone battery low'],['hms','DJI warning'],['','All clear']];
+  const test=DK_ADMIN&&!found&&x.simulated?`<select data-sn="${esc(x.sn)}" onchange="dockFault(this)" style="max-width:150px">${faults.map(([v,t],i)=>`<option value="${v}" ${i===0?'selected disabled':''}>${t}</option>`).join('')}</select>`:'';
   const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')">Register</button>`
     :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
-  return `<div class="dk-card${found?' found':''}" id="dkCard_${esc(x.sn)}"><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
+  return `<div class="dk-card${found?' found':''}${sev}" id="dkCard_${esc(x.sn)}"><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
     <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
-    <div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div><div class="actions" style="gap:6px">${btns}</div></div>`}
+    ${alerts}<div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div><div class="actions" style="gap:6px">${btns}${test}</div></div>`}
 async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
   $('dockState').textContent=!d.allowed?'NOT LICENSED':d.broker.connected?'BROKER READY':d.broker.running?'BROKER STARTING':'BROKER OFF';
   $('dockState').style.color=d.allowed&&d.broker.connected?'':'#ffcf7a';
   const cards=d.docks.map(x=>dkCard(x,false)).concat(d.found.map(x=>dkCard(x,true)));
-  const keep=document.activeElement&&document.activeElement.id&&document.activeElement.id.startsWith('dkName_')?document.activeElement.id:null;
+  const ae=document.activeElement,keep=ae&&((ae.id&&ae.id.startsWith('dkName_'))||(ae.tagName==='SELECT'&&ae.closest('#dockList')));
+  const hl=d.health_log||[];$('dockHealth').innerHTML=hl.length?'<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">HEALTH</b>'+hl.map(a=>`<div class="${a.active?'on':''}"><small>${new Date(a.t*1000).toLocaleString()}</small>${a.active?(a.level==='warning'?'⚠ ':'● '):'✓ '}${esc(a.text)}</div>`).join(''):'';
   if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
   if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed;
   dockData=d.docks;drawDockFleet();drawDockMap()}catch(e){}}
@@ -541,8 +553,9 @@ let dockData=[],dockMarks={};
 function dockInfo(x){if(!x.online)return 'offline';
   const where=x.drone_in_dock===false?'drone out':x.drone_model?'drone in dock':'no drone';
   return where+(x.battery!=null?' · '+x.battery+'%':'')}
+function dkAlertName(k){return k.startsWith('hms:')?'DJI warning':({offline:'offline',cover:'cover fault',rain:'heavy rain',wind:'strong wind',hot:'too hot',cold:'too cold',battery:'battery low'})[k]||k}
 function drawDockFleet(){const box=$('fleetDocks');if(!box)return;
-  box.innerHTML=dockData.map(x=>`<button class="dk-chip" data-sn="${esc(x.sn)}" onclick="focusDock(this.dataset.sn)" title="${esc((x.model||'Dock')+' · SN '+x.sn)}"><i class="${x.online?'ok':''}"></i>🛬 ${esc(x.name)} <small>${esc(dockInfo(x))}</small></button>`).join('')}
+  box.innerHTML=dockData.map(x=>`<button class="dk-chip" data-sn="${esc(x.sn)}" onclick="focusDock(this.dataset.sn)" title="${esc((x.model||'Dock')+' · SN '+x.sn)}"><i class="${x.online?((x.alerts||[]).length?'half':'ok'):''}"></i>🛬 ${esc(x.name)} <small>${(x.alerts||[]).length?'⚠ '+esc(x.alerts.length===1?dkAlertName(x.alerts[0].key):x.alerts.length+' alerts')+' · ':''}${esc(dockInfo(x))}</small></button>`).join('')}
 function drawDockMap(){let fit=false;
   if(!map&&dockData.some(x=>x.lat)){const f=dockData.find(x=>x.lat);initMap(f.lat,f.lon);fit=true}
   if(!map||!window.L)return;const seen=new Set();
@@ -577,6 +590,8 @@ async function dockRegister(sn){const n=$('dkName_'+sn);const d=await dkPost('/a
 async function dockRename(sn,old){const name=prompt('New name for this dock:',old);if(!name)return;const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{name});dkMsg(d.ok?'Renamed.':d.error,d.ok);loadDocks()}
 async function dockRemove(sn,name){if(!confirm(`Remove ${name}? It stops being part of this system${sn.startsWith('SIMDOCK')?' and the simulated dock is deleted':''}. A real dock can be registered again when it connects.`))return;
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{},'DELETE');dkMsg(d.ok?'Removed.':d.error,d.ok);loadDocks()}
+async function dockFault(sel){const d=await dkPost('/api/docks/'+encodeURIComponent(sel.dataset.sn)+'/fault',{fault:sel.value});sel.blur();
+  dkMsg(d.ok?(d.fault?'Test problem set. The alert shows here and on Telegram within a few seconds'+(d.fault==='offline'?' (offline: after 1 minute).':'.'):'All clear set.'):d.error,d.ok);setTimeout(loadDocks,800)}
 async function dockSimulate(){const c=map&&map.getCenter?map.getCenter():null;const d=await dkPost('/api/docks/simulate',c?{lat:c.lat,lon:c.lng}:{});
   dkMsg(d.ok?`Simulated dock ${d.sn} added: it shows under Found in a moment. Register it to try the steps.`:d.error,d.ok);setTimeout(loadDocks,1500)}
 loadDocks();setInterval(loadDocks,3000);loadDockSetup();

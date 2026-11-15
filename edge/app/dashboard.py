@@ -5489,6 +5489,32 @@ dock_mqtt = None
 DOCK_PILOT_PORT = dock_lib.PILOT_PAGE_PORT
 DOCK_SIM_MAX = 3
 _dock_status = {"pilot_page": ""}
+# Health alerts: DJI's own message texts are used when DJI's hms.json is put in the data folder; otherwise the code.
+dock_health = dock_lib.DockHealth(dock_hub, dock_lib.load_hms_text(os.path.join(DATA_FOLDER, "hms.json")))
+DOCK_HEALTH_SECONDS = 5
+
+
+def dock_health_tick():
+    """One health check: new problems and all-clears go to Telegram (text only) and the audit log."""
+    if not dock_allowed():
+        return []
+    changes = dock_health.check()
+    for a in changes:
+        icon = ("⚠️" if a["level"] == "warning" else "🟡") if a["active"] else "✅"
+        queue_telegram_alert("dock_health", f"{icon} DJI Dock · {a['text']}", f"dock:{a['sn']}:{a['key']}:{a['active']}",
+                             snapshot_bytes=b"")
+        audit_record("dock: " + ("alert" if a["active"] else "all clear"), target=a["sn"],
+                     detail={"name": a["name"], "alert": a["key"], "level": a["level"], "text": a["text"]})
+    return changes
+
+
+def _dock_health_worker():
+    while True:
+        try:
+            dock_health_tick()
+        except Exception as e:  # noqa: BLE001 - keep watching
+            print("Dock health check error:", e)
+        time.sleep(DOCK_HEALTH_SECONDS)
 
 
 def dock_allowed():
@@ -5534,6 +5560,7 @@ def start_docks():
     for sn in dock_store.data.get("simulated") or []:
         if sn not in dock_hub.local:
             _start_sim_dock(sn)
+    threading.Thread(target=_dock_health_worker, name="dock-health", daemon=True).start()
 
 
 def _dock_refused():
@@ -5544,6 +5571,9 @@ def _dock_refused():
 def api_docks():
     """Registered docks with their live state, and docks that connected but aren't registered yet (anyone signed in)."""
     snap = dock_hub.snapshot()
+    for x in snap["docks"]:
+        x["alerts"] = [{"key": a["key"], "level": a["level"], "text": a["text"], "t": a["t"]} for a in dock_health.active(x["sn"])]
+    snap["health_log"] = dock_health.recent(15)
     return jsonify({"ok": True, "allowed": dock_allowed(), "cloud_ready": dock_store.cloud_ready(),
                     "broker": {"port": dock_lib.BROKER_PORT, "running": _port("127.0.0.1", dock_lib.BROKER_PORT),
                                "connected": bool(dock_mqtt and dock_mqtt.connected)},
@@ -5608,6 +5638,22 @@ def api_dock(sn):
     except KeyError:
         return jsonify({"ok": False, "error": "Unknown dock."}), 404
     return jsonify({"ok": True})
+
+
+DOCK_SIM_FAULTS = ("", "offline", "cover", "rain", "wind", "hot", "battery", "hms")
+
+
+@app.route("/api/docks/<sn>/fault", methods=["POST"])
+def api_dock_fault(sn):
+    """Admins: make a simulated dock show a problem, to try the health alerts ("" = all clear)."""
+    sim = dock_hub.local.get(sn)
+    if sim is None:
+        return jsonify({"ok": False, "error": "Only a simulated dock can be given a test problem."}), 404
+    fault = str((request.get_json(silent=True) or {}).get("fault") or "")
+    if fault not in DOCK_SIM_FAULTS:
+        return jsonify({"ok": False, "error": "Unknown test problem."}), 400
+    sim.set_fault(fault)
+    return jsonify({"ok": True, "fault": fault})
 
 
 @app.route("/api/docks/simulate", methods=["POST"])

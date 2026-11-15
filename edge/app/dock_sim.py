@@ -26,6 +26,7 @@ class SimulatedDock:
         self.battery = 64.0
         self.powered = True
         self.topo_acked = False
+        self.fault = ""             # test alerts: "", offline, cover, rain, wind, hot, battery, hms
         self.replies = []           # last replies from the hub (tests look at them)
         self.stop_event = threading.Event()
         self.thread = None
@@ -45,12 +46,16 @@ class SimulatedDock:
         self.send(f"sys/product/{self.sn}/status", self._msg("update_topo", {}))
 
     def osd(self):
-        charging = self.battery < 100
-        self.battery = min(100.0, self.battery + 0.5)
+        f = self.fault
+        if f == "battery":
+            self.battery, charging = 12.0, False
+        else:
+            charging = self.battery < 100
+            self.battery = min(100.0, self.battery + 0.5)
         self.send(f"thing/product/{self.sn}/osd", self._msg(data={
-            "mode_code": 0, "cover_state": 0, "drone_in_dock": 1, "latitude": self.home[0], "longitude": self.home[1],
-            "environment_temperature": round(24 + random.uniform(-0.3, 0.3), 1), "temperature": 28.0,
-            "wind_speed": round(random.uniform(1.0, 3.5), 1), "rainfall": 0,
+            "mode_code": 0, "cover_state": 3 if f == "cover" else 0, "drone_in_dock": 1, "latitude": self.home[0], "longitude": self.home[1],
+            "environment_temperature": 47.5 if f == "hot" else round(24 + random.uniform(-0.3, 0.3), 1), "temperature": 28.0,
+            "wind_speed": 14.2 if f == "wind" else round(random.uniform(1.0, 3.5), 1), "rainfall": 3 if f == "rain" else 0,
             "network_state": {"type": 2, "quality": 5, "rate": 12000},
             "drone_charge_state": {"state": 1 if charging else 0, "capacity_percent": int(self.battery)}}))
         self.send(f"thing/product/{self.drone_sn}/osd", self._msg(data={
@@ -58,17 +63,32 @@ class SimulatedDock:
             "horizontal_speed": 0, "vertical_speed": 0, "attitude_head": 0,
             "battery": {"capacity_percent": int(self.battery), "remain_flight_time": int(self.battery * 0.4 * 60)}}))
 
+    def hms(self):
+        """A DJI health message about the dock, repeated while it lasts, as real docks do."""
+        (dd, dt, ds), _ = MODELS[self.model]
+        self.send(f"thing/product/{self.sn}/events", self._msg("hms", {"list": [
+            {"level": 2, "module": 3, "in_the_sky": 0, "code": "0x19110000", "device_type": f"{dd}-{dt}-{ds}", "imminent": 0,
+             "args": {"component_index": 0, "sensor_index": 0}}]}, need_reply=0))
+
+    def set_fault(self, fault):
+        """Test alerts on a simulated dock; "" clears. offline: the dock goes silent (no goodbye, like a power cut)."""
+        self.fault = fault
+        if fault != "offline":
+            self.topo_acked = False  # back from silence: introduce itself again
+
     def on_message(self, topic, payload):
         self.replies = (self.replies + [(topic, payload)])[-20:]
         if topic.endswith("/status_reply") and (payload.get("data") or {}).get("result") == 0:
             self.topo_acked = True
 
     def tick(self):
-        if not self.powered:
+        if not self.powered or self.fault == "offline":
             return
         if not self.topo_acked:
             self.topology()
         self.osd()
+        if self.fault == "hms":
+            self.hms()
 
     def start(self):
         self.thread = threading.Thread(target=self._run, name=f"sim-dock-{self.sn}", daemon=True)

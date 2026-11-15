@@ -12,7 +12,12 @@ drone with its height when it is out; a click on either shows the other). Tests:
 Licence switch **`drone_dock`** ("DJI Docks"): off for every client until switched on, in the admin portal
 (client → Feature access) or ticked on an on-prem licence. Supabase part is live (15 Nov: `set_feature_override`
 accepts it; `issue-onprem-license` and `edge-agent-control` redeployed with it in `license.ts`); the portal and
-the PC need this branch merged. Still to do in Phase 1: docks counted in the licence, and health (HMS) alerts. Docks become full drone slots (own Drone page, routes, responses) in Phase 3-4,
+the PC need this branch merged.
+Health alerts (`dock.DockHealth`, checked every 5 s): offline (1 min), cover fault, heavy rain, wind ≥ 12 m/s,
+≥ 45 °C or ≤ -20 °C, drone in the dock < 20 % and not charging, and DJI HMS cautions/warnings; each with an
+all-clear. Shown on the dock cards, in the fleet bar and a Health list on the Drone page, sent to Telegram (text)
+and the audit log. DJI's texts are used if their hms.json is put in the data folder, else the code. Simulated
+docks have a "Test a problem" menu. Still to do in Phase 1: docks counted in the licence. Docks become full drone slots (own Drone page, routes, responses) in Phase 3-4,
 when they can fly.
 
 ## Goal

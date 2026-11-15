@@ -272,3 +272,115 @@ def _port_open(port):
             return True
     except OSError:
         return False
+
+
+# ---------- health alerts ----------
+
+def _health_setup(dock_mod, hub, hms_text=None):
+    clock = [5000.0]
+    hub.now = lambda: clock[0]
+    hub.started_at = clock[0]
+    health = dock_mod.DockHealth(hub, hms_text)
+    hub.handle("sys/product/DOCK1/status", topo())
+    hub.store.register("DOCK1", "Roof")
+
+    def osd(**fields):
+        base = {"cover_state": 0, "drone_in_dock": 1, "environment_temperature": 22, "wind_speed": 2, "rainfall": 0,
+                "drone_charge_state": {"state": 1, "capacity_percent": 70}}
+        hub.handle("thing/product/DOCK1/osd", {"data": {**base, **fields}})
+    return clock, health, osd
+
+
+def test_health_conditions_start_and_clear(dock_mod, hub):
+    clock, health, osd = _health_setup(dock_mod, hub)
+    osd()
+    assert health.check() == [] and health.active() == []
+    osd(wind_speed=14.2)
+    [a] = health.check()
+    assert a["key"] == "wind" and a["active"] and a["level"] == "caution" and "14.2 m/s" in a["text"] and a["name"] == "Roof"
+    assert health.check() == []  # still windy: no repeat
+    osd(wind_speed=10)  # below the alert line but above "back": still on
+    assert health.check() == [] and [x["key"] for x in health.active("DOCK1")] == ["wind"]
+    osd(wind_speed=8)
+    [c] = health.check()
+    assert c["key"] == "wind" and not c["active"] and "dropped" in c["text"] and health.active() == []
+    osd(cover_state=3, rainfall=3, environment_temperature=47, drone_charge_state={"state": 0, "capacity_percent": 12})
+    got = {a["key"]: a for a in health.check()}
+    assert set(got) == {"cover", "rain", "hot", "battery"} and got["cover"]["level"] == "warning" and "12%" in got["battery"]["text"]
+    osd(cover_state=3, rainfall=3, environment_temperature=-25, drone_charge_state={"state": 0, "capacity_percent": 12})
+    keys = {(a["key"], a["active"]) for a in health.check()}
+    assert ("hot", False) in keys and ("cold", True) in keys
+    osd()
+    assert {a["key"] for a in health.check() if not a["active"]} == {"cover", "rain", "cold", "battery"}
+    assert [a["key"] for a in health.recent(3)][0] in {"cover", "rain", "cold", "battery"}  # newest first
+
+
+def test_health_dji_messages(dock_mod, hub):
+    clock, health, osd = _health_setup(dock_mod, hub, {"0x16100083": "Dock cover motor error"})
+    osd()
+    hms = lambda code, level: hub.handle("thing/product/DOCK1/events", {"method": "hms", "data": {"list": [  # noqa: E731
+        {"level": level, "code": code, "device_type": "3-3-0", "in_the_sky": 0}]}})
+    hms("0x16100083", 2)
+    hms("0x1111", 0)  # a notice: not an alert
+    [a] = health.check()
+    assert a["key"] == "hms:0x16100083" and a["level"] == "warning" and "Dock cover motor error" in a["text"] and "dock" in a["text"]
+    hub.handle("thing/product/UAV1/events", {"method": "hms", "data": {"list": [{"level": 1, "code": "0x2222", "device_type": "0-100-1", "in_the_sky": 1}]}})
+    [b] = health.check()
+    assert "caution on the drone in flight" in b["text"] and "0x2222" in b["text"]
+    clock[0] += dock_mod.HMS_CLEAR_SECONDS - 1
+    osd()
+    assert health.check() == []  # not repeated for a while yet
+    clock[0] += 2
+    osd()
+    assert {(a["key"], a["active"]) for a in health.check()} == {("hms:0x16100083", False), ("hms:0x2222", False)}
+
+
+def test_health_offline_and_back(dock_mod, hub):
+    clock, health, osd = _health_setup(dock_mod, hub)
+    osd()
+    hub.store.register("DOCK9", "Never seen")
+    clock[0] += dock_mod.OFFLINE_ALERT_SECONDS - 1
+    assert health.check() == []
+    clock[0] += 2
+    [a] = health.check()
+    assert a["sn"] == "DOCK1" and a["key"] == "offline" and "no message for 1 min" in a["text"]
+    clock[0] += dock_mod.STARTUP_GRACE_SECONDS
+    [b] = health.check()
+    assert b["sn"] == "DOCK9" and "hasn't connected since" in b["text"]
+    hub.handle("sys/product/DOCK1/status", topo())
+    osd()
+    [c] = health.check()
+    assert c["sn"] == "DOCK1" and not c["active"] and c["text"] == "Roof is back online."
+    hub.store.unregister("DOCK9")
+    assert health.check() == [] and health.active() == []  # a removed dock's alert just goes (no all-clear)
+    hub.handle("sys/product/DOCKX/status", topo("DOCKX"))  # found but not registered: never alerted
+    clock[0] += 1000
+    hub.handle("sys/product/DOCK1/status", topo())
+    osd()
+    assert health.check() == []
+
+
+def test_simulated_dock_alert_reaches_telegram_and_page(d, client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(d, "queue_telegram_alert", lambda kind, text, key, snapshot_bytes=None, buttons=None: sent.append((kind, text, key, snapshot_bytes)))
+    sn = client.post("/api/docks/simulate", json={}).get_json()["sn"]
+    try:
+        assert wait_until(lambda: [x for x in client.get("/api/docks").get_json()["found"] if x["sn"] == sn and x["lat"]], 10)
+        assert client.post("/api/docks/register", json={"sn": sn, "name": "Yard dock"}).get_json()["ok"]
+        d.dock_health_tick()
+        assert not [s for s in sent if sn in s[2]]
+        assert client.post(f"/api/docks/{sn}/fault", json={"fault": "cover"}).get_json()["ok"]
+        assert wait_until(lambda: d.dock_health_tick() or [s for s in sent if sn in s[2]], 10)
+        kind, text, key, snap = [s for s in sent if sn in s[2]][0]
+        assert kind == "dock_health" and "Yard dock" in text and "cover" in text and text.startswith("⚠️") and snap == b""
+        mine = [x for x in client.get("/api/docks").get_json()["docks"] if x["sn"] == sn][0]
+        assert mine["alerts"][0]["key"] == "cover" and mine["alerts"][0]["level"] == "warning"
+        assert client.get("/api/docks").get_json()["health_log"][0]["sn"] == sn
+        assert client.post(f"/api/docks/{sn}/fault", json={"fault": ""}).get_json()["ok"]
+        assert wait_until(lambda: d.dock_health_tick() or [s for s in sent if s[1].startswith("✅") and sn in s[2]], 10)
+        assert client.post(f"/api/docks/{sn}/fault", json={"fault": "explode"}).status_code == 400
+        assert client.post("/api/docks/NOTSIM1/fault", json={"fault": "cover"}).status_code == 404
+        import users
+        assert not users.allowed("operator", "POST", f"/api/docks/{sn}/fault")
+    finally:
+        client.delete(f"/api/docks/{sn}")
