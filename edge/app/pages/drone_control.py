@@ -49,7 +49,11 @@ BODY = r"""
 .fs-cell b{color:#e9f8ff}.fs-cell.bad{color:#ff9ea8;background:rgba(125,12,28,.16)}.fs-cell.warn{color:#ffcf7a;background:rgba(125,90,12,.12)}
 .fs-cell.ok{color:#7dffc1}.fs-link{margin-left:auto;border-right:0;color:#5bd9ff;text-decoration:none}.fs-link:hover{color:#fff}
 #m3d{display:none;width:100%;height:760px;border:1px solid #155879;border-radius:5px;background:#020a10}
-.dk-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.dc-fleet button.dk-chip{border-color:#7a5a12;color:#ffcf7a}.dc-fleet button.dk-chip small{color:#9a8a6a;font-weight:normal}
+.dk-card.flash{box-shadow:0 0 0 2px #ffb23c}
+.dk-mark{width:22px;height:22px;border:2px solid #ffb23c;border-radius:4px;background:rgba(3,16,26,.9);color:#ffcf7a;font:bold 12px/18px Arial;text-align:center}
+.dk-mark.off{border-color:#53636d;color:#8aa0ad}
+.dk-card{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
 .dk-card{border:1px solid #155879;border-radius:5px;background:#05131d;padding:10px 12px}
 .dk-card.found{border-style:dashed;border-color:#7a5a12}
 .dk-card h4{margin:0 0 4px;font:bold 13px Arial,sans-serif;color:#e9f8ff;display:flex;align-items:center;gap:7px}
@@ -248,11 +252,13 @@ async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no
   $('fleet').innerHTML=d.drones.map(x=>{const dot=x.drone_connected?'ok':x.phone_connected?'half':'';
     const info=x.over_limit?'over licence':x.mission?(x.mission==='route'?'on route':x.mission==='backup'?'backup':'responding'):x.drone_connected?(x.flying?'flying':'ready')+(x.battery!=null?' · '+x.battery+'%':''):x.phone_connected?'drone off':'not paired';
     return `<a href="/drone-control?drone=${encodeURIComponent(x.drone)}" class="${x.drone===DRONE?'on':''}"><i class="${dot}"></i>${esc(x.label)} <small>${esc(info)}</small></a>`}).join('')
+    +`<span id="fleetDocks" style="display:contents"></span>`
     +`<button onclick="addDroneSlot()" ${d.can_add?'':'disabled'} title="${esc(d.message||'')}">+ Add drone <small>${d.used??'?'} of ${d.limit??'∞'}</small></button>`
     +`<a href="/drone-grid">▦ Grid view</a>`;
   if(!many&&!d.can_add)$('fleet').querySelector('button').style.display='none';
   $('fleet').querySelector('a[href="/drone-grid"]').style.display=many?'':'none';
-  others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers()}catch(e){}}
+  others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers();
+  if(typeof drawDockFleet==='function')drawDockFleet()}catch(e){}}
 async function addDroneSlot(){if(!confirm('Add another drone? It gets its own pairing QR code and video. Frigate restarts (about 20 s).'))return;
   const d=await fetch('/api/drone/add',{method:'POST'}).then(r=>r.json());
   if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else alert(d.error||'Could not add a drone.')}
@@ -519,7 +525,7 @@ function dkCard(x,found){const tags=[];
   const dot=x.online?'good':'bad';
   const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')">Register</button>`
     :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
-  return `<div class="dk-card${found?' found':''}"><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
+  return `<div class="dk-card${found?' found':''}" id="dkCard_${esc(x.sn)}"><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
     <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
     <div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div><div class="actions" style="gap:6px">${btns}</div></div>`}
 async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
@@ -528,7 +534,35 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   const cards=d.docks.map(x=>dkCard(x,false)).concat(d.found.map(x=>dkCard(x,true)));
   const keep=document.activeElement&&document.activeElement.id&&document.activeElement.id.startsWith('dkName_')?document.activeElement.id:null;
   if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
-  if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed}catch(e){}}
+  if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed;
+  dockData=d.docks;drawDockFleet();drawDockMap()}catch(e){}}
+// Registered docks in the fleet bar and on the map. Docks don't fly from here yet: a click shows the dock.
+let dockData=[],dockMarks={};
+function dockInfo(x){if(!x.online)return 'offline';
+  const where=x.drone_in_dock===false?'drone out':x.drone_model?'drone in dock':'no drone';
+  return where+(x.battery!=null?' · '+x.battery+'%':'')}
+function drawDockFleet(){const box=$('fleetDocks');if(!box)return;
+  box.innerHTML=dockData.map(x=>`<button class="dk-chip" data-sn="${esc(x.sn)}" onclick="focusDock(this.dataset.sn)" title="${esc((x.model||'Dock')+' · SN '+x.sn)}"><i class="${x.online?'ok':''}"></i>🛬 ${esc(x.name)} <small>${esc(dockInfo(x))}</small></button>`).join('')}
+function drawDockMap(){let fit=false;
+  if(!map&&dockData.some(x=>x.lat)){const f=dockData.find(x=>x.lat);initMap(f.lat,f.lon);fit=true}
+  if(!map||!window.L)return;const seen=new Set();
+  dockData.forEach(x=>{if(!x.lat||!x.lon)return;seen.add(x.sn);let m=dockMarks[x.sn];
+    const icon=L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],html:`<div class="dk-mark${x.online?'':' off'}">D</div>`});
+    if(!m){m=dockMarks[x.sn]={dock:L.marker([x.lat,x.lon],{icon,zIndexOffset:-100}).addTo(map).on('click',()=>focusDock(x.sn,true)),drone:null}}
+    m.dock.setLatLng([x.lat,x.lon]).setIcon(icon);const tip=`${esc(x.name)} · ${esc(dockInfo(x))}`;
+    if(m.dock.getTooltip())m.dock.setTooltipContent(tip);else m.dock.bindTooltip(tip,{direction:'right'});
+    const out=x.drone_in_dock===false&&x.drone_lat&&x.drone_lon;
+    if(out){if(!m.drone)m.drone=L.circleMarker([x.drone_lat,x.drone_lon],{radius:7,color:'#ffb23c',fillColor:'#ffb23c',fillOpacity:.8}).addTo(map);
+      const dt=`${esc(x.drone_model||'Drone')} (${esc(x.name)})${x.drone_height!=null?' · '+fmt(x.drone_height)+' m':''}`;
+      m.drone.setLatLng([x.drone_lat,x.drone_lon]);if(m.drone.getTooltip())m.drone.setTooltipContent(dt);else m.drone.bindTooltip(dt,{permanent:true,direction:'right'})}
+    else if(m.drone){m.drone.remove();m.drone=null}});
+  const pts=dockData.flatMap(x=>[x.lat?[x.lat,x.lon]:null,x.drone_in_dock===false&&x.drone_lat?[x.drone_lat,x.drone_lon]:null]).filter(Boolean);
+  if(fit&&pts.length>1)map.fitBounds(pts,{padding:[40,40],maxZoom:18});
+  Object.keys(dockMarks).forEach(sn=>{if(!seen.has(sn)){dockMarks[sn].dock.remove();dockMarks[sn].drone&&dockMarks[sn].drone.remove();delete dockMarks[sn]}})}
+function focusDock(sn,fromMap){const x=dockData.find(d=>d.sn===sn);if(!x)return;
+  if(map&&x.lat&&!fromMap){map.setView([x.lat,x.lon],Math.max(map.getZoom(),17));dockMarks[sn]&&dockMarks[sn].dock.openTooltip()}
+  const c=$('dkCard_'+sn);if(c){if(fromMap)c.scrollIntoView({behavior:'smooth',block:'center'});c.classList.add('flash');setTimeout(()=>c.classList.remove('flash'),1600)}
+  if(!x.lat)dkMsg(`${x.name} hasn't sent its position yet.`)}
 async function loadDockSetup(){if(!DK_ADMIN)return;$('dockSetup').style.display='';
   const d=await fetch('/api/docks/setup',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}));if(!d.ok)return;
   $('dkAppId').value=d.app_id||'';$('dkKeysState').textContent=d.cloud_ready?'✓ Keys saved':'Keys missing'+(d.app_key_set?'':' · App Key')+(d.app_license_set?'':' · App License');

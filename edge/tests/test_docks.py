@@ -111,6 +111,7 @@ def test_registered_dock_goes_offline(dock_mod, hub):
 def test_register_simulated_dock_on_drone_page(d, client):
     page = client.get("/drone-control").get_data(as_text=True)
     assert 'id="dockPanel"' in page and "Set up a dock" in page
+    assert "fleetDocks" in page and "function drawDockMap" in page  # docks in the fleet bar and on the map
     r = client.post("/api/docks/simulate", json={"lat": 45.5, "lon": -75.66}).get_json()
     assert r["ok"], r
     sn = r["sn"]
