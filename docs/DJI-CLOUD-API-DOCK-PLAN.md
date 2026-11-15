@@ -1,6 +1,6 @@
 # DJI Cloud API: Dock support (plan)
 
-Status: **Phase 1 started** (decided 15 November 2026). Drone Link (phone + RC-N1) stays as it is;
+Status: **Phases 1 and 2 built, Phase 3 planned** (decided 15 November 2026; not merged yet). Drone Link (phone + RC-N1) stays as it is;
 docks are added next to it as a new kind of drone slot.
 
 Done so far (not merged yet): `edge/app/dock.py` (broker files, hub, MQTT client, Pilot 2 setup page on LAN
