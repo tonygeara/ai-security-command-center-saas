@@ -1,7 +1,15 @@
 # DJI Cloud API: Dock support (plan)
 
-Status: **planned, not started** (decided 15 November 2026). Drone Link (phone + RC-N1) stays as it is;
+Status: **Phase 1 started** (decided 15 November 2026). Drone Link (phone + RC-N1) stays as it is;
 docks are added next to it as a new kind of drone slot.
+
+Done so far (not merged yet): `edge/app/dock.py` (broker files, hub, MQTT client, Pilot 2 setup page on LAN
+port 8767), `edge/app/dock_sim.py` (simulated Dock 3 + Matrice 4TD), the `dock-mqtt` broker in
+`edge/runtime/docker-compose.yml` (LAN port 1884, passwords written by the launcher), and the **DJI Docks**
+panel on the Drone page (Found → Register, rename, remove; admin setup with Cloud API keys and the Pilot 2
+link/QR; simulated dock). Tests: `edge/tests/test_docks.py`. Still to do in Phase 1: docks as drone slots
+(fleet bar, map, licence count), the `drone_dock` switch in Supabase/admin portal/on-prem licence, and
+health (HMS) alerts.
 
 ## Goal
 

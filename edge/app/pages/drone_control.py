@@ -49,6 +49,20 @@ BODY = r"""
 .fs-cell b{color:#e9f8ff}.fs-cell.bad{color:#ff9ea8;background:rgba(125,12,28,.16)}.fs-cell.warn{color:#ffcf7a;background:rgba(125,90,12,.12)}
 .fs-cell.ok{color:#7dffc1}.fs-link{margin-left:auto;border-right:0;color:#5bd9ff;text-decoration:none}.fs-link:hover{color:#fff}
 #m3d{display:none;width:100%;height:760px;border:1px solid #155879;border-radius:5px;background:#020a10}
+.dk-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.dk-card{border:1px solid #155879;border-radius:5px;background:#05131d;padding:10px 12px}
+.dk-card.found{border-style:dashed;border-color:#7a5a12}
+.dk-card h4{margin:0 0 4px;font:bold 13px Arial,sans-serif;color:#e9f8ff;display:flex;align-items:center;gap:7px}
+.dk-card .dk-sub{color:#6d8b9d;font-size:11px;margin-bottom:8px;word-break:break-all}
+.dk-tags{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.dk-tags span{border:1px solid #153c56;border-radius:3px;padding:2px 6px;font-size:11px;color:#9edfff}
+.dk-setup{margin-top:14px;border-top:1px solid #123447;padding-top:12px}
+.dk-setup summary{cursor:pointer;color:#5bd9ff;font:bold 12px Arial;letter-spacing:.5px}
+.dk-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin:10px 0}
+.dk-form input{width:100%;box-sizing:border-box}
+.dk-pilot{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-top:10px}
+.dk-pilot .qr{background:#fff;border-radius:4px;padding:4px}
+.dk-pilot code{word-break:break-all}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -198,6 +212,24 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <button class="hud-btn" onclick="cmd('stream_on')">Restart video</button></div>
 <div id="events" class="muted" style="margin-top:12px;max-height:150px;overflow:auto"></div></div></section>
 </div></div>
+<section class="panel" id="dockPanel" style="margin-top:16px"><div class="panel-head"><div class="panel-title">🛬 DJI Docks</div><div class="live" id="dockState">…</div></div>
+<div class="panel-body"><div class="muted" style="margin-bottom:10px">A dock launches its drone with no pilot on site (DJI Cloud API). It connects to this PC over the site network; once it shows under <b>Found</b>, register it. Flying from a dock comes in the next update.</div>
+<div class="dk-list" id="dockList"></div>
+<div id="dockMsg" class="hud-msg"></div>
+<details class="dk-setup" id="dockSetup" style="display:none"><summary>Set up a dock (admins)</summary>
+<div class="muted" style="margin-top:10px"><b>1. DJI Cloud API keys</b> (once): developer.dji.com → Apps → Create App, App Type <b>Cloud API</b>. Paste the three values here.</div>
+<div class="dk-form"><label>App ID<input id="dkAppId" autocomplete="off"></label>
+<label>App Key<input id="dkAppKey" type="password" autocomplete="new-password" placeholder="unchanged"></label>
+<label>App License<input id="dkAppLic" type="password" autocomplete="new-password" placeholder="unchanged"></label></div>
+<div class="actions"><button class="hud-btn" onclick="dockSaveKeys()">Save keys</button><span class="muted" id="dkKeysState"></span></div>
+<div class="muted" style="margin-top:14px"><b>2. Connect the dock</b>: on the dock's DJI RC Plus (connected to the dock and to this site's network), open <b>DJI Pilot 2 → Cloud Service → Open Platform</b> and enter this link, or scan the QR code. Pilot 2 then sends this PC's address to the dock.</div>
+<div class="dk-pilot"><div class="qr" id="dkQr"></div><div style="flex:1;min-width:240px">
+<div class="muted">Link: <code id="dkLink">…</code></div><div class="muted" style="margin-top:6px">Dock broker: <code id="dkBroker">…</code></div>
+<div class="muted" style="margin-top:6px">Keep this link private: it carries the dock password. Making a new link stops the old one working (docks already connected stay connected).</div>
+<div class="actions" style="margin-top:10px"><button class="hud-btn danger" onclick="dockNewLink()">New link</button></div></div></div>
+<div class="muted" style="margin-top:14px"><b>No dock yet?</b> Add a simulated Dock 3 with a Matrice 4TD to try the steps (it appears under Found at the map's centre).</div>
+<div class="actions" style="margin-top:8px"><button class="hud-btn" id="dkSimBtn" onclick="dockSimulate()">+ Simulated dock</button></div>
+</details></div></section>
 </main>
 <script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
 <script>
@@ -473,5 +505,46 @@ async function resetPair(){if(!confirm('Make a new pairing code? The phone will 
 function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
   const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
   if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
+// ---- DJI Docks ----
+const DK_ADMIN=typeof IS_ADMIN!=='undefined'&&IS_ADMIN;
+function dkMsg(t,ok){const e=$('dockMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
+async function dkPost(url,body,method){const r=await fetch(url,{method:method||'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+  let d={};try{d=await r.json()}catch(e){}return d.ok?d:{ok:false,error:d.error||('Failed ('+r.status+')')}}
+function dkCard(x,found){const tags=[];
+  if(x.drone_model)tags.push((x.drone_in_dock===false?'✈ ':'⌂ ')+esc(x.drone_model)+(x.drone_in_dock===false?' out':' in dock'));
+  if(x.battery!=null)tags.push('🔋 '+x.battery+'%'+(x.charging?' charging':''));
+  if(x.cover)tags.push('Cover '+esc(x.cover));if(x.mode)tags.push(esc(x.mode));
+  if(x.temperature!=null)tags.push('🌡 '+fmt(x.temperature)+' °C');if(x.wind!=null)tags.push('💨 '+fmt(x.wind)+' m/s');
+  if(x.rain&&x.rain!=='none')tags.push('🌧 '+esc(x.rain));if(x.simulated)tags.push('SIMULATED');
+  const dot=x.online?'good':'bad';
+  const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')">Register</button>`
+    :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
+  return `<div class="dk-card${found?' found':''}"><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
+    <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
+    <div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div><div class="actions" style="gap:6px">${btns}</div></div>`}
+async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  $('dockState').textContent=!d.allowed?'NOT LICENSED':d.broker.connected?'BROKER READY':d.broker.running?'BROKER STARTING':'BROKER OFF';
+  $('dockState').style.color=d.allowed&&d.broker.connected?'':'#ffcf7a';
+  const cards=d.docks.map(x=>dkCard(x,false)).concat(d.found.map(x=>dkCard(x,true)));
+  const keep=document.activeElement&&document.activeElement.id&&document.activeElement.id.startsWith('dkName_')?document.activeElement.id:null;
+  if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
+  if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed}catch(e){}}
+async function loadDockSetup(){if(!DK_ADMIN)return;$('dockSetup').style.display='';
+  const d=await fetch('/api/docks/setup',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}));if(!d.ok)return;
+  $('dkAppId').value=d.app_id||'';$('dkKeysState').textContent=d.cloud_ready?'✓ Keys saved':'Keys missing'+(d.app_key_set?'':' · App Key')+(d.app_license_set?'':' · App License');
+  $('dkQr').innerHTML=d.qr||'';$('dkLink').textContent=d.pilot_link;$('dkBroker').textContent=d.broker;
+  if(d.pilot_page&&d.pilot_page!=='ok')dkMsg('Pilot 2 setup page: '+d.pilot_page,false)}
+async function dockSaveKeys(){const b={app_id:$('dkAppId').value.trim()};if($('dkAppKey').value.trim())b.app_key=$('dkAppKey').value.trim();
+  if($('dkAppLic').value.trim())b.app_license=$('dkAppLic').value.trim();const d=await dkPost('/api/docks/setup',b);
+  dkMsg(d.ok?'Cloud API keys saved.':d.error,d.ok);if(d.ok){$('dkAppKey').value='';$('dkAppLic').value='';loadDockSetup()}}
+async function dockNewLink(){if(!confirm('Make a new Pilot 2 link? The old link stops working.'))return;await dkPost('/api/docks/setup',{new_link:true});loadDockSetup()}
+async function dockRegister(sn){const n=$('dkName_'+sn);const d=await dkPost('/api/docks/register',{sn,name:n?n.value:''});
+  if(n)n.blur();dkMsg(d.ok?`Registered as ${d.dock.name}.`:d.error,d.ok);loadDocks()}
+async function dockRename(sn,old){const name=prompt('New name for this dock:',old);if(!name)return;const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{name});dkMsg(d.ok?'Renamed.':d.error,d.ok);loadDocks()}
+async function dockRemove(sn,name){if(!confirm(`Remove ${name}? It stops being part of this system${sn.startsWith('SIMDOCK')?' and the simulated dock is deleted':''}. A real dock can be registered again when it connects.`))return;
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{},'DELETE');dkMsg(d.ok?'Removed.':d.error,d.ok);loadDocks()}
+async function dockSimulate(){const c=map&&map.getCenter?map.getCenter():null;const d=await dkPost('/api/docks/simulate',c?{lat:c.lat,lon:c.lng}:{});
+  dkMsg(d.ok?`Simulated dock ${d.sn} added: it shows under Found in a moment. Register it to try the steps.`:d.error,d.ok);setTimeout(loadDocks,1500)}
+loadDocks();setInterval(loadDocks,3000);loadDockSetup();
 $('speedVal').textContent='30%';loadFleet();setInterval(loadFleet,3000);loadPair();poll();loadResp();loadRoutes().then(loadScheds);setInterval(poll,500);
 </script>"""

@@ -5475,6 +5475,160 @@ def api_virtual_drone(slot):
     return jsonify({"ok": True, "drone": v.summary()})
 
 
+# ---------- DJI Docks (DJI Cloud API; Phase 1: registration and status, no flying yet) ----------
+# Docks connect to the dock broker on this PC (docker-compose "dock-mqtt", LAN port 1884, password protected);
+# DJI Pilot 2 on the dock's controller gets the address and keys from the setup page on LAN port 8767.
+# Plan: docs/DJI-CLOUD-API-DOCK-PLAN.md.
+import dock as dock_lib  # noqa: E402
+from dock_sim import SimulatedDock  # noqa: E402
+
+DOCK_DIR = os.path.join(DATA_FOLDER, "dock-mqtt")
+dock_store = dock_lib.DockStore(os.path.join(DATA_FOLDER, "docks.json"))
+dock_hub = dock_lib.DockHub(dock_store)
+dock_mqtt = None
+DOCK_PILOT_PORT = dock_lib.PILOT_PAGE_PORT
+DOCK_SIM_MAX = 3
+_dock_status = {"pilot_page": ""}
+
+
+def dock_allowed():
+    """DJI Docks: the per-client switch drone_dock once the provider has set it; until then they follow drone control."""
+    if not onprem_mode():
+        with cloud_lock:
+            explicit = "drone_dock" in (cloud_state.get("features") or {})
+        if explicit:
+            return cloud_feature_enabled("drone_dock")
+    return drone_control_allowed()
+
+
+def _dock_creds():
+    return dock_lib.ensure_broker_files(DOCK_DIR)
+
+
+def _start_sim_dock(sn, home=None):
+    if home is None:
+        d = (dock_store.data.get("sim_homes") or {}).get(sn) or VIRTUAL_DEFAULT_HOME
+        home = (d[0], d[1])
+    sim = SimulatedDock(sn, dock_hub.handle, home)
+    dock_hub.local[sn] = sim
+    sim.start()
+    return sim
+
+
+def start_docks():
+    global dock_mqtt
+    try:
+        creds = _dock_creds()
+        dock_mqtt = dock_lib.MqttTransport(dock_hub, "127.0.0.1", dock_lib.BROKER_PORT, creds["edge_user"], creds["edge_password"])
+        dock_mqtt.start()
+    except Exception as e:  # noqa: BLE001
+        print("Dock broker connection not started:", e)
+    try:
+        dock_lib.start_pilot_server(dock_store, _dock_creds, _lan_ip, port=DOCK_PILOT_PORT)
+        _dock_status["pilot_page"] = "ok"
+    except OSError as e:
+        _dock_status["pilot_page"] = f"Port {DOCK_PILOT_PORT} is in use: {e}"
+        print("Dock setup page not started:", e)
+    for sn in dock_store.data.get("simulated") or []:
+        if sn not in dock_hub.local:
+            _start_sim_dock(sn)
+
+
+def _dock_refused():
+    return jsonify({"ok": False, "error": "DJI Docks aren't included in this PC's licence. Ask your provider to switch them on."}), 403
+
+
+@app.route("/api/docks")
+def api_docks():
+    """Registered docks with their live state, and docks that connected but aren't registered yet (anyone signed in)."""
+    snap = dock_hub.snapshot()
+    return jsonify({"ok": True, "allowed": dock_allowed(), "cloud_ready": dock_store.cloud_ready(),
+                    "broker": {"port": dock_lib.BROKER_PORT, "running": _port("127.0.0.1", dock_lib.BROKER_PORT),
+                               "connected": bool(dock_mqtt and dock_mqtt.connected)},
+                    "can_simulate": len(dock_hub.local) < DOCK_SIM_MAX, **snap})
+
+
+@app.route("/api/docks/setup", methods=["GET", "POST"])
+def api_docks_setup():
+    """Admins: the Cloud API app keys, and the link Pilot 2 opens. GET never returns the App Key or App License."""
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if data.get("new_link"):
+            dock_store.new_bind_token()
+        else:
+            fields = {k: data.get(k) for k in ("app_id", "app_key", "app_license") if data.get(k) is not None}
+            if not fields:
+                return jsonify({"ok": False, "error": "Nothing to save."}), 400
+            dock_store.set_cloud(**fields)
+            audit_record("dock: Cloud API keys changed", target="DJI Cloud API", detail={"fields": sorted(fields)})
+    c = dock_store.cloud()
+    host = _lan_ip()
+    link = f"http://{host}:{DOCK_PILOT_PORT}/pilot?k={dock_store.data['bind_token']}"
+    return jsonify({"ok": True, "app_id": c["app_id"], "app_key_set": bool(c["app_key"]), "app_license_set": bool(c["app_license"]),
+                    "cloud_ready": dock_store.cloud_ready(), "pilot_link": link, "qr": _qr_svg(link),
+                    "pilot_page": _dock_status["pilot_page"], "broker": f"{host}:{dock_lib.BROKER_PORT}"})
+
+
+@app.route("/api/docks/register", methods=["POST"])
+def api_docks_register():
+    """Admins: make a dock that connected part of this system."""
+    if not dock_allowed():
+        return _dock_refused()
+    data = request.get_json(silent=True) or {}
+    sn = dock_lib.clean_sn(data.get("sn"))
+    if not sn or sn not in dock_hub.state:
+        return jsonify({"ok": False, "error": "That dock hasn't connected to this PC. Set it up with Pilot 2 first."}), 404
+    try:
+        d = dock_store.register(sn, data.get("name"), simulated=sn in dock_hub.local)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    audit_record("dock: registered", target=sn, detail={"name": d["name"], "slot": d["slot"]})
+    return jsonify({"ok": True, "dock": {**dock_hub.summary(sn), **d}})
+
+
+@app.route("/api/docks/<sn>", methods=["POST", "DELETE"])
+def api_dock(sn):
+    """Admins: rename (POST {name}) or remove (DELETE) a registered dock. A simulated dock is deleted too."""
+    if request.method == "DELETE":
+        removed = dock_store.unregister(sn)
+        sim = dock_hub.local.pop(sn, None)
+        if sim:
+            sim.stop()
+            dock_store.set_simulated([s for s in dock_store.data.get("simulated") or [] if s != sn])
+            with dock_hub.lock:
+                dock_hub.state.pop(sn, None)
+        if not removed and not sim:
+            return jsonify({"ok": False, "error": "Unknown dock."}), 404
+        audit_record("dock: removed", target=sn, detail={"name": (removed or {}).get("name", ""), "simulated": bool(sim)})
+        return jsonify({"ok": True})
+    try:
+        dock_store.rename(sn, (request.get_json(silent=True) or {}).get("name"))
+    except KeyError:
+        return jsonify({"ok": False, "error": "Unknown dock."}), 404
+    return jsonify({"ok": True})
+
+
+@app.route("/api/docks/simulate", methods=["POST"])
+def api_docks_simulate():
+    """Admins: a simulated Dock 3 with a Matrice 4TD, for testing without hardware. It connects like a real dock and
+    shows under "Found", ready to register."""
+    if not dock_allowed():
+        return _dock_refused()
+    if len(dock_hub.local) >= DOCK_SIM_MAX:
+        return jsonify({"ok": False, "error": f"{DOCK_SIM_MAX} simulated docks maximum."}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        home = (float(data["lat"]), float(data["lon"]))
+    except (KeyError, TypeError, ValueError):
+        home = VIRTUAL_DEFAULT_HOME
+    n = next(i for i in range(1, DOCK_SIM_MAX + 2) if f"SIMDOCK{i}" not in dock_hub.local and f"SIMDOCK{i}" not in dock_store.docks())
+    sn = f"SIMDOCK{n}"
+    dock_store.data.setdefault("sim_homes", {})[sn] = [home[0], home[1]]
+    dock_store.set_simulated(list(dock_store.data.get("simulated") or []) + [sn])
+    _start_sim_dock(sn, home)
+    return jsonify({"ok": True, "sn": sn})
+
+
 @app.route("/virtual-drones")
 def virtual_drones_page():
     return VIRTUAL_DRONES_PAGE
@@ -9439,6 +9593,7 @@ def main():
     _start_v105_recovery()
     start_drone_link()
     start_virtual_drones()
+    start_docks()
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     start_assistant()
     CLOUD_SYNC.start()

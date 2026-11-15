@@ -1,0 +1,493 @@
+"""DJI Dock support through DJI Cloud API. Phase 1: registration and status (no flying yet).
+
+How a dock reaches this PC:
+
+    Dock ──Ethernet── site LAN ──► dock broker on this PC (Mosquitto "dock-mqtt", LAN port 1884, password)
+                                        ▲
+    DJI Pilot 2 on the dock's RC ── opens the setup page (LAN port 8767, secret link) once, which hands it
+    this PC's Cloud API keys and the broker address and password, so the dock connects here.
+
+MQTT topics used (DJI Cloud API; check names against DJI's current docs when adding a phase):
+    sys/product/{gateway}/status          dock -> PC  update_topo: dock online, which drone is in it
+    sys/product/{gateway}/status_reply    PC -> dock  result 0
+    thing/product/{sn}/osd                dock or drone -> PC  telemetry, about every 0.5 to 2 s
+    thing/product/{sn}/state              dock or drone -> PC  changes (firmware, etc.)
+    thing/product/{gateway}/events        dock -> PC  replied to on .../events_reply when need_reply = 1
+    thing/product/{gateway}/requests      dock -> PC  e.g. "config": answered on .../requests_reply
+
+A dock that connects is listed as "found"; an admin registers it (name, slot dock1, dock2, …) before it is part
+of the system. A simulated dock (dock_sim.py) goes through the same hub without a broker, for tests and demos.
+"""
+import base64
+import hashlib
+import json
+import os
+import secrets
+import threading
+import time
+import uuid
+
+BROKER_PORT = 1884          # LAN port of the dock broker (docker-compose: dock-mqtt)
+PILOT_PAGE_PORT = 8767      # LAN port of the Pilot 2 setup page
+ONLINE_SECONDS = 15         # no message for this long: offline
+SLOT_PREFIX = "dock"
+
+# (domain, type, sub_type) -> name, from DJI's Cloud API product list. Add new models there as DJI releases them.
+MODELS = {
+    "3-1-0": "DJI Dock", "3-2-0": "DJI Dock 2", "3-3-0": "DJI Dock 3",
+    "0-60-0": "Matrice 300 RTK", "0-89-0": "Matrice 350 RTK",
+    "0-67-0": "Matrice 30", "0-67-1": "Matrice 30T",
+    "0-77-0": "Mavic 3E", "0-77-1": "Mavic 3T", "0-77-2": "Mavic 3M",
+    "0-91-0": "Matrice 3D", "0-91-1": "Matrice 3TD",
+    "0-99-0": "Matrice 4E", "0-99-1": "Matrice 4T",
+    "0-100-0": "Matrice 4D", "0-100-1": "Matrice 4TD",
+    "2-119-0": "DJI RC Plus", "2-144-0": "DJI RC Pro Enterprise", "2-174-0": "DJI RC Plus 2",
+}
+DOCK_MODES = {0: "idle", 1: "on-site debugging", 2: "remote debugging", 3: "updating firmware", 4: "working"}
+COVER_STATES = {0: "closed", 1: "open", 2: "half open", 3: "cover fault"}
+RAIN = {0: "none", 1: "light", 2: "moderate", 3: "heavy"}
+
+
+def model_name(domain, type_, sub_type):
+    key = f"{domain}-{type_}-{sub_type}"
+    return MODELS.get(key, f"Unknown ({key})")
+
+
+# ---------- broker files (written by the launcher before docker compose starts, and by the dashboard) ----------
+
+def mosquitto_hash(password, salt=None):
+    """Mosquitto 2 password-file hash: PBKDF2-SHA512, 101 rounds ($7$), the same as mosquitto_passwd writes."""
+    salt = salt or os.urandom(12)
+    digest = hashlib.pbkdf2_hmac("sha512", password.encode("utf-8"), salt, 101)
+    return f"$7$101${base64.b64encode(salt).decode()}${base64.b64encode(digest).decode()}"
+
+
+def ensure_broker_files(folder):
+    """The dock broker's config, password file and the credentials this PC uses. Made once; returns the credentials:
+    {"dock_user", "dock_password"} for docks and Pilot 2, {"edge_user", "edge_password"} for this PC."""
+    os.makedirs(folder, exist_ok=True)
+    creds_path = os.path.join(folder, "credentials.json")
+    creds = _read_json(creds_path)
+    if not (creds.get("dock_password") and creds.get("edge_password")):
+        creds = {"dock_user": "dock", "dock_password": secrets.token_urlsafe(18),
+                 "edge_user": "edge", "edge_password": secrets.token_urlsafe(18)}
+        _write_json(creds_path, creds)
+    conf = ("# DJI Dock broker (written by AI Security; changes are overwritten). /mosquitto/passwd is a private\n"
+            "# copy of passwd made when the container starts (docker-compose.yml).\n"
+            "listener 1883\nallow_anonymous false\npassword_file /mosquitto/passwd\npersistence false\n")
+    _write_if_changed(os.path.join(folder, "mosquitto.conf"), conf)
+    passwd_path = os.path.join(folder, "passwd")
+    current = _read_text(passwd_path)
+    if not (_passwd_matches(current, creds["dock_user"], creds["dock_password"])
+            and _passwd_matches(current, creds["edge_user"], creds["edge_password"])):
+        _write_text(passwd_path, f"{creds['dock_user']}:{mosquitto_hash(creds['dock_password'])}\n"
+                                 f"{creds['edge_user']}:{mosquitto_hash(creds['edge_password'])}\n")
+    return creds
+
+
+def _passwd_matches(text, user, password):
+    for line in (text or "").splitlines():
+        name, _, h = line.partition(":")
+        if name == user and h.startswith("$7$"):
+            try:
+                _, _, rounds, salt, _ = h.split("$")
+                return h == mosquitto_hash(password, base64.b64decode(salt)) and rounds == "101"
+            except ValueError:
+                return False
+    return False
+
+
+# ---------- registry: Cloud API keys, Pilot 2 link, registered docks ----------
+
+class DockStore:
+    """docks.json in the data folder."""
+
+    def __init__(self, path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.data = _read_json(path)
+        self.data.setdefault("cloud", {})
+        self.data.setdefault("docks", {})
+        self.data.setdefault("simulated", [])
+        if not self.data.get("workspace_id"):
+            self.data["workspace_id"] = str(uuid.uuid4())
+        if not self.data.get("bind_token"):
+            self.data["bind_token"] = secrets.token_urlsafe(24)
+        self.save()
+
+    def save(self):
+        with self.lock:
+            _write_json(self.path, self.data)
+
+    # Cloud API app (developer.dji.com → Apps → Cloud API): needed by Pilot 2 and the dock.
+    def cloud(self):
+        c = self.data["cloud"]
+        return {"app_id": str(c.get("app_id") or ""), "app_key": str(c.get("app_key") or ""),
+                "app_license": str(c.get("app_license") or "")}
+
+    def cloud_ready(self):
+        c = self.cloud()
+        return bool(c["app_id"] and c["app_key"] and c["app_license"])
+
+    def set_cloud(self, app_id=None, app_key=None, app_license=None):
+        c = self.data["cloud"]
+        for k, v in (("app_id", app_id), ("app_key", app_key), ("app_license", app_license)):
+            if v is not None:
+                c[k] = str(v).strip()
+        self.save()
+
+    def new_bind_token(self):
+        self.data["bind_token"] = secrets.token_urlsafe(24)
+        self.save()
+        return self.data["bind_token"]
+
+    def docks(self):
+        return dict(self.data["docks"])
+
+    def register(self, sn, name, simulated=False):
+        sn = clean_sn(sn)
+        if not sn:
+            raise ValueError("No dock serial number.")
+        docks = self.data["docks"]
+        if sn in docks:
+            raise ValueError("This dock is already registered.")
+        used = {d.get("slot") for d in docks.values()}
+        n = next(i for i in range(1, len(docks) + 2) if f"{SLOT_PREFIX}{i}" not in used)
+        name = str(name or "").strip()[:40] or f"Dock {n}"
+        docks[sn] = {"name": name, "slot": f"{SLOT_PREFIX}{n}", "registered_at": time.time(), "simulated": bool(simulated)}
+        self.save()
+        return docks[sn]
+
+    def rename(self, sn, name):
+        d = self.data["docks"].get(sn)
+        if not d:
+            raise KeyError(sn)
+        d["name"] = str(name or "").strip()[:40] or d["name"]
+        self.save()
+
+    def unregister(self, sn):
+        removed = self.data["docks"].pop(sn, None)
+        self.save()
+        return removed
+
+    def set_simulated(self, sns):
+        self.data["simulated"] = list(sns)
+        self.save()
+
+
+def clean_sn(sn):
+    sn = str(sn or "").strip()
+    return sn if 4 <= len(sn) <= 40 and all(c.isalnum() or c in "-_" for c in sn) else ""
+
+
+# ---------- hub: what the docks say, and the replies they need ----------
+
+class DockHub:
+    """Takes every message from the docks (MQTT or a simulated dock), keeps their live state and replies.
+    publish(topic, dict) sends to MQTT; simulated docks get their replies directly."""
+
+    def __init__(self, store, now=time.time):
+        self.store = store
+        self.now = now
+        self.lock = threading.Lock()
+        self.state = {}       # gateway sn -> live state
+        self.drone_of = {}    # drone sn -> gateway sn
+        self.local = {}       # gateway sn -> simulated dock
+        self.publish_mqtt = None
+        self.on_change = None  # called with (event, gateway sn): "online", "offline", "found"
+
+    # --- outgoing ---
+    def publish(self, topic, payload):
+        sn = _topic_sn(topic)
+        sim = self.local.get(sn)
+        if sim is not None:
+            sim.on_message(topic, payload)
+        elif self.publish_mqtt:
+            self.publish_mqtt(topic, payload)
+
+    def _reply(self, topic, msg, data):
+        self.publish(topic + "_reply", {"tid": msg.get("tid") or str(uuid.uuid4()), "bid": msg.get("bid") or str(uuid.uuid4()),
+                                        "timestamp": int(self.now() * 1000), "method": msg.get("method"), "data": data})
+
+    # --- incoming ---
+    def handle(self, topic, payload):
+        """One MQTT message. payload: bytes, str or an already decoded dict."""
+        try:
+            msg = payload if isinstance(payload, dict) else json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(msg, dict):
+            return
+        parts = topic.split("/")
+        if len(parts) != 4 or parts[1] != "product":
+            return
+        kind, sn, leaf = parts[0], parts[2], parts[3]
+        if kind == "sys" and leaf == "status":
+            self._status(topic, sn, msg)
+        elif kind == "thing" and leaf == "osd":
+            self._osd(sn, msg.get("data") or {})
+        elif kind == "thing" and leaf == "state":
+            self._touch(self.drone_of.get(sn, sn))
+        elif kind == "thing" and leaf == "events":
+            self._touch(sn)
+            if msg.get("need_reply"):
+                self._reply(topic, msg, {"result": 0})
+        elif kind == "thing" and leaf == "requests":
+            self._touch(sn)
+            self._request(topic, msg)
+
+    def _status(self, topic, gw, msg):
+        if msg.get("method") != "update_topo":
+            return
+        data = msg.get("data") or {}
+        subs = data.get("sub_devices") or []
+        drone = subs[0] if subs and isinstance(subs[0], dict) else None
+        with self.lock:
+            s = self.state.setdefault(gw, {"sn": gw, "osd": {}, "drone_osd": {}, "first_seen": self.now()})
+            new = "model" not in s
+            if data:
+                s["model"] = model_name(data.get("domain"), data.get("type"), data.get("sub_type"))
+                s["is_dock"] = str(data.get("domain")) == "3"
+                s["version"] = str(data.get("version") or "")
+            if drone:
+                s["drone_sn"] = str(drone.get("sn") or "")
+                s["drone_model"] = model_name(drone.get("domain"), drone.get("type"), drone.get("sub_type"))
+                self.drone_of[s["drone_sn"]] = gw
+            elif data:
+                s["drone_sn"], s["drone_model"] = "", ""
+            if not data:  # an empty topology: the device went offline
+                s["offline_at"] = self.now()
+            s["last_seen"] = self.now()
+        self._reply(topic, msg, {"result": 0})
+        if self.on_change:
+            self.on_change("offline" if not data else "found" if new and gw not in self.store.docks() else "online", gw)
+
+    def _osd(self, sn, data):
+        gw = self.drone_of.get(sn)
+        with self.lock:
+            if gw:
+                s = self.state.get(gw)
+                if s is not None:
+                    s["drone_osd"] = data
+                    s["drone_seen"] = self.now()
+                    s["last_seen"] = self.now()
+                return
+            s = self.state.get(sn)
+            if s is None:
+                return  # telemetry before the topology: wait for update_topo
+            s["osd"] = {**s["osd"], **data}  # docks send their fields in several partial messages
+            s["last_seen"] = self.now()
+            s.pop("offline_at", None)
+
+    def _touch(self, gw):
+        with self.lock:
+            if gw in self.state:
+                self.state[gw]["last_seen"] = self.now()
+
+    def _request(self, topic, msg):
+        if msg.get("method") == "config":  # the dock asks for the time server and the Cloud API app it should use
+            c = self.store.cloud()
+            self._reply(topic, msg, {"ntp_server_host": "pool.ntp.org", "app_id": c["app_id"],
+                                     "app_key": c["app_key"], "app_license": c["app_license"]})
+        else:
+            self._reply(topic, msg, {"result": 0})
+
+    # --- what the dashboard shows ---
+    def online(self, gw):
+        s = self.state.get(gw) or {}
+        return bool(s.get("last_seen")) and not s.get("offline_at") and self.now() - s["last_seen"] < ONLINE_SECONDS
+
+    def summary(self, gw):
+        s = self.state.get(gw) or {}
+        o, d = s.get("osd") or {}, s.get("drone_osd") or {}
+        charge = o.get("drone_charge_state") or {}
+        battery = (d.get("battery") or {}).get("capacity_percent")
+        if battery is None:
+            battery = charge.get("capacity_percent")
+        drone_on = bool(s.get("drone_seen")) and self.now() - s["drone_seen"] < ONLINE_SECONDS
+        return {"sn": gw, "model": s.get("model") or "", "online": self.online(gw), "last_seen": s.get("last_seen"),
+                "drone_sn": s.get("drone_sn") or "", "drone_model": s.get("drone_model") or "",
+                "drone_online": drone_on, "drone_in_dock": _flag(o.get("drone_in_dock")),
+                "mode": DOCK_MODES.get(o.get("mode_code"), ""), "cover": COVER_STATES.get(o.get("cover_state"), ""),
+                "battery": battery, "charging": charge.get("state") == 1,
+                "temperature": o.get("environment_temperature"), "wind": o.get("wind_speed"),
+                "rain": RAIN.get(o.get("rainfall"), ""),
+                "lat": o.get("latitude") or None, "lon": o.get("longitude") or None,
+                "drone_lat": d.get("latitude") if drone_on else None, "drone_lon": d.get("longitude") if drone_on else None,
+                "drone_height": d.get("height") if drone_on else None,
+                "simulated": gw in self.local}
+
+    def snapshot(self):
+        """Registered docks (with their live state) and found, not yet registered ones."""
+        registered = self.store.docks()
+        docks = [{**self.summary(sn), "name": d["name"], "slot": d["slot"]} for sn, d in registered.items()]
+        docks.sort(key=lambda x: (len(x["slot"]), x["slot"]))
+        with self.lock:
+            found = [self.summary(sn) for sn, s in self.state.items()
+                     if sn not in registered and s.get("is_dock") and self.online(sn)]
+        return {"docks": docks, "found": found}
+
+
+def _flag(v):
+    return None if v is None else bool(v)
+
+
+def _topic_sn(topic):
+    parts = str(topic).split("/")
+    return parts[2] if len(parts) >= 3 else ""
+
+
+# ---------- MQTT ----------
+
+class MqttTransport:
+    """This PC's connection to the dock broker; reconnects by itself."""
+    TOPICS = ("sys/product/+/status", "thing/product/+/osd", "thing/product/+/state",
+              "thing/product/+/events", "thing/product/+/requests")
+
+    def __init__(self, hub, host, port, username, password):
+        import paho.mqtt.client as mqtt
+        self.hub = hub
+        self.connected = False
+        self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=f"ai-security-{uuid.uuid4().hex[:8]}")
+        self.client.username_pw_set(username, password)
+        self.client.reconnect_delay_set(1, 30)
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+        self.client.on_message = lambda c, u, m: hub.handle(m.topic, m.payload)
+        self.host, self.port = host, port
+        hub.publish_mqtt = self.send
+
+    def start(self):
+        self.client.connect_async(self.host, self.port, keepalive=30)
+        self.client.loop_start()
+
+    def stop(self):
+        self.client.loop_stop()
+        try:
+            self.client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def send(self, topic, payload):
+        self.client.publish(topic, json.dumps(payload, separators=(",", ":")), qos=1)
+
+    def _on_connect(self, client, userdata, flags, reason, properties=None):
+        self.connected = not getattr(reason, "is_failure", False)
+        if self.connected:
+            for t in self.TOPICS:
+                client.subscribe(t, qos=1)
+
+    def _on_disconnect(self, *args):
+        self.connected = False
+
+
+# ---------- the Pilot 2 setup page ----------
+
+PILOT_PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Security · Dock setup</title>
+<style>body{margin:0;padding:24px;background:#03101a;color:#cfeeff;font:16px Arial,sans-serif}h1{font-size:22px;margin:0 0 6px}
+.s{margin:10px 0;padding:12px 14px;border:1px solid #155879;border-radius:6px;background:#05131d}.ok{color:#26ee89}.bad{color:#ff7b86}
+button{font-size:16px;padding:10px 18px;border-radius:6px;border:1px solid #45d0ff;background:#25c7ff;color:#02131d;font-weight:bold}</style></head>
+<body><h1>AI Security · __SITE__</h1><div>Connects this controller, and the dock it is set up with, to this site's AI Security PC.</div>
+<div class="s" id="lic">1. Cloud API keys: …</div><div class="s" id="mqtt">2. Connection to the PC (__HOST__): …</div>
+<p><button onclick="go()">Connect again</button></p>
+<script>
+const CFG=__CFG__;
+function set(id,ok,text){const e=document.getElementById(id);e.className='s '+(ok?'ok':'bad');e.textContent=text}
+function bridge(){return window.djiBridge}
+function go(){const b=bridge();
+  if(!b){set('lic',false,'Open this page in DJI Pilot 2 (Cloud Service → Open Platform) on the controller.');return}
+  try{b.platformVerifyLicense(CFG.app_id,CFG.app_key,CFG.app_license);
+    const ok=String(b.platformIsVerified()).indexOf('true')>=0;
+    set('lic',ok,ok?'1. Cloud API keys: accepted':'1. Cloud API keys: refused. Check the App ID, App Key and App License on the PC.');
+    if(!ok)return;
+    b.platformSetWorkspaceId(CFG.workspace_id);
+    b.platformSetInformation('AI Security',CFG.site,'AI Security Command Center');
+    b.platformLoadComponent('thing',JSON.stringify({host:CFG.mqtt,username:CFG.user,passwd:CFG.password,connectCallback:'onThing'}));
+    set('mqtt',true,'2. Connection to the PC: connecting…')}catch(e){set('lic',false,'Setup failed: '+e)}}
+window.onThing=function(arg){const ok=String(arg).indexOf('true')>=0||String(arg)==='1';
+  set('mqtt',ok,ok?'2. Connected to the PC. The dock now shows on the Drone page under DJI Docks; register it there.':'2. Could not connect to the PC. Same network? Is AI Security running?')};
+go();
+</script></body></html>"""
+
+
+def pilot_page(store, creds, host, site="this site"):
+    c = store.cloud()
+    cfg = {"app_id": c["app_id"], "app_key": c["app_key"], "app_license": c["app_license"],
+           "workspace_id": store.data["workspace_id"], "site": site, "mqtt": f"tcp://{host}:{BROKER_PORT}",
+           "user": creds["dock_user"], "password": creds["dock_password"]}
+    safe = json.dumps(cfg).replace("<", "\\u003c")
+    esc = lambda v: str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")  # noqa: E731
+    return PILOT_PAGE.replace("__CFG__", safe).replace("__SITE__", esc(site)).replace("__HOST__", esc(host))
+
+
+def start_pilot_server(store, creds_fn, host_fn, site_fn=lambda: "this site", port=PILOT_PAGE_PORT, bind="0.0.0.0"):
+    """A tiny LAN web server with one page: /pilot?k=<secret>. Everything else, or a wrong secret, is 404."""
+    import hmac
+    import urllib.parse
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            url = urllib.parse.urlparse(self.path)
+            key = (urllib.parse.parse_qs(url.query).get("k") or [""])[0]
+            if url.path != "/pilot" or not hmac.compare_digest(key.encode(), str(store.data.get("bind_token") or "").encode()):
+                self.send_error(404)
+                return
+            body = pilot_page(store, creds_fn(), host_fn(), site_fn()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer((bind, port), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, name="dock-pilot-page", daemon=True).start()
+    return server
+
+
+# ---------- small file helpers ----------
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_json(path, data):
+    _write_text(path, json.dumps(data, indent=2))
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _write_text(path, text):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    for attempt in range(5):  # Windows: antivirus or a reader can hold the file for a moment
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2)
+
+
+def _write_if_changed(path, text):
+    if _read_text(path) != text:
+        _write_text(path, text)

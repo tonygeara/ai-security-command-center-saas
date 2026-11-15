@@ -1,0 +1,253 @@
+"""DJI Docks, Phase 1: the dock broker's passwords, the hub (topology, telemetry, replies), registration on the
+Drone page with a simulated dock, the Pilot 2 setup page and who may do what."""
+import json
+import os
+import shutil
+import socket
+import subprocess
+import time
+import urllib.error
+import urllib.request
+
+import pytest
+
+from conftest import wait_until
+
+
+def _free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture
+def dock_mod(d):
+    import dock
+    return dock
+
+
+@pytest.fixture
+def hub(dock_mod, tmp_path):
+    store = dock_mod.DockStore(str(tmp_path / "docks.json"))
+    return dock_mod.DockHub(store)
+
+
+def topo(sn="DOCK1", drone="UAV1", dock_type=(3, 3, 0), drone_type=(0, 100, 1)):
+    return {"tid": "t1", "bid": "b1", "method": "update_topo", "data": {
+        "domain": dock_type[0], "type": dock_type[1], "sub_type": dock_type[2], "version": "1",
+        "sub_devices": [{"sn": drone, "domain": drone_type[0], "type": drone_type[1], "sub_type": drone_type[2]}] if drone else []}}
+
+
+def test_password_hash_matches_mosquitto_format(dock_mod):
+    import base64
+    h = dock_mod.mosquitto_hash("secret123", base64.b64decode("BnoqnfDWRXBR2ZLD"))
+    # Written by mosquitto_passwd 2.0.18 for the same password and salt.
+    assert h == "$7$101$BnoqnfDWRXBR2ZLD$8HFWl250YwnFzHkRkPXdrBC7MLZKuzJW2VVo7Nc/coHYplrM9QwzkkbYu6T9Nd2R0UzuOunzy0TzB2AAR/QEeg=="
+
+
+def test_broker_files_made_once(dock_mod, tmp_path):
+    folder = str(tmp_path / "dock-mqtt")
+    a = dock_mod.ensure_broker_files(folder)
+    passwd = open(os.path.join(folder, "passwd")).read()
+    b = dock_mod.ensure_broker_files(folder)
+    assert a == b and open(os.path.join(folder, "passwd")).read() == passwd  # same passwords, file not rewritten
+    assert "allow_anonymous false" in open(os.path.join(folder, "mosquitto.conf")).read()
+    assert passwd.startswith("dock:$7$101$") and "\nedge:$7$101$" in passwd
+    assert a["dock_password"] not in passwd
+
+
+def test_hub_topology_telemetry_and_replies(hub):
+    sent = []
+    hub.publish_mqtt = lambda topic, payload: sent.append((topic, payload))
+    hub.handle("thing/product/DOCK1/osd", json.dumps({"data": {"cover_state": 0}}))  # before the topology: ignored
+    assert hub.snapshot() == {"docks": [], "found": []}
+    hub.handle("sys/product/DOCK1/status", json.dumps(topo()))
+    assert sent[-1][0] == "sys/product/DOCK1/status_reply" and sent[-1][1]["data"] == {"result": 0}
+    assert sent[-1][1]["tid"] == "t1" and sent[-1][1]["method"] == "update_topo"
+    # Docks send their telemetry in parts; both parts are kept.
+    hub.handle("thing/product/DOCK1/osd", json.dumps({"data": {"cover_state": 0, "drone_in_dock": 1, "latitude": 33.9, "longitude": 35.5}}))
+    hub.handle("thing/product/DOCK1/osd", json.dumps({"data": {"environment_temperature": 21.5, "wind_speed": 2.1, "rainfall": 1,
+                                                                "drone_charge_state": {"state": 1, "capacity_percent": 80}}}))
+    hub.handle("thing/product/UAV1/osd", json.dumps({"data": {"battery": {"capacity_percent": 81}, "latitude": 33.9, "longitude": 35.5, "height": 0}}))
+    found = hub.snapshot()["found"]
+    assert len(found) == 1
+    f = found[0]
+    assert f["model"] == "DJI Dock 3" and f["drone_model"] == "Matrice 4TD" and f["online"] and f["drone_online"]
+    assert f["cover"] == "closed" and f["drone_in_dock"] is True and f["battery"] == 81 and f["charging"]
+    assert f["temperature"] == 21.5 and f["rain"] == "light" and f["lat"] == 33.9
+    # An event that needs a reply gets one; the dock's config request gets the Cloud API app.
+    hub.store.set_cloud("123", "key", "lic")
+    hub.handle("thing/product/DOCK1/events", json.dumps({"tid": "e", "bid": "e", "method": "hms", "need_reply": 1, "data": {}}))
+    assert sent[-1][0] == "thing/product/DOCK1/events_reply" and sent[-1][1]["data"]["result"] == 0
+    hub.handle("thing/product/DOCK1/requests", json.dumps({"tid": "r", "bid": "r", "method": "config", "data": {}}))
+    assert sent[-1][0] == "thing/product/DOCK1/requests_reply" and sent[-1][1]["data"]["app_id"] == "123"
+    # Garbage is ignored.
+    hub.handle("thing/product/DOCK1/osd", b"not json")
+    hub.handle("weird/topic", b"{}")
+
+
+def test_registered_dock_goes_offline(dock_mod, hub):
+    clock = [1000.0]
+    hub.now = lambda: clock[0]
+    hub.handle("sys/product/DOCK1/status", topo())
+    hub.store.register("DOCK1", "Roof")
+    snap = hub.snapshot()
+    assert snap["found"] == [] and snap["docks"][0]["name"] == "Roof" and snap["docks"][0]["slot"] == "dock1"
+    assert snap["docks"][0]["online"]
+    clock[0] += dock_mod.ONLINE_SECONDS + 1  # silent too long
+    assert not hub.snapshot()["docks"][0]["online"]
+    clock[0] += 1
+    hub.handle("sys/product/DOCK1/status", topo())
+    assert hub.snapshot()["docks"][0]["online"]
+    hub.handle("sys/product/DOCK1/status", {"tid": "x", "bid": "x", "method": "update_topo", "data": {}})  # dock says it is going
+    assert not hub.snapshot()["docks"][0]["online"]
+    with pytest.raises(ValueError):
+        hub.store.register("DOCK1", "Again")
+    assert hub.store.register("DOCK2", "")["slot"] == "dock2"
+    hub.store.unregister("DOCK1")
+    assert hub.store.register("DOCK3", "")["slot"] == "dock1"  # a freed slot is reused
+
+
+def test_register_simulated_dock_on_drone_page(d, client):
+    page = client.get("/drone-control").get_data(as_text=True)
+    assert 'id="dockPanel"' in page and "Set up a dock" in page
+    r = client.post("/api/docks/simulate", json={"lat": 45.5, "lon": -75.66}).get_json()
+    assert r["ok"], r
+    sn = r["sn"]
+    try:
+        found = wait_until(lambda: [x for x in client.get("/api/docks").get_json()["found"] if x["sn"] == sn and x["lat"]], 10)
+        assert found and found[0]["model"] == "DJI Dock 3" and found[0]["simulated"] and found[0]["lat"] == 45.5
+        assert d.dock_hub.local[sn].topo_acked  # the hub answered its topology
+        assert client.post("/api/docks/register", json={"sn": "NOPE123", "name": "x"}).status_code == 404
+        r = client.post("/api/docks/register", json={"sn": sn, "name": "Roof dock"}).get_json()
+        assert r["ok"] and r["dock"]["name"] == "Roof dock" and r["dock"]["slot"].startswith("dock")
+        assert client.post("/api/docks/register", json={"sn": sn, "name": "Again"}).status_code == 409
+        data = client.get("/api/docks").get_json()
+        mine = [x for x in data["docks"] if x["sn"] == sn][0]
+        assert mine["online"] and mine["drone_model"] == "Matrice 4TD" and mine["battery"] is not None
+        assert not [x for x in data["found"] if x["sn"] == sn]
+        assert client.post(f"/api/docks/{sn}", json={"name": "Gate dock"}).get_json()["ok"]
+        assert [x for x in client.get("/api/docks").get_json()["docks"] if x["sn"] == sn][0]["name"] == "Gate dock"
+        # Survives a restart: the simulated dock is remembered.
+        assert sn in json.load(open(d.dock_store.path))["simulated"]
+    finally:
+        assert client.delete(f"/api/docks/{sn}").get_json()["ok"]
+    assert sn not in d.dock_hub.local and sn not in d.dock_store.docks()
+    assert client.delete(f"/api/docks/{sn}").status_code == 404
+
+
+def test_cloud_keys_are_never_sent_back(d, client):
+    r = client.post("/api/docks/setup", json={"app_id": "  155000 ", "app_key": "THE-KEY", "app_license": "THE-LICENSE"}).get_json()
+    assert r["ok"] and r["cloud_ready"] and r["app_id"] == "155000"
+    body = client.get("/api/docks/setup").get_data(as_text=True)
+    assert "THE-KEY" not in body and "THE-LICENSE" not in body and "/pilot?k=" in body
+    old = d.dock_store.data["bind_token"]
+    client.post("/api/docks/setup", json={"new_link": True})
+    assert d.dock_store.data["bind_token"] != old
+    assert client.post("/api/docks/setup", json={}).status_code == 400
+
+
+def test_pilot_page_needs_the_secret_link(d, dock_mod):
+    port = _free_port()
+    d.dock_store.set_cloud("155000", "THE-KEY", "THE-LICENSE")
+    server = dock_mod.start_pilot_server(d.dock_store, d._dock_creds, lambda: "192.168.1.20", port=port, bind="127.0.0.1")
+    try:
+        for path in ("/pilot", "/pilot?k=wrong", "/", "/pilot/../etc"):
+            with pytest.raises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5)
+            assert e.value.code == 404
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/pilot?k={d.dock_store.data['bind_token']}", timeout=5).read().decode()
+        assert "tcp://192.168.1.20:1884" in html and "THE-KEY" in html and "platformLoadComponent" in html
+        assert d._dock_creds()["dock_password"] in html and d._dock_creds()["edge_password"] not in html
+    finally:
+        server.shutdown()
+
+
+def test_only_admins_set_up_docks(d):
+    import users
+    assert not users.allowed("viewer", "GET", "/api/docks/setup")
+    assert not users.allowed("operator", "GET", "/api/docks/setup")
+    assert users.allowed("viewer", "GET", "/api/docks")
+    for path in ("/api/docks/simulate", "/api/docks/register", "/api/docks/setup", "/api/docks/SIMDOCK1"):
+        assert not users.allowed("operator", "POST", path)
+        assert users.allowed("admin", "POST", path)
+    assert not users.allowed("operator", "DELETE", "/api/docks/SIMDOCK1")
+
+
+def test_not_licensed(d, client, monkeypatch):
+    monkeypatch.setattr(d, "drone_control_allowed", lambda: False)
+    assert client.post("/api/docks/simulate", json={}).status_code == 403
+    assert client.post("/api/docks/register", json={"sn": "DOCK1"}).status_code == 403
+    assert client.get("/api/docks").get_json()["allowed"] is False
+
+
+@pytest.mark.skipif(not shutil.which("mosquitto"), reason="needs the mosquitto broker installed")
+def test_real_broker_with_passwords(dock_mod, hub, tmp_path):
+    """The broker files work in a real Mosquitto: right password connects, wrong or none is refused; a dock's
+    topology arrives in the hub and the reply reaches the dock."""
+    import paho.mqtt.client as mqtt
+    creds = dock_mod.ensure_broker_files(str(tmp_path / "dock-mqtt"))
+    port = _free_port()
+    # The same steps as the dock-mqtt container: a private copy of the password file, owned by the broker's user.
+    import pathlib
+    import tempfile
+    private = pathlib.Path(tempfile.mkdtemp(prefix="dock-mqtt-"))  # outside pytest's root-only folders
+    shutil.copy(tmp_path / "dock-mqtt" / "passwd", private / "passwd")
+    os.chmod(private / "passwd", 0o600)
+    if os.name == "posix" and os.geteuid() == 0:
+        import pwd
+        try:
+            u = pwd.getpwnam("mosquitto")
+            os.chown(private, u.pw_uid, u.pw_gid)
+            os.chown(private / "passwd", u.pw_uid, u.pw_gid)
+        except KeyError:
+            pass
+    conf = tmp_path / "test.conf"
+    conf.write_text(open(tmp_path / "dock-mqtt" / "mosquitto.conf").read().replace("listener 1883", f"listener {port} 127.0.0.1")
+                    .replace("/mosquitto/passwd", str(private / "passwd")))
+    broker = subprocess.Popen(["mosquitto", "-c", str(conf)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        assert wait_until(lambda: _port_open(port), 10)
+        edge = dock_mod.MqttTransport(hub, "127.0.0.1", port, creds["edge_user"], creds["edge_password"])
+        edge.start()
+        assert wait_until(lambda: edge.connected, 10)
+
+        def client(user, pw):
+            got, state = [], {}
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+            if user:
+                c.username_pw_set(user, pw)
+            c.on_connect = lambda cl, u, f, rc, p=None: state.update(rc=rc)
+            c.on_message = lambda cl, u, m: got.append((m.topic, json.loads(m.payload)))
+            c.connect("127.0.0.1", port)
+            c.loop_start()
+            wait_until(lambda: "rc" in state, 10)
+            return c, got, state
+
+        bad, _, st = client("dock", "wrong")
+        assert st["rc"].is_failure
+        bad.loop_stop()
+        anon, _, st = client(None, None)
+        assert st["rc"].is_failure
+        anon.loop_stop()
+        dk, got, st = client(creds["dock_user"], creds["dock_password"])
+        assert not st["rc"].is_failure
+        dk.subscribe("sys/product/DOCKX/status_reply", qos=1)
+        time.sleep(0.3)
+        dk.publish("sys/product/DOCKX/status", json.dumps(topo("DOCKX")), qos=1)
+        assert wait_until(lambda: hub.snapshot()["found"], 10)
+        assert wait_until(lambda: got, 10)[0][1]["data"] == {"result": 0}
+        dk.loop_stop()
+        edge.stop()
+    finally:
+        broker.terminate()
+        broker.wait(5)
+        shutil.rmtree(private, ignore_errors=True)
+
+
+def _port_open(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.3):
+            return True
+    except OSError:
+        return False

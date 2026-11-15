@@ -291,6 +291,7 @@ class App(tk.Tk):
             if not os.path.isfile(COMPOSE_FILE):
                 raise RuntimeError('Runtime file missing: ' + COMPOSE_FILE + '. Reinstall the application.')
             self.seed_frigate_config()
+            self.seed_dock_broker()
             self.replace_legacy_containers()
             self.load_offline_images()
 
@@ -300,6 +301,7 @@ class App(tk.Tk):
                 raise RuntimeError('Could not start the AI services:\n' + r.stdout.strip()[-800:])
             self.emit('status','MQTT','Running' if docker_container_running('frigate-mqtt') else 'Error')
             self.emit('status','MediaMTX','Running' if docker_container_running('drone-mediamtx') else 'Error')
+            self.emit('log','Dock broker: ' + ('running' if docker_container_running('dock-mqtt') else 'not running'))
 
             self.emit('status','Frigate','Starting...'); self.emit('msg','Waiting for Frigate...')
             for _ in range(90):
@@ -338,6 +340,14 @@ class App(tk.Tk):
             with open(settings_file, 'w', encoding='utf-8') as f:
                 json.dump({'camera_name': 'camera'}, f, indent=2)
         self.emit('log', 'Created starter Frigate config. Use Camera / Drone Setup to add your camera.')
+
+    def seed_dock_broker(self):
+        """The DJI Dock broker's config and passwords (made once), before docker compose starts it."""
+        try:
+            import dock
+            dock.ensure_broker_files(os.path.join(DATA_HOME, 'dock-mqtt'))
+        except Exception as e:
+            self.emit('log', 'Dock broker setup skipped: ' + str(e))
 
     def load_offline_images(self):
         """Offline install: load the AI service images from the USB package if missing,

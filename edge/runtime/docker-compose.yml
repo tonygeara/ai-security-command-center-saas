@@ -15,6 +15,21 @@ services:
     ports:
       - "127.0.0.1:1883:1883"   # local only: no one on the LAN can switch cameras off
 
+  # DJI Docks (DJI Cloud API): the docks and DJI Pilot 2 connect here over the site network, with a password.
+  # Separate from the Frigate broker above, which stays local only. Config and passwords are written by the
+  # launcher (dock.ensure_broker_files) in AI_SECURITY_DATA/dock-mqtt before this starts.
+  dock-mqtt:
+    image: eclipse-mosquitto:2@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797  # 2.1.2
+    container_name: dock-mqtt
+    restart: unless-stopped
+    # The password file is copied to a private place first: on Windows the shared folder shows every file as
+    # readable by anyone, and Mosquitto refuses (or warns about) a password file like that.
+    command: ["sh", "-c", "cp /mosquitto/config/passwd /mosquitto/passwd && chown mosquitto:mosquitto /mosquitto/passwd && chmod 0600 /mosquitto/passwd && exec mosquitto -c /mosquitto/config/mosquitto.conf"]
+    ports:
+      - "1884:1883"             # LAN: DJI docks and Pilot 2 (password protected)
+    volumes:
+      - "${AI_SECURITY_DATA:?set by the launcher}/dock-mqtt:/mosquitto/config"
+
   mediamtx:
     image: bluenviron/mediamtx:1@sha256:1b029d11049be75630e9b73bb0d5f47b08a7db4eaee89a80bf8f53bc40e56414  # v1.20.1
     container_name: drone-mediamtx
