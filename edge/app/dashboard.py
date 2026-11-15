@@ -2393,6 +2393,7 @@ check_offline_license()
 def local_source_usage():
     """Cameras/drones configured on this PC (on-prem plan limits are counted locally)."""
     names = _frigate_camera_names() if "_frigate_camera_names" in globals() else []
+    names = [n for n in names if not _is_dock_name(n)]  # docks: their own licence count
     drones = sum(1 for n in names if str(n).lower().startswith(DRONE_CAMERA_NAME))
     return {"cameras": len(names) - drones, "drones": drones}
 
@@ -4084,6 +4085,12 @@ def _is_drone_name(name):
     return str(name).lower().startswith("drone")
 
 
+def _is_dock_name(name):
+    """A DJI Dock's video in Frigate (dock1, dock2, …): counted by the dock licence, not as a camera or a drone."""
+    n = str(name).lower()
+    return n.startswith("dock") and n[4:].isdigit()
+
+
 def _write_drone_frigate(name):
     """Add one more drone to the live Frigate config, using the first drone's settings.
     The DJI app publishes to rtmp://<PC>:1935/<name>; MediaMTX serves it at :8556/<name>."""
@@ -4138,7 +4145,7 @@ def _sources_over_limit(names=None):
     names = names if names is not None else _frigate_camera_names()
     with cloud_lock:
         limits = dict(cloud_state.get("limits") or {})
-    cams = [n for n in names if not _is_drone_name(n)]
+    cams = [n for n in names if not _is_drone_name(n) and not _is_dock_name(n)]
     drones = [n for n in names if _is_drone_name(n)]
     # Keep the main camera / first drone, then the rest in config order.
     cams.sort(key=lambda n: n != CAMERA_NAME)
@@ -5643,6 +5650,8 @@ def api_docks_register():
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 409
     audit_record("dock: registered", target=sn, detail={"name": d["name"], "slot": d["slot"]})
+    if not simulated:  # its video camera in Frigate (simulated docks have no picture)
+        _dock_camera_async(d["slot"], True)
     return jsonify({"ok": True, "dock": {**dock_hub.summary(sn), **d}})
 
 
@@ -5650,7 +5659,11 @@ def api_docks_register():
 def api_dock(sn):
     """Admins: rename (POST {name}) or remove (DELETE) a registered dock. A simulated dock is deleted too."""
     if request.method == "DELETE":
+        if (dock_hub.state.get(sn) or {}).get("live"):
+            dock_hub.stop_video(sn)
         removed = dock_store.unregister(sn)
+        if removed and not removed.get("simulated"):
+            _dock_camera_async(removed["slot"], False)
         sim = dock_hub.local.pop(sn, None)
         if sim:
             sim.stop()
@@ -5666,6 +5679,65 @@ def api_dock(sn):
     except KeyError:
         return jsonify({"ok": False, "error": "Unknown dock."}), 404
     return jsonify({"ok": True})
+
+
+def _dock_camera(slot, add):
+    """Add or remove a dock's video camera in Frigate (named after its slot), then restart Frigate (about 20 s).
+    Its picture then goes through the same AI as the drones: detection, tracking, events and incidents."""
+    import shutil
+    with open(LIVE_FRIGATE_CONFIG, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    present = slot in (cfg.get("cameras") or {})
+    if add and not present:
+        _write_drone_frigate(slot)
+    elif not add and present:
+        cfg["cameras"].pop(slot, None)
+        ((cfg.get("go2rtc") or {}).get("streams") or {}).pop(slot, None)
+        shutil.copyfile(LIVE_FRIGATE_CONFIG, LIVE_FRIGATE_CONFIG + ".before-remove-" + slot)
+        _save_frigate_config(cfg)
+    else:
+        return False
+    restarted, _ = _restart_frigate()
+    return restarted
+
+
+def _dock_camera_async(slot, add):
+    def run():
+        try:
+            _dock_camera(slot, add)
+        except Exception as e:  # noqa: BLE001
+            print(f"Dock camera {slot} {'add' if add else 'remove'} failed:", e)
+    threading.Thread(target=run, name=f"dock-camera-{slot}", daemon=True).start()
+
+
+@app.route("/api/docks/<sn>/video", methods=["POST"])
+def api_dock_video(sn):
+    """Operators: start or stop a dock's live video, or change lens. {"action": "start"|"stop"|"lens", "lens", "device"}.
+    The dock pushes RTMP to rtmp://PC:1935/<slot>; the Drone page plays it and Frigate runs the AI on it."""
+    if not dock_allowed():
+        return _dock_refused()
+    d = dock_store.docks().get(sn)
+    if not d:
+        return jsonify({"ok": False, "error": "Register this dock first."}), 404
+    if sn in _docks_over_limit():
+        return jsonify({"ok": False, "error": "This dock is over the licence's dock count."}), 403
+    if not dock_hub.online(sn):
+        return jsonify({"ok": False, "error": f"{d['name']} is offline."}), 409
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action") or "")
+    if action == "start":
+        device = "dock" if data.get("device") == "dock" else "drone"
+        ok, msg, _ = dock_hub.start_video(sn, f"rtmp://{_lan_ip()}:1935/{d['slot']}", device)
+    elif action == "stop":
+        ok, msg, _ = dock_hub.stop_video(sn)
+    elif action == "lens":
+        ok, msg, _ = dock_hub.change_lens(sn, str(data.get("lens") or ""))
+    else:
+        return jsonify({"ok": False, "error": "Unknown action."}), 400
+    if not ok:
+        return jsonify({"ok": False, "error": msg}), 409
+    audit_record(f"dock: video {action}", target=sn, detail={"name": d["name"], "lens": data.get("lens"), "device": data.get("device")})
+    return jsonify({"ok": True, "video": dock_hub.summary(sn)["video"], "camera": d["slot"]})
 
 
 DOCK_SIM_FAULTS = ("", "offline", "cover", "rain", "wind", "hot", "battery", "hms")
@@ -6386,7 +6458,7 @@ def briefing_text():
     text = summary_text(now - 86400, now, "the last 24 hours").replace("📋 Summary for", "☀️ Good morning! Briefing for", 1)
     try:
         stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
-        offline = [n for n in _frigate_camera_names() if not _is_drone_name(n) and float((stats.get(n) or {}).get("camera_fps") or 0) <= 0]
+        offline = [n for n in _frigate_camera_names() if not _is_drone_name(n) and not _is_dock_name(n) and float((stats.get(n) or {}).get("camera_fps") or 0) <= 0]
         text += "\n\n📹 Cameras: " + ("all online ✅" if not offline else "offline: " + ", ".join(offline) + " ⚠️")
     except Exception:
         text += "\n\n📹 Cameras: status unavailable"

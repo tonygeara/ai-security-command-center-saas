@@ -26,6 +26,7 @@ class SimulatedDock:
         self.battery = 64.0
         self.powered = True
         self.topo_acked = False
+        self.streaming = None       # video_id the PC asked it to stream
         self.fault = ""             # test alerts: "", offline, cover, rain, wind, hot, battery, hms
         self.replies = []           # last replies from the hub (tests look at them)
         self.stop_event = threading.Event()
@@ -44,6 +45,17 @@ class SimulatedDock:
 
     def go_offline(self):
         self.send(f"sys/product/{self.sn}/status", self._msg("update_topo", {}))
+
+    def capacity(self):
+        """What it can stream (DJI live_capacity): the drone's camera with wide/zoom/thermal, and the dock's own camera."""
+        self.send(f"thing/product/{self.sn}/state", self._msg(data={"live_capacity": {
+            "available_video_number": 2, "coexist_video_number_max": 1, "device_list": [
+                {"sn": self.drone_sn, "available_video_number": 1, "coexist_video_number_max": 1, "camera_list": [
+                    {"camera_index": "99-0-0", "available_video_number": 1, "coexist_video_number_max": 1,
+                     "video_list": [{"video_index": "normal-0", "video_type": "normal", "switchable_video_types": ["wide", "zoom", "ir"]}]}]},
+                {"sn": self.sn, "available_video_number": 1, "coexist_video_number_max": 1, "camera_list": [
+                    {"camera_index": "165-0-7", "available_video_number": 1, "coexist_video_number_max": 1,
+                     "video_list": [{"video_index": "normal-0", "video_type": "normal", "switchable_video_types": []}]}]}]}}))
 
     def osd(self):
         f = self.fault
@@ -78,6 +90,15 @@ class SimulatedDock:
 
     def on_message(self, topic, payload):
         self.replies = (self.replies + [(topic, payload)])[-20:]
+        if topic.endswith("/services"):  # a command: say it's done (there is no real picture to send)
+            method, data = payload.get("method"), payload.get("data") or {}
+            if method == "live_start_push":
+                self.streaming = data.get("video_id")
+            elif method == "live_stop_push":
+                self.streaming = None
+            self.send(topic + "_reply", {"tid": payload.get("tid"), "bid": payload.get("bid"), "method": method,
+                                         "timestamp": int(time.time() * 1000), "data": {"result": 0}})
+            return
         if topic.endswith("/status_reply") and (payload.get("data") or {}).get("result") == 0:
             self.topo_acked = True
 
@@ -86,6 +107,7 @@ class SimulatedDock:
             return
         if not self.topo_acked:
             self.topology()
+            self.capacity()
         self.osd()
         if self.fault == "hms":
             self.hms()

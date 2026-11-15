@@ -258,6 +258,13 @@ def test_real_broker_with_passwords(dock_mod, hub, tmp_path):
         dk.publish("sys/product/DOCKX/status", json.dumps(topo("DOCKX")), qos=1)
         assert wait_until(lambda: hub.snapshot()["found"], 10)
         assert wait_until(lambda: got, 10)[0][1]["data"] == {"result": 0}
+        # A command to the dock and its answer, both over the broker (live video uses this).
+        dk.on_message = lambda cl, u, m: dk.publish(m.topic + "_reply", json.dumps(
+            {"tid": json.loads(m.payload)["tid"], "data": {"result": 0}}), qos=1) if m.topic.endswith("/services") else got.append(m)
+        dk.subscribe("thing/product/DOCKX/services", qos=1)
+        time.sleep(0.3)
+        ok, msg, _ = hub.call("DOCKX", "live_stop_push", {"video_id": "x"}, timeout=5)
+        assert ok, msg
         dk.loop_stop()
         edge.stop()
     finally:
@@ -436,3 +443,96 @@ def test_dock_count_enforced(d, client, monkeypatch):
             for sn in ("REALDOCK1", "REALDOCK2"):
                 d.dock_hub.state.pop(sn, None)
         d.dock_health.check()
+
+
+# ---------- Phase 2: dock video ----------
+
+def test_dock_video_commands(d, client, monkeypatch):
+    sn = client.post("/api/docks/simulate", json={}).get_json()["sn"]
+    try:
+        assert wait_until(lambda: d.dock_hub.video_sources(sn), 10)
+        srcs = d.dock_hub.video_sources(sn)
+        assert srcs[0]["device"] == "drone" and srcs[0]["video_id"] == f"{sn}-UAV/99-0-0/normal-0"
+        assert srcs[0]["lenses"] == ["wide", "zoom", "ir"] and srcs[1]["device"] == "dock"
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "start"}).status_code == 404  # not registered yet
+        assert client.post("/api/docks/register", json={"sn": sn, "name": "Video dock"}).get_json()["ok"]
+        slot = d.dock_store.docks()[sn]["slot"]
+        r = client.post(f"/api/docks/{sn}/video", json={"action": "start"}).get_json()
+        assert r["ok"] and r["video"]["streaming"] and r["video"]["lens"] == "wide" and r["camera"] == slot
+        sim = d.dock_hub.local[sn]
+        assert sim.streaming == srcs[0]["video_id"]
+        push = [p for t, p in sim.replies if t.endswith("/services")][-1]
+        assert push["method"] == "live_start_push" and push["data"]["url"].endswith(f":1935/{slot}") and push["data"]["url_type"] == 1
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "lens", "lens": "ir"}).get_json()["video"]["lens"] == "ir"
+        assert [p for t, p in sim.replies if t.endswith("/services")][-1]["data"] == {"video_id": srcs[0]["video_id"], "video_type": "ir"}
+        r = client.post(f"/api/docks/{sn}/video", json={"action": "lens", "lens": "night"})
+        assert r.status_code == 409 and "no night lens" in r.get_json()["error"]
+        mine = [x for x in client.get("/api/docks").get_json()["docks"] if x["sn"] == sn][0]
+        assert mine["video"]["streaming"] and mine["video"]["lens"] == "ir" and mine["video"]["sources"] == ["drone", "dock"]
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "stop"}).get_json()["ok"] and sim.streaming is None
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "lens", "lens": "zoom"}).status_code == 409  # not streaming
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "start", "device": "dock"}).get_json()["video"]["device"] == "dock"
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "fly"}).status_code == 400
+        # Offline: the stream is forgotten and new requests are refused.
+        sim.set_power(False)
+        assert not d.dock_hub.summary(sn)["video"]["streaming"]
+        assert client.post(f"/api/docks/{sn}/video", json={"action": "start"}).status_code == 409
+        import users
+        assert users.allowed("operator", "POST", f"/api/docks/{sn}/video") and not users.allowed("viewer", "POST", f"/api/docks/{sn}/video")
+    finally:
+        client.delete(f"/api/docks/{sn}")
+
+
+def test_dock_that_does_not_answer(dock_mod, hub):
+    hub.handle("sys/product/DOCK1/status", topo())
+    hub.publish_mqtt = lambda topic, payload: None  # a real dock that never replies
+    ok, msg, _ = hub.call("DOCK1", "live_stop_push", {"video_id": "x"}, timeout=0.2)
+    assert not ok and "didn't answer" in msg and hub.pending == {}
+    ok, msg, _ = hub.start_video("DOCK1", "rtmp://pc:1935/dock1")
+    assert not ok and "isn't reporting a camera" in msg  # no live_capacity yet
+
+    def refuse(topic, payload):
+        hub.handle(topic + "_reply", {"tid": payload["tid"], "data": {"result": 513012}})
+    hub.publish_mqtt = refuse
+    hub.handle("thing/product/DOCK1/state", {"data": {"live_capacity": {"device_list": [{"sn": "UAV1", "camera_list": [
+        {"camera_index": "99-0-0", "video_list": [{"video_index": "normal-0", "switchable_video_types": ["wide"]}]}]}]}}})
+    ok, msg, _ = hub.start_video("DOCK1", "rtmp://pc:1935/dock1")
+    assert not ok and "isn't ready yet" in msg and not hub.summary("DOCK1")["video"]["streaming"]
+
+
+def test_dock_cameras_in_frigate_and_counts(d, tmp_path, monkeypatch):
+    import yaml
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump({"cameras": {"front": {"enabled": True}, "drone": {"enabled": True, "detect": {"fps": 5}}}}))
+    monkeypatch.setattr(d, "LIVE_FRIGATE_CONFIG", str(cfg))
+    restarts = []
+    monkeypatch.setattr(d, "_restart_frigate", lambda: restarts.append(1) or (True, ""))
+    assert d._dock_camera("dock1", True) is True
+    c = yaml.safe_load(cfg.read_text())
+    assert c["cameras"]["dock1"]["ffmpeg"]["inputs"][0]["path"] == "rtsp://127.0.0.1:8554/dock1"
+    assert c["go2rtc"]["streams"]["dock1"] == ["rtsp://host.docker.internal:8556/dock1"]
+    assert d._dock_camera("dock1", True) is False and len(restarts) == 1  # already there: no restart
+    # Dock cameras don't use a camera or drone place on the licence.
+    monkeypatch.setattr(d, "_frigate_camera_names", lambda: ["front", "drone", "dock1", "dock2"])
+    assert d.local_source_usage() == {"cameras": 1, "drones": 1}
+    monkeypatch.setitem(d.cloud_state, "limits", {"cameras": 1, "drones": 1})
+    assert d._sources_over_limit() == set()
+    assert d._is_dock_name("dock1") and d._is_dock_name("DOCK12") and not d._is_dock_name("dockyard") and not d._is_dock_name("drone")
+    assert d._dock_camera("dock1", False) is True and "dock1" not in yaml.safe_load(cfg.read_text())["cameras"]
+    assert d._dock_camera("dock1", False) is False
+
+
+def test_registering_real_dock_adds_its_camera(d, client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(d, "_dock_camera_async", lambda slot, add: calls.append((slot, add)))
+    monkeypatch.setattr(d, "dock_limit", lambda: None)
+    d.dock_hub.handle("sys/product/REALDOCK7/status", topo("REALDOCK7", drone="REALDOCK7U"))
+    try:
+        slot = client.post("/api/docks/register", json={"sn": "REALDOCK7", "name": "Real"}).get_json()["dock"]["slot"]
+        assert calls == [(slot, True)]
+        assert client.delete("/api/docks/REALDOCK7").get_json()["ok"]
+        assert calls == [(slot, True), (slot, False)]
+    finally:
+        d.dock_store.unregister("REALDOCK7")
+        with d.dock_hub.lock:
+            d.dock_hub.state.pop("REALDOCK7", None)

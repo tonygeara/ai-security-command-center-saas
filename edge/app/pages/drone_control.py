@@ -56,6 +56,11 @@ BODY = r"""
 .dk-alert.caution{background:rgba(125,90,12,.18);color:#ffcf7a;border:1px solid #7a5a12}
 .dk-health{margin-top:12px;max-height:160px;overflow:auto;font-size:12px}
 .dk-health div{padding:3px 0;border-bottom:1px solid #0f2a3b;color:#9edfff}.dk-health div.on{color:#ffb3bb}.dk-health small{color:#6d8b9d;margin-right:8px}
+.dk-videos{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:10px;margin-top:10px}
+.dk-video{border:1px solid #155879;border-radius:5px;background:#000;overflow:hidden}
+.dk-video .dk-vhead{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#05131d;color:#9edfff;font:bold 12px Arial}
+.dk-video .dk-vbody{aspect-ratio:16/9;position:relative}
+.dk-video .dk-sim{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffcf7a;font:bold 12px Arial;letter-spacing:1px;text-align:center;padding:10px}
 .dk-card.flash{box-shadow:0 0 0 2px #ffb23c}
 .dk-mark{width:22px;height:22px;border:2px solid #ffb23c;border-radius:4px;background:rgba(3,16,26,.9);color:#ffcf7a;font:bold 12px/18px Arial;text-align:center}
 .dk-mark.off{border-color:#53636d;color:#8aa0ad}
@@ -226,6 +231,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div class="panel-body"><div class="muted" style="margin-bottom:10px">A dock launches its drone with no pilot on site (DJI Cloud API). It connects to this PC over the site network; once it shows under <b>Found</b>, register it. Flying from a dock comes in the next update.</div>
 <div class="dk-list" id="dockList"></div>
 <div id="dockMsg" class="hud-msg"></div>
+<div class="dk-videos" id="dockVideos"></div>
 <div class="dk-health" id="dockHealth"></div>
 <details class="dk-setup" id="dockSetup" style="display:none"><summary>Set up a dock (admins)</summary>
 <div class="muted" style="margin-top:10px"><b>1. DJI Cloud API keys</b> (once): developer.dji.com → Apps → Create App, App Type <b>Cloud API</b>. Paste the three values here.</div>
@@ -534,12 +540,19 @@ function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE')
   const sev=al.some(a=>a.level==='warning')?' dk-bad':al.length?' dk-careful':'';
   const alerts=al.map(a=>`<div class="dk-alert ${esc(a.level)}">${a.level==='warning'?'⚠':'●'} ${esc(a.text)}</div>`).join('');
   const faults=[['','Test a problem…'],['offline','Goes offline (alert after 1 min)'],['cover','Cover fault'],['rain','Heavy rain'],['wind','Strong wind'],['hot','Too hot'],['battery','Drone battery low'],['hms','DJI warning'],['','All clear']];
+  const v=x.video||{},LN={wide:'Wide',zoom:'Zoom',ir:'Thermal',normal:'Main'};
+  const vid=found||x.over_limit||!x.online?'':v.streaming
+    ?`<button class="hud-btn danger" data-sn="${esc(x.sn)}" onclick="dockVideo(this.dataset.sn,'stop')">■ Stop video</button>`
+      +((v.lenses||[]).length>1?`<select data-sn="${esc(x.sn)}" onchange="this.blur();dockVideo(this.dataset.sn,'lens',this.value)">${v.lenses.map(l=>`<option value="${l}" ${l===v.lens?'selected':''}>${LN[l]||l}</option>`).join('')}</select>`:'')
+    :`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockVideo(this.dataset.sn,'start')" ${(v.sources||[]).includes('drone')?'':'disabled title="The drone isn\'t reporting a camera yet"'}>▶ Drone video</button>`
+      +((v.sources||[]).includes('dock')?`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockVideo(this.dataset.sn,'start',null,'dock')">▶ Dock camera</button>`:'');
+  if(v.streaming)tags.unshift('● LIVE · '+(v.device==='dock'?'dock camera':(LN[v.lens]||v.lens||'')));
   const test=DK_ADMIN&&!found&&x.simulated?`<select data-sn="${esc(x.sn)}" onchange="dockFault(this)" style="max-width:150px">${faults.map(([v,t],i)=>`<option value="${v}" ${i===0?'selected disabled':''}>${t}</option>`).join('')}</select>`:'';
   const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')" ${dkFull&&!x.simulated?'disabled title="The licence\'s dock count is used up"':''}>Register</button>`
     :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
   return `<div class="dk-card${found?' found':''}${sev}" id="dkCard_${esc(x.sn)}"${x.over_limit?' style="opacity:.55" title="Over the licence\'s dock count: not watched. Remove a dock or ask your provider for more."':''}><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
     <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
-    ${alerts}<div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div><div class="actions" style="gap:6px">${btns}${test}</div></div>`}
+    ${alerts}<div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div>${vid?`<div class="actions" style="gap:6px;margin-bottom:6px">${vid}</div>`:''}<div class="actions" style="gap:6px">${btns}${test}</div></div>`}
 async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
   dkFull=d.limit!=null&&d.used>=d.limit;
   $('dockState').textContent=(!d.allowed?'NOT LICENSED':d.broker.connected?'BROKER READY':d.broker.running?'BROKER STARTING':'BROKER OFF')+(d.allowed&&d.limit!=null?` · ${d.used} OF ${d.limit} DOCK${d.limit===1?'':'S'}`:'');
@@ -549,7 +562,22 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   const hl=d.health_log||[];$('dockHealth').innerHTML=hl.length?'<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">HEALTH</b>'+hl.map(a=>`<div class="${a.active?'on':''}"><small>${new Date(a.t*1000).toLocaleString()}</small>${a.active?(a.level==='warning'?'⚠ ':'● '):'✓ '}${esc(a.text)}</div>`).join(''):'';
   if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
   if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed;
-  dockData=d.docks;drawDockFleet();drawDockMap()}catch(e){}}
+  dockData=d.docks;drawDockFleet();drawDockMap();drawDockVideos()}catch(e){}}
+// One player per streaming dock, kept across polls (the cards above are redrawn every 3 s).
+function drawDockVideos(){const box=$('dockVideos');if(!box)return;
+  const live=dockData.filter(x=>(x.video||{}).streaming&&!x.over_limit);const want=new Set(live.map(x=>x.sn));
+  [...box.children].forEach(el=>{if(!want.has(el.dataset.sn)){const s=el.querySelector('.live-slot');if(s&&window.detachLiveCamera)window.detachLiveCamera(s);el.remove()}});
+  live.forEach(x=>{let el=box.querySelector(`[data-sn="${CSS.escape(x.sn)}"]`);
+    if(!el){el=document.createElement('div');el.className='dk-video';el.dataset.sn=x.sn;
+      el.innerHTML=`<div class="dk-vhead"><i class="dot good"></i><span></span></div><div class="dk-vbody">`
+        +(x.simulated?'<div class="dk-sim">SIMULATED DOCK · NO PICTURE<br>A real dock streams here, and Frigate runs the AI on it.</div>'
+          :`<div class="live-slot" data-live-camera="${esc(x.slot)}"></div>`)+'</div>';
+      box.appendChild(el);const s=el.querySelector('.live-slot');if(s&&window.attachLiveCamera)window.attachLiveCamera(s)}
+    const v=x.video,LN={wide:'wide',zoom:'zoom',ir:'thermal',normal:'main'};
+    el.querySelector('.dk-vhead span').textContent=`${x.name} · ${v.device==='dock'?'dock camera':(x.drone_model||'drone')+' · '+(LN[v.lens]||v.lens||'')}`})}
+async function dockVideo(sn,action,lens,device){dkMsg(action==='start'?'Asking the dock to start the video…':action==='stop'?'Stopping the video…':'Changing lens…');
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/video',{action,lens,device});
+  dkMsg(d.ok?(action==='start'?'Video started. The picture appears below in a few seconds.':action==='stop'?'Video stopped.':'Lens changed.'):d.error,d.ok);loadDocks()}
 // Registered docks in the fleet bar and on the map. Docks don't fly from here yet: a click shows the dock.
 let dockData=[],dockMarks={};
 function dockInfo(x){if(x.over_limit)return 'over licence';if(!x.online)return 'offline';

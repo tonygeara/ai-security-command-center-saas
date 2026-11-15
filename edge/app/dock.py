@@ -14,6 +14,8 @@ MQTT topics used (DJI Cloud API; check names against DJI's current docs when add
     thing/product/{sn}/state              dock or drone -> PC  changes (firmware, etc.)
     thing/product/{gateway}/events        dock -> PC  replied to on .../events_reply when need_reply = 1
     thing/product/{gateway}/requests      dock -> PC  e.g. "config": answered on .../requests_reply
+    thing/product/{gateway}/services      PC -> dock  commands (live_start_push, live_stop_push, live_lens_change)
+    thing/product/{gateway}/services_reply  dock -> PC  result 0 = done
 
 A dock that connects is listed as "found"; an admin registers it (name, slot dock1, dock2, …) before it is part
 of the system. A simulated dock (dock_sim.py) goes through the same hub without a broker, for tests and demos.
@@ -55,6 +57,12 @@ COLD_ALERT, COLD_BACK = -20.0, -17.0
 LOW_BATTERY = 20                            # % of the drone in the dock, not charging
 HMS_CLEAR_SECONDS = 60          # a DJI health message not repeated this long has cleared
 HMS_LEVELS = {0: "notice", 1: "caution", 2: "warning"}
+# Live video (Phase 2): the dock pushes RTMP to this PC's MediaMTX at rtmp://PC:1935/<slot>, the same path as Drone Link.
+LENSES = ("wide", "zoom", "ir", "normal")
+LENS_NAMES = {"wide": "wide", "zoom": "zoom", "ir": "thermal", "normal": "main"}
+# DJI live-stream result codes we expect (from DJI's error list; confirm with real hardware). Others show their number.
+LIVE_ERRORS = {513003: "The video is already streaming.", 513005: "The video is not streaming.",
+               513012: "The drone's camera isn't ready yet. Try again in a few seconds."}
 RAIN = {0: "none", 1: "light", 2: "moderate", 3: "heavy"}
 
 
@@ -215,6 +223,7 @@ class DockHub:
         self.publish_mqtt = None
         self.on_change = None  # called with (event, gateway sn): "online", "offline", "found"
         self.started_at = now()
+        self.pending = {}     # tid -> {"event", "reply"} for services waiting for the dock's answer
 
     # --- outgoing ---
     def publish(self, topic, payload):
@@ -247,7 +256,18 @@ class DockHub:
         elif kind == "thing" and leaf == "osd":
             self._osd(sn, msg.get("data") or {})
         elif kind == "thing" and leaf == "state":
-            self._touch(self.drone_of.get(sn, sn))
+            gw = self.drone_of.get(sn, sn)
+            self._touch(gw)
+            cap = (msg.get("data") or {}).get("live_capacity")
+            if isinstance(cap, dict):
+                with self.lock:
+                    if gw in self.state:
+                        self.state[gw]["live_capacity"] = cap
+        elif kind == "thing" and leaf == "services_reply":
+            waiting = self.pending.get(str(msg.get("tid") or ""))
+            if waiting is not None:
+                waiting["reply"] = msg
+                waiting["event"].set()
         elif kind == "thing" and leaf == "events":
             self._touch(sn)
             if msg.get("method") == "hms":
@@ -277,8 +297,9 @@ class DockHub:
                 self.drone_of[s["drone_sn"]] = gw
             elif data:
                 s["drone_sn"], s["drone_model"] = "", ""
-            if not data:  # an empty topology: the device went offline
+            if not data:  # an empty topology: the device went offline (and its video with it)
                 s["offline_at"] = self.now()
+                s.pop("live", None)
             s["last_seen"] = self.now()
         self._reply(topic, msg, {"result": 0})
         if self.on_change:
@@ -315,6 +336,76 @@ class DockHub:
                 code = str(it["code"])[:20]
                 hms[code] = {"code": code, "level": it.get("level"), "device_type": str(it.get("device_type") or ""),
                              "in_the_sky": bool(it.get("in_the_sky")), "seen": self.now()}
+
+    # --- commands (DJI Cloud API services) ---
+    def call(self, gw, method, data, timeout=10.0):
+        """Send one service to a dock and wait for its answer. Returns (ok, message, output)."""
+        tid = str(uuid.uuid4())
+        waiting = self.pending[tid] = {"event": threading.Event(), "reply": None}
+        try:
+            self.publish(f"thing/product/{gw}/services", {"tid": tid, "bid": str(uuid.uuid4()), "timestamp": int(self.now() * 1000),
+                                                         "method": method, "data": data})
+            if not waiting["event"].wait(timeout):
+                return False, "The dock didn't answer. Is it online?", None
+        finally:
+            self.pending.pop(tid, None)
+        out = (waiting["reply"] or {}).get("data") or {}
+        result = out.get("result", 0)
+        if result == 0:
+            return True, "", out
+        return False, LIVE_ERRORS.get(result, f"The dock refused ({method}, DJI code {result})."), out
+
+    def video_sources(self, gw):
+        """What the dock can stream (from its live_capacity): [{"video_id", "device", "lenses"}], the drone first."""
+        s = self.state.get(gw) or {}
+        drone = s.get("drone_sn") or ""
+        out = []
+        for dev in ((s.get("live_capacity") or {}).get("device_list") or []):
+            for cam in dev.get("camera_list") or []:
+                for v in cam.get("video_list") or []:
+                    if dev.get("sn") and cam.get("camera_index") and v.get("video_index"):
+                        out.append({"video_id": f"{dev['sn']}/{cam['camera_index']}/{v['video_index']}",
+                                    "device": "drone" if dev["sn"] == drone else "dock",
+                                    "lenses": [t for t in (v.get("switchable_video_types") or []) if t in LENSES]})
+        return sorted(out, key=lambda x: x["device"] != "drone")
+
+    def start_video(self, gw, rtmp_url, device="drone", quality=0):
+        src = next((v for v in self.video_sources(gw) if v["device"] == device), None)
+        if src is None:
+            return False, ("The drone isn't reporting a camera. Is it powered on in the dock?" if device == "drone"
+                           else "This dock has no camera to stream."), None
+        ok, msg, _ = self.call(gw, "live_start_push", {"url_type": 1, "url": rtmp_url, "video_id": src["video_id"],
+                                                        "video_quality": int(quality)})
+        if ok or "already" in msg:
+            with self.lock:
+                self.state[gw]["live"] = {"video_id": src["video_id"], "device": device, "url": rtmp_url,
+                                          "lens": "wide" if "wide" in src["lenses"] else (src["lenses"] or ["normal"])[0],
+                                          "lenses": src["lenses"], "since": self.now()}
+            return True, "", src
+        return False, msg, None
+
+    def stop_video(self, gw):
+        live = (self.state.get(gw) or {}).get("live")
+        if not live:
+            return True, "", None
+        ok, msg, _ = self.call(gw, "live_stop_push", {"video_id": live["video_id"]})
+        if ok or "not streaming" in msg:
+            with self.lock:
+                self.state[gw].pop("live", None)
+            return True, "", None
+        return False, msg, None
+
+    def change_lens(self, gw, lens):
+        live = (self.state.get(gw) or {}).get("live")
+        if not live:
+            return False, "Start the video first.", None
+        if lens not in (live.get("lenses") or []):
+            return False, f"This camera has no {LENS_NAMES.get(lens, lens)} lens.", None
+        ok, msg, out = self.call(gw, "live_lens_change", {"video_id": live["video_id"], "video_type": lens})
+        if ok:
+            with self.lock:
+                self.state[gw]["live"]["lens"] = lens
+        return ok, msg, out
 
     def hms_active(self, gw):
         s = self.state.get(gw) or {}
@@ -356,7 +447,11 @@ class DockHub:
                 "lat": o.get("latitude") or None, "lon": o.get("longitude") or None,
                 "drone_lat": d.get("latitude") if drone_on else None, "drone_lon": d.get("longitude") if drone_on else None,
                 "drone_height": d.get("height") if drone_on else None,
-                "simulated": gw in self.local}
+                "simulated": gw in self.local,
+                "video": {"streaming": bool(s.get("live")), "lens": (s.get("live") or {}).get("lens"),
+                          "device": (s.get("live") or {}).get("device"),
+                          "lenses": (s.get("live") or {}).get("lenses") or next((v["lenses"] for v in self.video_sources(gw)), []),
+                          "sources": [v["device"] for v in self.video_sources(gw)]}}
 
     def snapshot(self):
         """Registered docks (with their live state) and found, not yet registered ones."""
@@ -484,7 +579,7 @@ def load_hms_text(path):
 class MqttTransport:
     """This PC's connection to the dock broker; reconnects by itself."""
     TOPICS = ("sys/product/+/status", "thing/product/+/osd", "thing/product/+/state",
-              "thing/product/+/events", "thing/product/+/requests")
+              "thing/product/+/events", "thing/product/+/requests", "thing/product/+/services_reply")
 
     def __init__(self, hub, host, port, username, password):
         import paho.mqtt.client as mqtt

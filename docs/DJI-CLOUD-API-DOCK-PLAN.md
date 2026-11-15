@@ -87,6 +87,15 @@ Phone ── RC-N1 ── Mini 3 Pro ──── Drone Link :8765 (unchanged)
 - `dock_sim.py`: a fake dock publishing on MQTT, for tests (`edge/tests`) and for the virtual drone demo.
 
 ### Phase 2: live video into the AI
+Status: **built** (15 Nov, not merged yet). The dock reports what it can stream (`live_capacity` on its state topic);
+the Drone page's dock card has **▶ Drone video** / **▶ Dock camera**, a lens menu (wide / zoom / thermal) and Stop.
+The PC sends `live_start_push` (RTMP to `rtmp://PC:1935/<slot>`), `live_lens_change` and `live_stop_push` on
+`thing/product/{gateway}/services` and waits for `services_reply`. Registering a real dock adds a Frigate camera named
+after its slot (`dock1`…; removed with the dock), so its picture gets detection, tracking, events and incidents; dock
+cameras don't use a camera or drone place on the licence and aren't in the morning "cameras offline" report.
+Operators may start/stop video; simulated docks answer the commands but have no picture. To check with hardware: DJI's
+exact result codes and camera indexes, and the stream reaching MediaMTX and Frigate.
+
 - `live_start_push` / `live_stop_push` with RTMP to `rtmp://PC:1935/<slot>`; lens switch (wide / zoom /
   **thermal**) and quality from the Drone page.
 - Frigate camera per dock slot (same as Drone Link slots), so detection, tracking, evidence and incidents
