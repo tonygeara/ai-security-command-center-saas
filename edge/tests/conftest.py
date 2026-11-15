@@ -57,6 +57,7 @@ def d(tmp_path_factory):
     dashboard.onprem_mode = lambda: True
     dashboard.web_access.REQUIRE_FIRST_ADMIN = False  # most tests use the dashboard without signing in; test_users checks the gate
     dashboard.drone_control_allowed = lambda: True
+    dashboard.dock_allowed = lambda: True  # test_docks checks the licence switch itself (_dock_licensed)
     dashboard._sources_over_limit = lambda names=None: set()
     dashboard.telegram_ready = lambda cfg=None: True
     dashboard.sent = []

@@ -46,8 +46,16 @@ Google Docs connector isn't available in the session, say so and list the change
 - Client install guide also in the owner's Drive folder "camera system":
   https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
-  (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator, DJI Cloud API / Dock
-  (multi-drone stays one controller + phone per drone with Drone Link).
+  (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
+- Decided 15 Nov: add **DJI Cloud API for Docks** (plan and progress: `docs/DJI-CLOUD-API-DOCK-PLAN.md`),
+  with the MQTT broker on the edge PC; Drone Link (phone + RC-N1) stays as it is next to it. Phase 1 started on
+  branch `claude/peaceful-euler-el4qcf`, now complete (registration, fleet bar and map, health alerts, `drone_dock`
+  licence switch and dock count; not merged yet). Supabase part already live (set_feature_override accepts
+  drone_dock, client_licenses.docks, issue-onprem-license/edge-agent-control redeployed). Phase 2 (dock live
+  video into the AI), Phase 3a (fly a saved route from a dock) and 3c (alarm launches, ask-first) also built
+  there, and 3b (scheduled patrols / Smart patrol from a dock), Phase 4 (live control) and 5 (photos/videos on the
+  PC). Version bumped to **V11.10.0** with releases/V11.10.md; pull request open, not merged (merging publishes the
+  installers). Next: the supervised first flight, `docs/DOCK-FIRST-FLIGHT.md`. Nothing flies on a real dock before a supervised first flight.
 - Open items are the improvements list in the Capabilities doc (next: confirm client creation live,
   test with real equipment, leaked-password protection in Supabase, alerts when something breaks,
   automatic backups).

@@ -255,6 +255,8 @@ def test_survey_flight_captures_positioned_images(d, client, fleet, monkeypatch)
     assert _status(client, sid)["status"] == "flying"
     assert client.delete(f"/api/maps/{sid}").status_code == 409  # not while the drone flies it
     assert wait_until(lambda: d._survey_run(sid) is None, 120)
+    # The run ends a moment before its status is written: wait for the status rather than race it.
+    assert wait_until(lambda: _status(client, sid)["status"] in ("captured", "planned"), 10)
     m = _status(client, sid)
     assert m["frames"] >= 3 and m["status"] in ("captured", "planned") and len(m["flights"]) == 1
     with open(os.path.join(d.MAPS_DIR, sid, "geo.txt"), encoding="utf-8") as f:

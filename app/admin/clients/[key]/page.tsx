@@ -9,7 +9,7 @@ import RemoveButton from "../../RemoveButton";
 import UserManager from "../../../components/UserManager";
 import {BlockClient, PcName, PcSwitch, RenameClient, SourceSwitch} from "../../DeviceControls";
 
-const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"],
+const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"], ["drone_dock", "DJI Docks"],
   ["handoff", "Camera-to-drone handoff"], ["smart_patrol", "Smart patrol"], ["verified_alarms", "Drone-verified alarms"],
   ["incident_replay", "4D incident replay"], ["phone_access", "Phone access"]];
 // Newer features: until set for a client, they are included (as before these switches existed).
@@ -56,7 +56,7 @@ export default async function ClientPage({params}: {params: Promise<{key: string
           const follows = k === "drone_control" && !ov && !def;
           const included = PREMIUM.has(k) && !ov && !def;
           const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : included);
-          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial}/></p>; })}</article>
+          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}{k === "drone_dock" && !ov && !def && <span className="muted"> · off until switched on</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial} limit={ov?.limit_value ?? def?.limit_value ?? null}/></p>; })}</article>
       </section>
       <h2>PCs (Edge Agents)</h2>
       <div className="card tableWrap"><table className="adminTable"><thead><tr><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>
@@ -102,7 +102,7 @@ This cannot be undone.`}/>}</div></div>
         {c.contact || c.phone || c.email ? <><p><b>{c.contact || "—"}</b></p><p className="muted">{c.phone}<br/>{c.email}</p><Contact c={c}/></> : <p className="muted">No contact details yet.</p>}
         {l?.address && <p className="muted">📍 {l.address}</p>}</article>
       <article className="card"><h3>Licence</h3>
-        <p><b>{c.cameras ?? "plan"}</b> camera{c.cameras === 1 ? "" : "s"} · <b>{c.drones ?? "plan"}</b> drone{c.drones === 1 ? "" : "s"}</p>
+        <p><b>{c.cameras ?? "plan"}</b> camera{c.cameras === 1 ? "" : "s"} · <b>{c.drones ?? "plan"}</b> drone{c.drones === 1 ? "" : "s"}{l?.docks ? <> · <b>{l.docks}</b> DJI dock{l.docks === 1 ? "" : "s"}</> : null}</p>
         <p className={left !== null && left <= 30 ? "locked" : ""}>{c.expires ? `Expires ${c.expires}${left !== null ? (left <= 0 ? " (expired)" : ` · ${left} days left`) : ""}` : "No end date"}</p>
         {c.type === "onprem" && l && <><p className="muted">Machine ID {l.machine_id}<br/>Licence ID {String(l.license_id || "").slice(0, 8).toUpperCase()} · issued {l.issued_on}</p>
           <p className="muted">{(l.features || []).map((f: string) => FEATURE_LABEL[f] ?? f).join(" · ")}</p></>}

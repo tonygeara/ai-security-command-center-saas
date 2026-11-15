@@ -34,7 +34,8 @@ def test_low_battery_hands_over_to_the_backup(d, client, fleet):
     r = d.run_of(v2)
     assert r["name"] == "A" and r["backup"] == v1  # the tired drone becomes the backup
     assert wait_until(lambda: d.virtual_drones[v1].mode in ("GO_HOME", "AUTO_LANDING"), 10)
-    assert any("is taking off to continue patrol" in t for t in d.sent)
+    # The patrol switches drone just before the Telegram message goes out: wait for it rather than race it.
+    assert wait_until(lambda: any("is taking off to continue patrol" in t for t in d.sent), 10)
 
 
 def test_ignore_battery_keeps_patrolling(d, client, fleet):

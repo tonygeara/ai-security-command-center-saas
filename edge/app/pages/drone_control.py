@@ -49,6 +49,42 @@ BODY = r"""
 .fs-cell b{color:#e9f8ff}.fs-cell.bad{color:#ff9ea8;background:rgba(125,12,28,.16)}.fs-cell.warn{color:#ffcf7a;background:rgba(125,90,12,.12)}
 .fs-cell.ok{color:#7dffc1}.fs-link{margin-left:auto;border-right:0;color:#5bd9ff;text-decoration:none}.fs-link:hover{color:#fff}
 #m3d{display:none;width:100%;height:760px;border:1px solid #155879;border-radius:5px;background:#020a10}
+.dc-fleet button.dk-chip{border-color:#7a5a12;color:#ffcf7a}.dc-fleet button.dk-chip small{color:#9a8a6a;font-weight:normal}
+.dk-card.dk-bad{border-color:#a3303f;box-shadow:0 0 0 1px #a3303f inset}.dk-card.dk-careful{border-color:#7a5a12}
+.dk-alert{margin:0 0 6px;padding:5px 8px;border-radius:3px;font-size:12px;line-height:1.35}
+.dk-alert.warning{background:rgba(125,12,28,.25);color:#ffb3bb;border:1px solid #7a2935}
+.dk-alert.caution{background:rgba(125,90,12,.18);color:#ffcf7a;border:1px solid #7a5a12}
+.dk-health{margin-top:12px;max-height:160px;overflow:auto;font-size:12px}
+.dk-health div{padding:3px 0;border-bottom:1px solid #0f2a3b;color:#9edfff}.dk-health div.on{color:#ffb3bb}.dk-health small{color:#6d8b9d;margin-right:8px}
+.dk-videos{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:10px;margin-top:10px}
+.dk-video{border:1px solid #155879;border-radius:5px;background:#000;overflow:hidden}
+.dk-video .dk-vhead{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#05131d;color:#9edfff;font:bold 12px Arial}
+.dk-video .dk-vbody{aspect-ratio:16/9;position:relative}
+.dk-video .dk-sim{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffcf7a;font:bold 12px Arial;letter-spacing:1px;text-align:center;padding:10px}
+.dk-launch{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px;padding:10px 12px;border:1px solid #a3303f;border-radius:5px;background:rgba(125,12,28,.22);color:#ffd5da}
+.dk-launch b{color:#fff}
+.dk-media{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin-top:6px}
+.dk-media a{display:block;border:1px solid #153c56;border-radius:4px;background:#05131d;color:#9edfff;text-decoration:none;font-size:11px;overflow:hidden}
+.dk-media img{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:#000}
+.dk-media .dk-mvid{display:flex;align-items:center;justify-content:center;aspect-ratio:4/3;background:#020a10;font-size:28px}
+.dk-media span{display:block;padding:4px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dk-card.flash{box-shadow:0 0 0 2px #ffb23c}
+.dk-mark{width:22px;height:22px;border:2px solid #ffb23c;border-radius:4px;background:rgba(3,16,26,.9);color:#ffcf7a;font:bold 12px/18px Arial;text-align:center}
+.dk-mark.off{border-color:#53636d;color:#8aa0ad}
+.dk-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
+.dk-card{border:1px solid #155879;border-radius:5px;background:#05131d;padding:10px 12px}
+.dk-card.found{border-style:dashed;border-color:#7a5a12}
+.dk-card h4{margin:0 0 4px;font:bold 13px Arial,sans-serif;color:#e9f8ff;display:flex;align-items:center;gap:7px}
+.dk-card .dk-sub{color:#6d8b9d;font-size:11px;margin-bottom:8px;word-break:break-all}
+.dk-tags{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px}
+.dk-tags span{border:1px solid #153c56;border-radius:3px;padding:2px 6px;font-size:11px;color:#9edfff}
+.dk-setup{margin-top:14px;border-top:1px solid #123447;padding-top:12px}
+.dk-setup summary{cursor:pointer;color:#5bd9ff;font:bold 12px Arial;letter-spacing:.5px}
+.dk-form{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin:10px 0}
+.dk-form input{width:100%;box-sizing:border-box}
+.dk-pilot{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;margin-top:10px}
+.dk-pilot .qr{background:#fff;border-radius:4px;padding:4px}
+.dk-pilot code{word-break:break-all}
 @media(max-width:1000px){.dc-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -198,6 +234,30 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <button class="hud-btn" onclick="cmd('stream_on')">Restart video</button></div>
 <div id="events" class="muted" style="margin-top:12px;max-height:150px;overflow:auto"></div></div></section>
 </div></div>
+<section class="panel" id="dockPanel" style="margin-top:16px"><div class="panel-head"><div class="panel-title">🛬 DJI Docks</div><div class="live" id="dockState">…</div></div>
+<div class="panel-body"><div class="muted" style="margin-bottom:10px">A dock launches its drone with no pilot on site (DJI Cloud API). It connects to this PC over the site network; once it shows under <b>Found</b>, register it. With <b>Automatic flights</b> on (admins), operators can fly a saved route from the dock: it takes off, flies the route with video on, and lands back in the dock.</div>
+<div id="dockLaunches"></div>
+<div class="dk-list" id="dockList"></div>
+<div id="dockMsg" class="hud-msg"></div>
+<div class="dk-videos" id="dockVideos"></div>
+<div class="dk-health" id="dockHealth"></div>
+<div id="dockMedia" style="margin-top:12px"></div>
+<details class="dk-setup" id="dockSetup" style="display:none"><summary>Set up a dock (admins)</summary>
+<div class="muted" style="margin-top:10px"><b>1. DJI Cloud API keys</b> (once): developer.dji.com → Apps → Create App, App Type <b>Cloud API</b>. Paste the three values here.</div>
+<div class="dk-form"><label>App ID<input id="dkAppId" autocomplete="off"></label>
+<label>App Key<input id="dkAppKey" type="password" autocomplete="new-password" placeholder="unchanged"></label>
+<label>App License<input id="dkAppLic" type="password" autocomplete="new-password" placeholder="unchanged"></label></div>
+<div class="actions"><button class="hud-btn" onclick="dockSaveKeys()">Save keys</button><span class="muted" id="dkKeysState"></span></div>
+<div class="muted" style="margin-top:14px"><b>2. Connect the dock</b>: on the dock's DJI RC Plus (connected to the dock and to this site's network), open <b>DJI Pilot 2 → Cloud Service → Open Platform</b> and enter this link, or scan the QR code. Pilot 2 then sends this PC's address to the dock.</div>
+<div class="dk-pilot"><div class="qr" id="dkQr"></div><div style="flex:1;min-width:240px">
+<div class="muted">Link: <code id="dkLink">…</code></div><div class="muted" style="margin-top:6px">Dock broker: <code id="dkBroker">…</code></div>
+<div class="muted" style="margin-top:6px">Keep this link private: it carries the dock password. Making a new link stops the old one working (docks already connected stay connected).</div>
+<div class="actions" style="margin-top:10px"><button class="hud-btn danger" onclick="dockNewLink()">New link</button></div></div></div>
+<div class="muted" style="margin-top:14px"><b>3. Alarm launches</b>: when a drone is sent to a camera (automatic dispatch, handoff, Telegram, the dashboard), the nearest ready dock can go. By default the system asks first (Telegram and this page, “Launch / Don't”, expires after 5 min).</div>
+<label class="muted" style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="dkNoAsk" onchange="dockNoAsk(this)"> Launch docks <b>without asking</b> (the drone takes off by itself as soon as an alarm needs it)</label>
+<div class="muted" style="margin-top:14px"><b>No dock yet?</b> Add a simulated Dock 3 with a Matrice 4TD to try the steps (it appears under Found at the map's centre).</div>
+<div class="actions" style="margin-top:8px"><button class="hud-btn" id="dkSimBtn" onclick="dockSimulate()">+ Simulated dock</button></div>
+</details></div></section>
 </main>
 <script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
 <script>
@@ -212,15 +272,19 @@ async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no
   const bk=$('rtBackup');if(bk){const v=bk.value;bk.innerHTML='<option value="">None</option>'+d.drones.filter(x=>x.drone!==DRONE).map(x=>
     `<option value="${esc(x.drone)}" ${x.mission==='route'||x.mission==='backup'?'disabled':''}>${esc(x.label)}${x.mission==='route'?' (flying a route)':x.mission==='backup'?' (backup for another route)':x.drone_connected?'':' (offline)'}</option>`).join('');
     bk.value=[...bk.options].some(o=>o.value===v&&!o.disabled)?v:''}
-  const sel=$('scDrone');if(sel&&sel.options.length!==d.drones.length+1){const v=sel.value;sel.innerHTML='<option value="">Any ready drone</option>'+d.drones.map(x=>`<option value="${esc(x.drone)}">${esc(x.label)}</option>`).join('');sel.value=v;sel.style.display=many?'':'none'}
+  const docks=(typeof dockData!=='undefined'?dockData:[]).filter(x=>!x.over_limit);docks.forEach(x=>droneNames[x.slot]=x.name);
+  const sel=$('scDrone');if(sel&&sel.options.length!==d.drones.length+docks.length+1){const v=sel.value;sel.innerHTML='<option value="">Any ready drone or dock</option>'+d.drones.map(x=>`<option value="${esc(x.drone)}">${esc(x.label)}</option>`).join('')
+    +docks.map(x=>`<option value="${esc(x.slot)}">🛬 ${esc(x.name)}</option>`).join('');sel.value=v;sel.style.display=many||docks.length?'':'none'}
   $('fleet').innerHTML=d.drones.map(x=>{const dot=x.drone_connected?'ok':x.phone_connected?'half':'';
     const info=x.over_limit?'over licence':x.mission?(x.mission==='route'?'on route':x.mission==='backup'?'backup':'responding'):x.drone_connected?(x.flying?'flying':'ready')+(x.battery!=null?' · '+x.battery+'%':''):x.phone_connected?'drone off':'not paired';
     return `<a href="/drone-control?drone=${encodeURIComponent(x.drone)}" class="${x.drone===DRONE?'on':''}"><i class="${dot}"></i>${esc(x.label)} <small>${esc(info)}</small></a>`}).join('')
+    +`<span id="fleetDocks" style="display:contents"></span>`
     +`<button onclick="addDroneSlot()" ${d.can_add?'':'disabled'} title="${esc(d.message||'')}">+ Add drone <small>${d.used??'?'} of ${d.limit??'∞'}</small></button>`
     +`<a href="/drone-grid">▦ Grid view</a>`;
   if(!many&&!d.can_add)$('fleet').querySelector('button').style.display='none';
   $('fleet').querySelector('a[href="/drone-grid"]').style.display=many?'':'none';
-  others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers()}catch(e){}}
+  others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers();
+  if(typeof drawDockFleet==='function')drawDockFleet()}catch(e){}}
 async function addDroneSlot(){if(!confirm('Add another drone? It gets its own pairing QR code and video. Frigate restarts (about 20 s).'))return;
   const d=await fetch('/api/drone/add',{method:'POST'}).then(r=>r.json());
   if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else alert(d.error||'Could not add a drone.')}
@@ -241,7 +305,7 @@ async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))ret
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
 function takeoff(){const sim=(st.telemetry||{}).simulator;
   cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF: the simulator is OFF and the motors WILL start. Propellers on, people clear, drone in sight, pilot holding the controller?')}
-async function stopAll(){keys.clear();await sendStick(true);cmd('hover')}
+async function stopAll(){keys.clear();if(dkCtl){dkStick(true);return}await sendStick(true);cmd('hover')}
 async function toggleControl(){if(!control){if(!(await cmd('control_on',{speed:+$('speed').value})))return;control=true}
   else{await sendStick(true);await cmd('control_off');control=false}
   $('ctlBtn').textContent='Keyboard control: '+(control?'ON':'OFF');$('ctlBtn').classList.toggle('dc-ctl-on',control)}
@@ -256,18 +320,19 @@ async function sendStick(zero){const s=zero?{x:0,y:0,z:0,r:0}:stickFromInputs();
   if(isZero&&lastStickZero&&!zero)return;lastStickZero=isZero;
   try{await fetch('/api/drone/stick',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(s)})}catch(e){}}
 setInterval(()=>{if(control&&document.hasFocus())sendStick(false)},100);
+setInterval(()=>{if(dkCtl&&document.hasFocus())dkStick(false)},100);
 window.addEventListener('blur',()=>{keys.clear();if(control)sendStick(true)});
 document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.type!=='range')return;
   if(e.code==='Space'){e.preventDefault();stopAll();return}
   if(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();
-    if(control)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
+    if(control||dkCtl)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
 document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);window.addMapSearch&&addMapSearch(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
   map.on('click',e=>mapClick(e.latlng.lat,e.latlng.lng));drawNofly()}
 // A click on the flat map or on the ground in 4D live: a zone corner while drawing a zone, a camera's place, else a route stop.
-function mapClick(lat,lon){nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
+function mapClick(lat,lon){dkGoto?dockGoto(lat,lon):nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
@@ -473,5 +538,176 @@ async function resetPair(){if(!confirm('Make a new pairing code? The phone will 
 function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
   const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
   if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
+// ---- DJI Docks ----
+const DK_ADMIN=typeof IS_ADMIN!=='undefined'&&IS_ADMIN;
+function dkMsg(t,ok){const e=$('dockMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
+async function dkPost(url,body,method){const r=await fetch(url,{method:method||'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+  let d={};try{d=await r.json()}catch(e){}return d.ok?d:{ok:false,error:d.error||('Failed ('+r.status+')')}}
+let dkFull=false;
+function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE');
+  if(x.drone_model)tags.push((x.drone_in_dock===false?'✈ ':'⌂ ')+esc(x.drone_model)+(x.drone_in_dock===false?' out':' in dock'));
+  if(x.battery!=null)tags.push('🔋 '+x.battery+'%'+(x.charging?' charging':''));
+  if(x.cover)tags.push(x.cover==='cover fault'?'Cover fault':'Cover '+esc(x.cover));if(x.mode)tags.push(esc(x.mode));
+  if(x.temperature!=null)tags.push('🌡 '+fmt(x.temperature)+' °C');if(x.wind!=null)tags.push('💨 '+fmt(x.wind)+' m/s');
+  if(x.rain&&x.rain!=='none')tags.push('🌧 '+esc(x.rain));if(x.simulated)tags.push('SIMULATED');
+  const dot=x.online?'good':'bad',al=x.alerts||[];
+  const sev=al.some(a=>a.level==='warning')?' dk-bad':al.length?' dk-careful':'';
+  const alerts=al.map(a=>`<div class="dk-alert ${esc(a.level)}">${a.level==='warning'?'⚠':'●'} ${esc(a.text)}</div>`).join('');
+  const faults=[['','Test a problem…'],['offline','Goes offline (alert after 1 min)'],['cover','Cover fault'],['rain','Heavy rain'],['wind','Strong wind'],['hot','Too hot'],['battery','Drone battery low'],['hms','DJI warning'],['','All clear']];
+  const v=x.video||{},LN={wide:'Wide',zoom:'Zoom',ir:'Thermal',normal:'Main'};
+  const vid=found||x.over_limit||!x.online?'':v.streaming
+    ?`<button class="hud-btn danger" data-sn="${esc(x.sn)}" onclick="dockVideo(this.dataset.sn,'stop')">■ Stop video</button>`
+      +((v.lenses||[]).length>1?`<select data-sn="${esc(x.sn)}" onchange="this.blur();dockVideo(this.dataset.sn,'lens',this.value)">${v.lenses.map(l=>`<option value="${l}" ${l===v.lens?'selected':''}>${LN[l]||l}</option>`).join('')}</select>`:'')
+    :`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockVideo(this.dataset.sn,'start')" ${(v.sources||[]).includes('drone')?'':'disabled title="The drone isn\'t reporting a camera yet"'}>▶ Drone video</button>`
+      +((v.sources||[]).includes('dock')?`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockVideo(this.dataset.sn,'start',null,'dock')">▶ Dock camera</button>`:'');
+  if(v.streaming)tags.unshift('● LIVE · '+(v.device==='dock'?'dock camera':(LN[v.lens]||v.lens||'')));
+  // Phase 3: missions
+  const m=x.mission,ma=m&&m.active,MS={starting:'starting',sent:'starting',in_progress:'flying',paused:'paused',returning:'returning to dock'};
+  if(ma)tags.unshift(`🛫 ${esc(m.name)} · ${m.sticks?'keyboard control':MS[m.status]||esc(m.status)}${m.status==='in_progress'?' · '+m.percent+'%':''}`);
+  if(ma&&x.drone_height!=null)tags.splice(1,0,`↑ ${fmt(x.drone_height)} m`);
+  else if(m&&m.ended)tags.push(`Last route ${esc(m.name)}: ${m.status==='ok'?'done':esc(m.status)}`);
+  let fly='';
+  if(!found&&!x.over_limit){
+    if(ma)fly=`<button class="hud-btn danger" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'stop')">⏹ Return to dock</button>`
+      +(x.drone_in_dock===false?`<button class="hud-btn ${dkGoto===x.sn?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockGotoMode(this.dataset.sn)">📍 Fly to a point</button>`
+      +`<button class="hud-btn ${m.sticks&&dkCtl===x.sn?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockSticks(this.dataset.sn,${m.sticks?'false':'true'})">🎮 Keyboard: ${m.sticks?'ON':'OFF'}</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'photo')">📷 Photo</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'record_start')">⏺ Rec</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'record_stop')">⏹ Rec</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_down')">⤓ Look down</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_center')">⟷ Level</button>`:'');
+    else if(x.auto_flights&&x.online)fly=`<select id="dkRoute_${esc(x.sn)}" data-sn="${esc(x.sn)}" onchange="dkRouteSel[this.dataset.sn]=this.value;this.blur()" style="max-width:160px">`
+      +(dkRoutes.length?dkRoutes.map(r=>`<option ${dkRouteSel[x.sn]===r?'selected':''}>${esc(r)}</option>`).join(''):'<option value="">No saved routes</option>')
+      +`</select><button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'fly')" ${dkRoutes.length?'':'disabled'}>🛫 Fly route</button>`;
+    else if(!x.auto_flights)fly=`<span class="muted" style="font-size:12px">Automatic flights off</span>`;
+  }
+  const adm=DK_ADMIN&&!found?`<button class="hud-btn" data-sn="${esc(x.sn)}" data-on="${x.auto_flights?1:0}" onclick="dockAuto(this.dataset.sn,this.dataset.on==='1')" title="Lets this dock's drone take off by itself">Automatic flights: ${x.auto_flights?'ON':'OFF'}</button>`
+    +`<button class="hud-btn" data-sn="${esc(x.sn)}" data-r="${x.range_m||500}" onclick="dockRange(this.dataset.sn,this.dataset.r)">Range ${x.range_m||500} m</button>`:'';
+  const test=DK_ADMIN&&!found&&x.simulated?`<select data-sn="${esc(x.sn)}" onchange="dockFault(this)" style="max-width:150px">${faults.map(([v,t],i)=>`<option value="${v}" ${i===0?'selected disabled':''}>${t}</option>`).join('')}</select>`:'';
+  const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')" ${dkFull&&!x.simulated?'disabled title="The licence\'s dock count is used up"':''}>Register</button>`
+    :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
+  return `<div class="dk-card${found?' found':''}${sev}" id="dkCard_${esc(x.sn)}"${x.over_limit?' style="opacity:.55" title="Over the licence\'s dock count: not watched. Remove a dock or ask your provider for more."':''}><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
+    <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
+    ${alerts}<div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div>${fly?`<div class="actions" style="gap:6px;margin-bottom:6px">${fly}</div>`:''}${vid?`<div class="actions" style="gap:6px;margin-bottom:6px">${vid}</div>`:''}${adm?`<div class="actions" style="gap:6px;margin-bottom:6px">${adm}</div>`:''}<div class="actions" style="gap:6px">${btns}${test}</div></div>`}
+async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  dkFull=d.limit!=null&&d.used>=d.limit;
+  $('dockState').textContent=(!d.allowed?'NOT LICENSED':d.broker.connected?'BROKER READY':d.broker.running?'BROKER STARTING':'BROKER OFF')+(d.allowed&&d.limit!=null?` · ${d.used} OF ${d.limit} DOCK${d.limit===1?'':'S'}`:'');
+  $('dockState').style.color=d.allowed&&d.broker.connected?'':'#ffcf7a';
+  const cards=d.docks.map(x=>dkCard(x,false)).concat(d.found.map(x=>dkCard(x,true)));
+  const ae=document.activeElement,keep=ae&&((ae.id&&ae.id.startsWith('dkName_'))||(ae.tagName==='SELECT'&&ae.closest('#dockList')));
+  const hl=d.health_log||[];$('dockHealth').innerHTML=hl.length?'<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">HEALTH</b>'+hl.map(a=>`<div class="${a.active?'on':''}"><small>${new Date(a.t*1000).toLocaleString()}</small>${a.active?(a.level==='warning'?'⚠ ':'● '):'✓ '}${esc(a.text)}</div>`).join(''):'';
+  if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
+  if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed;
+  if($('dkNoAsk'))$('dkNoAsk').checked=!!d.launch_without_asking;
+  $('dockLaunches').innerHTML=(d.launches||[]).map(l=>`<div class="dk-launch"><span>🚨 Launch <b>${esc(l.name)}</b> to <b>${esc(l.camera)}</b>?</span><span class="muted">${esc(l.by)} · expires ${new Date(l.expires*1000).toLocaleTimeString()}</span>
+    <button class="hud-btn danger" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,true)">🚁 Launch</button><button class="hud-btn" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,false)">✋ Don't</button></div>`).join('');
+  dockData=d.docks;drawDockFleet();drawDockMap();drawDockVideos();drawDockMissions()}catch(e){}}
+let dkRoutes=[],dkRouteSel={},dkMissionLines={},dkGoto=null,dkCtl=null;
+// Phase 4: live control of a dock's drone
+function dockGotoMode(sn){dkGoto=dkGoto===sn?null:sn;dkMsg(dkGoto?'Click the map where the drone should go (it flies there at the response height and holds).':'');loadDocks()}
+async function dockGoto(lat,lon){const sn=dkGoto;dkGoto=null;const x=dockData.find(d=>d.sn===sn)||{};
+  if(!confirm(`Send ${x.name||'the dock'}'s drone to ${lat.toFixed(5)}, ${lon.toFixed(5)}?`)){loadDocks();return}
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:'goto',lat,lon});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockSticks(sn,on){if(on&&control){dkMsg('Turn the Drone Link keyboard control off first.',false);return}
+  const sp=+(($('speed')||{}).value||30)/100;const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:on?'sticks_on':'sticks_off',speed:sp});
+  dkCtl=d.ok&&on?sn:null;if(!on)keys.clear();dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+let dkLastZero=true;
+async function dkStick(zero){if(!dkCtl)return;const s=zero?{x:0,y:0,z:0,r:0}:stickFromInputs();const isZero=!s.x&&!s.y&&!s.z&&!s.r;
+  if(isZero&&dkLastZero&&!zero)return;dkLastZero=isZero;
+  try{const r=await fetch('/api/docks/'+encodeURIComponent(dkCtl)+'/sticks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(s)});
+    if(r.status===409){dkCtl=null;keys.clear();dkMsg('Keyboard control has ended (no input for a minute, or the drone went home).');loadDocks()}}catch(e){}}
+async function dockCam(sn,action){const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action});dkMsg(d.ok?d.message:d.error,d.ok)}
+async function loadDockRoutes(){try{const d=await fetch('/api/routes',{cache:'no-store'}).then(r=>r.json());if(d.ok)dkRoutes=Object.keys(d.routes||{}).sort()}catch(e){}}
+async function dockMission(sn,action){const name=action==='fly'?(dkRouteSel[sn]||($('dkRoute_'+sn)||{}).value||''):'';
+  if(action==='fly'){const x=dockData.find(d=>d.sn===sn)||{};
+    if(!confirm(`${x.name||'The dock'} will take off by itself and fly route “${name}”, then return to the dock.\n\nThe area must be clear and the flight permitted. Continue?`))return}
+  dkMsg(action==='fly'?'Checking and sending the flight plan to the dock…':'Calling the drone back…');
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/mission',{action,route:name});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockLaunch(id,yes){const d=await dkPost('/api/docks/launches/'+encodeURIComponent(id),{launch:yes});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockNoAsk(el){if(el.checked&&!confirm('Launch docks without asking?\n\nWhen an alarm needs a drone, a ready dock\'s drone will take off by itself with nobody confirming. Only for sites with permission for automated flights and a safe area.')){el.checked=false;return}
+  const d=await dkPost('/api/docks/setup',{launch_without_asking:el.checked});dkMsg(d.ok?(el.checked?'Docks launch without asking.':'Docks ask before launching.'):d.error,d.ok)}
+async function dockAuto(sn,on){const x=dockData.find(d=>d.sn===sn)||{};let body={auto_flights:!on};
+  if(!on){if(!confirm(`Allow ${x.name||'this dock'}'s drone to take off by itself (routes now; patrols and alarm launches later)?\n\nOnly switch this on when the site has permission for automated flights (Lebanon: DGCA) and the area is safe. Your name and the time are recorded.`))return;body.confirm=true}
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/settings',body);dkMsg(d.ok?`Automatic flights ${d.auto_flights?'on':'off'}.`:d.error,d.ok);loadDocks()}
+async function dockRange(sn,r){const v=prompt('How far from the dock may its drone fly (metres, up to 2000)?',r);if(!v)return;
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/settings',{range_m:v});dkMsg(d.ok?`Range ${d.range_m} m.`:d.error,d.ok);loadDocks()}
+function drawDockMissions(){if(!map||!window.L)return;const seen=new Set();
+  dockData.forEach(x=>{const m=x.mission;if(!m||!m.active||!(m.points||[]).length)return;seen.add(x.sn);
+    const pts=[[x.lat,x.lon],...m.points.map(p=>[p.lat,p.lon]),[x.lat,x.lon]].filter(p=>p[0]);
+    if(!dkMissionLines[x.sn])dkMissionLines[x.sn]=L.polyline(pts,{color:'#ffb23c',weight:2,dashArray:'6 6'}).addTo(map);else dkMissionLines[x.sn].setLatLngs(pts)});
+  Object.keys(dkMissionLines).forEach(sn=>{if(!seen.has(sn)){dkMissionLines[sn].remove();delete dkMissionLines[sn]}})}
+loadDockRoutes();setInterval(loadDockRoutes,30000);
+// Phase 5: photos and videos the docks uploaded
+let dkMediaSig='';
+async function loadDockMedia(){try{const d=await fetch('/api/docks/media',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  const sig=d.items.map(x=>x.id).join();if(sig===dkMediaSig)return;dkMediaSig=sig;
+  $('dockMedia').innerHTML=d.items.length?`<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">PHOTOS AND VIDEOS FROM THE DOCKS</b> <span class="muted" style="font-size:11px">(kept ${d.keep_days} days on this PC)</span><div class="dk-media">`
+    +d.items.slice(0,24).map(x=>`<a href="/api/docks/media/${esc(x.id)}${x.kind==='photo'?'':'?download=1'}" target="_blank" title="${esc(x.name)}">`
+      +(x.kind==='photo'&&x.present?`<img loading="lazy" src="/api/docks/media/${esc(x.id)}" alt="">`:`<div class="dk-mvid">${x.kind==='video'?'🎞':'📄'}</div>`)
+      +`<span>${esc(x.dock_name)} · ${esc(x.taken?x.taken.replace('T',' ').slice(5,16):new Date(x.added*1000).toLocaleString())}</span></a>`).join('')+'</div>':''}catch(e){}}
+loadDockMedia();setInterval(loadDockMedia,15000);
+// One player per streaming dock, kept across polls (the cards above are redrawn every 3 s).
+function drawDockVideos(){const box=$('dockVideos');if(!box)return;
+  const live=dockData.filter(x=>(x.video||{}).streaming&&!x.over_limit);const want=new Set(live.map(x=>x.sn));
+  [...box.children].forEach(el=>{if(!want.has(el.dataset.sn)){const s=el.querySelector('.live-slot');if(s&&window.detachLiveCamera)window.detachLiveCamera(s);el.remove()}});
+  live.forEach(x=>{let el=box.querySelector(`[data-sn="${CSS.escape(x.sn)}"]`);
+    if(!el){el=document.createElement('div');el.className='dk-video';el.dataset.sn=x.sn;
+      el.innerHTML=`<div class="dk-vhead"><i class="dot good"></i><span></span></div><div class="dk-vbody">`
+        +(x.simulated?'<div class="dk-sim">SIMULATED DOCK · NO PICTURE<br>A real dock streams here, and Frigate runs the AI on it.</div>'
+          :`<div class="live-slot" data-live-camera="${esc(x.slot)}"></div>`)+'</div>';
+      box.appendChild(el);const s=el.querySelector('.live-slot');if(s&&window.attachLiveCamera)window.attachLiveCamera(s)}
+    const v=x.video,LN={wide:'wide',zoom:'zoom',ir:'thermal',normal:'main'};
+    el.querySelector('.dk-vhead span').textContent=`${x.name} · ${v.device==='dock'?'dock camera':(x.drone_model||'drone')+' · '+(LN[v.lens]||v.lens||'')}`})}
+async function dockVideo(sn,action,lens,device){dkMsg(action==='start'?'Asking the dock to start the video…':action==='stop'?'Stopping the video…':'Changing lens…');
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/video',{action,lens,device});
+  dkMsg(d.ok?(action==='start'?'Video started. The picture appears below in a few seconds.':action==='stop'?'Video stopped.':'Lens changed.'):d.error,d.ok);loadDocks()}
+// Registered docks in the fleet bar and on the map. Docks don't fly from here yet: a click shows the dock.
+let dockData=[],dockMarks={};
+function dockInfo(x){if(x.over_limit)return 'over licence';if(!x.online)return 'offline';
+  if(x.mission&&x.mission.active)return 'flying '+x.mission.name+(x.battery!=null?' · '+x.battery+'%':'');
+  const where=x.drone_in_dock===false?'drone out':x.drone_model?'drone in dock':'no drone';
+  return where+(x.battery!=null?' · '+x.battery+'%':'')}
+function dkAlertName(k){return k.startsWith('hms:')?'DJI warning':({offline:'offline',cover:'cover fault',rain:'heavy rain',wind:'strong wind',hot:'too hot',cold:'too cold',battery:'battery low'})[k]||k}
+function drawDockFleet(){const box=$('fleetDocks');if(!box)return;
+  box.innerHTML=dockData.map(x=>`<button class="dk-chip" data-sn="${esc(x.sn)}" onclick="focusDock(this.dataset.sn)" title="${esc((x.model||'Dock')+' · SN '+x.sn)}"><i class="${x.online?((x.alerts||[]).length?'half':'ok'):''}"></i>🛬 ${esc(x.name)} <small>${(x.alerts||[]).length?'⚠ '+esc(x.alerts.length===1?dkAlertName(x.alerts[0].key):x.alerts.length+' alerts')+' · ':''}${esc(dockInfo(x))}</small></button>`).join('')}
+function drawDockMap(){let fit=false;
+  if(!map&&dockData.some(x=>x.lat)){const f=dockData.find(x=>x.lat);initMap(f.lat,f.lon);fit=true}
+  if(!map||!window.L)return;const seen=new Set();
+  dockData.forEach(x=>{if(!x.lat||!x.lon)return;seen.add(x.sn);let m=dockMarks[x.sn];
+    const icon=L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],html:`<div class="dk-mark${x.online?'':' off'}">D</div>`});
+    if(!m){m=dockMarks[x.sn]={dock:L.marker([x.lat,x.lon],{icon,zIndexOffset:-100}).addTo(map).on('click',()=>focusDock(x.sn,true)),drone:null}}
+    m.dock.setLatLng([x.lat,x.lon]).setIcon(icon);const tip=`${esc(x.name)} · ${esc(dockInfo(x))}`;
+    if(m.dock.getTooltip())m.dock.setTooltipContent(tip);else m.dock.bindTooltip(tip,{direction:'right'});
+    const out=x.drone_in_dock===false&&x.drone_lat&&x.drone_lon;
+    if(out){if(!m.drone)m.drone=L.circleMarker([x.drone_lat,x.drone_lon],{radius:7,color:'#ffb23c',fillColor:'#ffb23c',fillOpacity:.8}).addTo(map);
+      const dt=`${esc(x.drone_model||'Drone')} (${esc(x.name)})${x.drone_height!=null?' · '+fmt(x.drone_height)+' m':''}`;
+      m.drone.setLatLng([x.drone_lat,x.drone_lon]);if(m.drone.getTooltip())m.drone.setTooltipContent(dt);else m.drone.bindTooltip(dt,{permanent:true,direction:'right'})}
+    else if(m.drone){m.drone.remove();m.drone=null}});
+  const pts=dockData.flatMap(x=>[x.lat?[x.lat,x.lon]:null,x.drone_in_dock===false&&x.drone_lat?[x.drone_lat,x.drone_lon]:null]).filter(Boolean);
+  if(fit&&pts.length>1)map.fitBounds(pts,{padding:[40,40],maxZoom:18});
+  Object.keys(dockMarks).forEach(sn=>{if(!seen.has(sn)){dockMarks[sn].dock.remove();dockMarks[sn].drone&&dockMarks[sn].drone.remove();delete dockMarks[sn]}})}
+function focusDock(sn,fromMap){const x=dockData.find(d=>d.sn===sn);if(!x)return;
+  if(map&&x.lat&&!fromMap){map.setView([x.lat,x.lon],Math.max(map.getZoom(),17));dockMarks[sn]&&dockMarks[sn].dock.openTooltip()}
+  const c=$('dkCard_'+sn);if(c){if(fromMap)c.scrollIntoView({behavior:'smooth',block:'center'});c.classList.add('flash');setTimeout(()=>c.classList.remove('flash'),1600)}
+  if(!x.lat)dkMsg(`${x.name} hasn't sent its position yet.`)}
+async function loadDockSetup(){if(!DK_ADMIN)return;$('dockSetup').style.display='';
+  const d=await fetch('/api/docks/setup',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}));if(!d.ok)return;
+  $('dkAppId').value=d.app_id||'';$('dkKeysState').textContent=d.cloud_ready?'✓ Keys saved':'Keys missing'+(d.app_key_set?'':' · App Key')+(d.app_license_set?'':' · App License');
+  $('dkQr').innerHTML=d.qr||'';$('dkLink').textContent=d.pilot_link;$('dkBroker').textContent=d.broker;
+  if(d.pilot_page&&d.pilot_page!=='ok')dkMsg('Pilot 2 setup page: '+d.pilot_page,false)}
+async function dockSaveKeys(){const b={app_id:$('dkAppId').value.trim()};if($('dkAppKey').value.trim())b.app_key=$('dkAppKey').value.trim();
+  if($('dkAppLic').value.trim())b.app_license=$('dkAppLic').value.trim();const d=await dkPost('/api/docks/setup',b);
+  dkMsg(d.ok?'Cloud API keys saved.':d.error,d.ok);if(d.ok){$('dkAppKey').value='';$('dkAppLic').value='';loadDockSetup()}}
+async function dockNewLink(){if(!confirm('Make a new Pilot 2 link? The old link stops working.'))return;await dkPost('/api/docks/setup',{new_link:true});loadDockSetup()}
+async function dockRegister(sn){const n=$('dkName_'+sn);const d=await dkPost('/api/docks/register',{sn,name:n?n.value:''});
+  if(n)n.blur();dkMsg(d.ok?`Registered as ${d.dock.name}.`:d.error,d.ok);loadDocks()}
+async function dockRename(sn,old){const name=prompt('New name for this dock:',old);if(!name)return;const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{name});dkMsg(d.ok?'Renamed.':d.error,d.ok);loadDocks()}
+async function dockRemove(sn,name){if(!confirm(`Remove ${name}? It stops being part of this system${sn.startsWith('SIMDOCK')?' and the simulated dock is deleted':''}. A real dock can be registered again when it connects.`))return;
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{},'DELETE');dkMsg(d.ok?'Removed.':d.error,d.ok);loadDocks()}
+async function dockFault(sel){const d=await dkPost('/api/docks/'+encodeURIComponent(sel.dataset.sn)+'/fault',{fault:sel.value});sel.blur();
+  dkMsg(d.ok?(d.fault?'Test problem set. The alert shows here and on Telegram within a few seconds'+(d.fault==='offline'?' (offline: after 1 minute).':'.'):'All clear set.'):d.error,d.ok);setTimeout(loadDocks,800)}
+async function dockSimulate(){const c=map&&map.getCenter?map.getCenter():null;const d=await dkPost('/api/docks/simulate',c?{lat:c.lat,lon:c.lng}:{});
+  dkMsg(d.ok?`Simulated dock ${d.sn} added: it shows under Found in a moment. Register it to try the steps.`:d.error,d.ok);setTimeout(loadDocks,1500)}
+loadDocks();setInterval(loadDocks,3000);loadDockSetup();
 $('speedVal').textContent='30%';loadFleet();setInterval(loadFleet,3000);loadPair();poll();loadResp();loadRoutes().then(loadScheds);setInterval(poll,500);
 </script>"""
