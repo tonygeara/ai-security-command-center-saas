@@ -5589,6 +5589,7 @@ def start_docks():
         if sn not in dock_hub.local:
             _start_sim_dock(sn)
     threading.Thread(target=_dock_health_worker, name="dock-health", daemon=True).start()
+    threading.Thread(target=_dock_drc_worker, name="dock-sticks", daemon=True).start()
 
 
 def _dock_refused():
@@ -5974,6 +5975,116 @@ def api_dock_mission(sn):
         audit_record("dock: return to dock", target=sn, detail={"route": m["name"], "by": by}, result="ok" if ok else "failed")
         return jsonify({"ok": ok, "error": msg} if not ok else {"ok": True, "message": "Returning to the dock."}), (200 if ok else 409)
     return jsonify({"ok": False, "error": "Unknown action."}), 400
+
+
+# ---------- Phase 4: live control of a dock's drone ----------
+DOCK_STICK_TIMEOUT = 0.4   # no stick from the browser for this long: neutral sticks (the drone holds its position)
+DOCK_STICK_IDLE_EXIT = 60  # no stick at all for this long: stick control ends (the drone keeps holding)
+_dock_stick_speed = {}     # sn -> speed 0.1..1 chosen on the Drone page
+
+
+def _dock_in_air(sn):
+    m = dock_hub.mission(sn) or {}
+    return bool(m.get("active")) and dock_hub.summary(sn)["drone_in_dock"] is False
+
+
+def dock_drc_tick():
+    """10 times a second: hold (neutral sticks) when the browser stopped sending, a heartbeat every second, and stop
+    stick control after a minute without input."""
+    now = dock_hub.now()
+    for sn in list(dock_store.docks()):
+        drc = (dock_hub.state.get(sn) or {}).get("drc")
+        if not drc:
+            continue
+        if now - max(drc["stick_at"], drc["since"]) > DOCK_STICK_IDLE_EXIT:
+            dock_hub.drc_exit(sn)
+            audit_record("dock: stick control ended", target=sn, detail={"why": "no input for a minute"}, source="system")
+            continue
+        if now - drc["stick_at"] > DOCK_STICK_TIMEOUT:
+            dock_hub.sticks(sn, 0, 0, 0, 0, from_operator=False)
+        if now - drc["beat_at"] >= 1.0:
+            dock_hub.drc_heartbeat(sn)
+
+
+def _dock_drc_worker():
+    while True:
+        try:
+            dock_drc_tick()
+        except Exception as e:  # noqa: BLE001
+            print("Dock stick control error:", e)
+        time.sleep(0.1)
+
+
+@app.route("/api/docks/<sn>/control", methods=["POST"])
+def api_dock_control(sn):
+    """Operators, while the dock's drone is out: {"action": "goto", "lat", "lon", "alt"} | "goto_stop" | "sticks_on" (speed) |
+    "sticks_off" | "photo" | "record_start" | "record_stop" | "gimbal_down" | "gimbal_center"."""
+    d = dock_store.docks().get(sn)
+    if not d:
+        return jsonify({"ok": False, "error": "Unknown dock."}), 404
+    if not dock_allowed() or sn in _docks_over_limit():
+        return _dock_refused()
+    if not _dock_in_air(sn):
+        return jsonify({"ok": False, "error": f"{d['name']}'s drone isn't flying. Start a route or a launch first."}), 409
+    data = request.get_json(silent=True) or {}
+    action = str(data.get("action") or "")
+    by = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    x = dock_hub.summary(sn)
+    if action == "goto":
+        try:
+            lat, lon = float(data["lat"]), float(data["lon"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Click the map where the drone should go."}), 400
+        alt = max(dock_wayline.MIN_ALT, min(dock_wayline.MAX_ALT, float(data.get("alt") or load_response_settings()["altitude_m"])))
+        limit = int(d.get("range_m") or DOCK_RANGE_DEFAULT)
+        dist = _distance_m(x["lat"], x["lon"], lat, lon) if x["lat"] else 0
+        if dist > limit:
+            return jsonify({"ok": False, "error": f"That spot is {int(dist)} m from {d['name']} (its range is {limit} m)."}), 409
+        z = nofly.zone_at(nofly_zones(), lat, lon)
+        if z:
+            return jsonify({"ok": False, "error": f"That spot is inside no-fly zone “{z['name']}”."}), 409
+        start = (x["drone_lat"], x["drone_lon"]) if x["drone_lat"] else (x["lat"], x["lon"])
+        via = nofly.detour(nofly_zones(), start, (lat, lon))
+        if via is None:
+            return jsonify({"ok": False, "error": "There is no way round the no-fly zones to that spot."}), 409
+        if dock_hub.drc_active(sn):
+            dock_hub.drc_exit(sn)
+        ok, msg = dock_hub.fly_to(sn, [(a, b, alt) for a, b in via] + [(lat, lon, alt)], load_response_settings()["speed_ms"])
+        result = f"Flying to the spot at {int(alt)} m" + (f", round the no-fly zones ({len(via)} turns)" if via else "") + "; it then holds there."
+    elif action == "goto_stop":
+        ok, msg = dock_hub.fly_to_stop(sn)
+        result = "Stopped: holding position."
+    elif action == "sticks_on":
+        _dock_stick_speed[sn] = max(0.1, min(1.0, float(data.get("speed") or 0.3)))
+        creds = _dock_creds()
+        ok, msg = dock_hub.drc_enter(sn, f"{_lan_ip()}:{dock_lib.BROKER_PORT}", creds["dock_user"], creds["dock_password"])
+        result = "Keyboard control on: W/A/S/D move, arrows climb and turn, Space holds. Return to dock any time."
+    elif action == "sticks_off":
+        ok, msg = dock_hub.drc_exit(sn), ""
+        result = "Keyboard control off: the drone holds its position."
+    elif action in ("photo", "record_start", "record_stop", "gimbal_down", "gimbal_center"):
+        ok, msg = dock_hub.camera(sn, action)
+        result = {"photo": "Photo taken.", "record_start": "Recording on the drone.", "record_stop": "Recording stopped.",
+                  "gimbal_down": "Camera pointing straight down.", "gimbal_center": "Camera level."}[action]
+    else:
+        return jsonify({"ok": False, "error": "Unknown action."}), 400
+    audit_record(f"dock: {action}", target=sn, detail={"name": d["name"], "by": by, **({k: data.get(k) for k in ("lat", "lon", "alt")} if action == "goto" else {})},
+                 result="ok" if ok else "failed")
+    return (jsonify({"ok": True, "message": result}) if ok else jsonify({"ok": False, "error": msg or "The dock refused."})), (200 if ok else 409)
+
+
+@app.route("/api/docks/<sn>/sticks", methods=["POST"])
+def api_dock_sticks(sn):
+    """Operators: one stick reading from the Drone page (x right, y forward, z up, r turn; -1..1), about 10 a second."""
+    if not dock_hub.drc_active(sn):
+        return jsonify({"ok": False, "error": "Keyboard control is off."}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        vals = [float(data.get(k) or 0) for k in ("x", "y", "z", "r")]
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Bad stick values."}), 400
+    dock_hub.sticks(sn, *vals, speed=_dock_stick_speed.get(sn, 0.3))
+    return jsonify({"ok": True})
 
 
 @app.route("/api/docks/launches/<lid>", methods=["POST"])

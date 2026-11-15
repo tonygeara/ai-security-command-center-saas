@@ -18,6 +18,9 @@ MQTT topics used (DJI Cloud API; check names against DJI's current docs when add
     thing/product/{gateway}/services_reply  dock -> PC  result 0 = done
     Missions (Phase 3): flighttask_prepare (a KMZ flight plan the dock downloads from this PC) -> flighttask_execute;
     flighttask_progress events while it flies; return_home to bring it back.
+    Live control (Phase 4): fly_to_point / fly_to_point_stop; DRC (drone remote control): drc_mode_enter (pointing the
+    dock at this broker), flight_authority_grab, payload_authority_grab, then stick_control and heart_beat messages on
+    thing/product/{gateway}/drc/down; drc_mode_exit. Camera: camera_photo_take, camera_recording_start/stop, gimbal_reset.
 
 A dock that connects is listed as "found"; an admin registers it (name, slot dock1, dock2, …) before it is part
 of the system. A simulated dock (dock_sim.py) goes through the same hub without a broker, for tests and demos.
@@ -325,9 +328,10 @@ class DockHub:
                 self.drone_of[s["drone_sn"]] = gw
             elif data:
                 s["drone_sn"], s["drone_model"] = "", ""
-            if not data:  # an empty topology: the device went offline (and its video with it)
+            if not data:  # an empty topology: the device went offline (and its video and stick control with it)
                 s["offline_at"] = self.now()
                 s.pop("live", None)
+                s.pop("drc", None)
             s["last_seen"] = self.now()
         self._reply(topic, msg, {"result": 0})
         if self.on_change:
@@ -465,6 +469,8 @@ class DockHub:
 
     def return_home(self, gw):
         """Bring the drone back to the dock now (or cancel a mission that hasn't taken off)."""
+        if self.drc_active(gw):
+            self.drc_exit(gw)  # sticks off first: DJI's return to home takes over
         ok, msg, _ = self.call(gw, "return_home", {}, timeout=15.0)
         if ok:
             with self.lock:
@@ -482,7 +488,7 @@ class DockHub:
             if m is None or (ext.get("flight_id") and ext["flight_id"] != m["flight_id"]):
                 return
             status = str(out.get("status") or m["status"])
-            if not (m["status"] == "returning" and status == "in_progress"):
+            if not (m["status"] in ("returning", "manual") and status in ("in_progress", "paused")):
                 m["status"] = status
             m["percent"] = int(prog.get("percent") or m["percent"])
             m["index"] = int(ext.get("current_waypoint_index") or m["index"])
@@ -495,7 +501,95 @@ class DockHub:
         if not m:
             return None
         return {k: m.get(k) for k in ("flight_id", "name", "status", "percent", "index", "since", "ended", "points")} | {
-            "active": m["status"] not in MISSION_DONE}
+            "active": m["status"] not in MISSION_DONE, "sticks": self.drc_active(gw)}
+
+    # --- live control (Phase 4) ---
+    def payload_index(self, gw):
+        """The drone camera's index, e.g. "99-0-0" (from live_capacity)."""
+        src = next((v for v in self.video_sources(gw) if v["device"] == "drone"), None)
+        return src["video_id"].split("/")[1] if src else None
+
+    def _set_mission(self, gw, **values):
+        with self.lock:
+            m = (self.state.get(gw) or {}).get("mission")
+            if m is not None:
+                m.update(values)
+
+    def fly_to(self, gw, points, speed=8.0):
+        """Take over from the route and fly to these points [(lat, lon, height above the dock)]; it then holds there."""
+        m = self.mission(gw) or {}
+        if m.get("status") in ("in_progress", "starting", "sent"):
+            self.call(gw, "flighttask_pause", {}, timeout=10.0)  # a route in progress must be paused first
+        ok, msg, _ = self.call(gw, "fly_to_point", {"fly_to_id": str(uuid.uuid4()), "max_speed": int(max(1, min(15, speed))),
+                                                     "points": [{"latitude": a, "longitude": b, "height": h} for a, b, h in points]},
+                               timeout=15.0)
+        if ok:
+            self._set_mission(gw, status="manual")
+        return ok, msg
+
+    def fly_to_stop(self, gw):
+        ok, msg, _ = self.call(gw, "fly_to_point_stop", {}, timeout=10.0)
+        return ok, msg
+
+    def drc_enter(self, gw, broker_address, username, password):
+        """Start live stick control: the dock opens a fast channel on our broker; we take the flight and camera controls."""
+        ok, msg, _ = self.call(gw, "drc_mode_enter", {
+            "mqtt_broker": {"address": broker_address, "client_id": f"drc-{gw}", "username": username, "password": password,
+                            "expire_time": int(self.now()) + 3600, "enable_tls": False},
+            "osd_frequency": 10, "hsi_frequency": 1}, timeout=15.0)
+        if not ok:
+            return False, msg
+        for method, data in (("flight_authority_grab", {}), ("payload_authority_grab", {"payload_index": self.payload_index(gw) or ""})):
+            ok, msg, _ = self.call(gw, method, data, timeout=10.0)
+            if not ok:
+                self.call(gw, "drc_mode_exit", {}, timeout=10.0)
+                return False, msg
+        with self.lock:
+            self.state[gw]["drc"] = {"seq": 0, "since": self.now(), "stick_at": 0.0, "beat_at": 0.0}
+        self._set_mission(gw, status="manual")
+        return True, ""
+
+    def drc_active(self, gw):
+        return bool((self.state.get(gw) or {}).get("drc"))
+
+    def sticks(self, gw, x=0.0, y=0.0, z=0.0, r=0.0, speed=0.5, from_operator=True):
+        """One stick message (-1..1 each: x right, y forward, z up, r turn right), scaled by speed (0.1..1)."""
+        drc = (self.state.get(gw) or {}).get("drc")
+        if not drc:
+            return False
+        k = 660 * max(0.1, min(1.0, float(speed)))
+        c = lambda v: int(round(1024 + max(-1.0, min(1.0, float(v))) * k))  # noqa: E731
+        drc["seq"] += 1
+        if from_operator:
+            drc["stick_at"] = self.now()
+        self.publish(f"thing/product/{gw}/drc/down", {"method": "stick_control", "data": {
+            "roll": c(x), "pitch": c(y), "throttle": c(z), "yaw": c(r), "seq": drc["seq"]}})
+        return True
+
+    def drc_heartbeat(self, gw):
+        drc = (self.state.get(gw) or {}).get("drc")
+        if drc:
+            drc["seq"] += 1
+            drc["beat_at"] = self.now()
+            self.publish(f"thing/product/{gw}/drc/down", {"method": "heart_beat", "data": {"seq": drc["seq"], "timestamp": int(self.now() * 1000)}})
+
+    def drc_exit(self, gw):
+        with self.lock:
+            had = (self.state.get(gw) or {}).pop("drc", None)
+        if had:
+            self.call(gw, "drc_mode_exit", {}, timeout=10.0)
+        return True
+
+    def camera(self, gw, action):
+        """photo, record_start, record_stop, gimbal_down, gimbal_center."""
+        idx = self.payload_index(gw)
+        if not idx:
+            return False, "The drone isn't reporting a camera."
+        method, data = {"photo": ("camera_photo_take", {}), "record_start": ("camera_recording_start", {}),
+                        "record_stop": ("camera_recording_stop", {}), "gimbal_down": ("gimbal_reset", {"reset_mode": 1}),
+                        "gimbal_center": ("gimbal_reset", {"reset_mode": 0})}[action]
+        ok, msg, _ = self.call(gw, method, {"payload_index": idx, **data}, timeout=10.0)
+        return ok, msg
 
     def clear_mission(self, gw):
         with self.lock:

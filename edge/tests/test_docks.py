@@ -853,3 +853,81 @@ def test_scheduled_patrol_skipped_with_the_reason(patrol_dock):
                                                                      "drone": "dock99"}]})
     r = d.start_scheduled_patrol("dk2", "test")
     assert not r["ok"] and "no longer registered" in r["error"]
+
+
+# ---------- Phase 4: live control of a dock's drone ----------
+
+def _airborne(d, client, sn, sim):
+    sim.speedup = 1.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).get_json()["ok"]
+    assert wait_until(lambda: d.dock_hub.summary(sn)["drone_in_dock"] is False, 10)
+
+
+def test_fly_to_a_point_and_camera(flying_dock):
+    d, client, sn, sim, sent = flying_dock
+    ctl = lambda **b: client.post(f"/api/docks/{sn}/control", json=b)  # noqa: E731
+    assert "isn't flying" in ctl(action="photo").get_json()["error"]
+    _airborne(d, client, sn, sim)
+    home = (45.5048, -75.6636)
+    far = ctl(action="goto", lat=home[0] + 0.01, lon=home[1]).get_json()
+    assert "its range is 500 m" in far["error"]
+    d.nofly.save_zones(d.NOFLY_FILE, [square({"lat": home[0] + 0.0002, "lon": home[1] - 0.0004}, 8, "Pool")])
+    try:
+        assert "Pool" in ctl(action="goto", lat=home[0] + 0.0002, lon=home[1] - 0.0004).get_json()["error"]
+    finally:
+        d.nofly.save_zones(d.NOFLY_FILE, [])
+    spot = (home[0] + 0.0002, home[1] - 0.0004)
+    r = ctl(action="goto", lat=spot[0], lon=spot[1], alt=35).get_json()
+    assert r["ok"] and "at 35 m" in r["message"]
+    assert d.dock_hub.mission(sn)["status"] == "manual"  # the route is paused, the operator has it
+    sim.speedup = 20.0
+    assert wait_until(lambda: (sim.flight or {}).get("phase") == "holding", 10)
+    x = d.dock_hub.summary(sn)
+    assert abs(x["drone_lat"] - spot[0]) < 1e-5 and abs(x["drone_lon"] - spot[1]) < 1e-5 and x["drone_height"] == 35
+    assert d.dock_hub.mission(sn)["status"] == "manual" and d.dock_hub.mission(sn)["active"]  # route progress doesn't undo it
+    assert ctl(action="photo").get_json()["ok"] and sim.photos == 1
+    assert ctl(action="record_start").get_json()["ok"] and sim.recording
+    assert ctl(action="record_stop").get_json()["ok"] and not sim.recording
+    assert ctl(action="gimbal_down").get_json()["ok"] and sim.gimbal == -90
+    assert ctl(action="fly_sideways").status_code == 400
+    import users
+    assert users.allowed("operator", "POST", f"/api/docks/{sn}/control") and users.allowed("operator", "POST", f"/api/docks/{sn}/sticks")
+    assert not users.allowed("viewer", "POST", f"/api/docks/{sn}/control")
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+def test_keyboard_sticks(flying_dock, monkeypatch):
+    d, client, sn, sim, sent = flying_dock
+    _airborne(d, client, sn, sim)
+    stick = lambda **v: client.post(f"/api/docks/{sn}/sticks", json=v)  # noqa: E731
+    assert stick(y=1).status_code == 409  # sticks are off
+    r = client.post(f"/api/docks/{sn}/control", json={"action": "sticks_on", "speed": 0.5}).get_json()
+    assert r["ok"] and sim.drc and d.dock_hub.mission(sn)["sticks"]
+    enter = [p for t, p in sim.replies if t.endswith("/services") and p["method"] == "drc_mode_enter"][-1]["data"]
+    assert enter["mqtt_broker"]["address"].endswith(":1884") and enter["mqtt_broker"]["username"] == d._dock_creds()["dock_user"]
+    start = d.dock_hub.summary(sn)["drone_lat"]
+    for _ in range(8):  # forward for a moment
+        assert stick(y=1).get_json()["ok"]
+        time.sleep(0.1)
+    assert sim.stick[2] == 0.5  # full stick at speed 50 %
+    assert wait_until(lambda: d.dock_hub.summary(sn)["drone_lat"] > start + 1e-5, 5)
+    # The browser stops sending: neutral sticks (hold) after 0.4 s, and a heartbeat every second.
+    t0 = d.dock_hub.now()
+    monkeypatch.setattr(d.dock_hub, "now", lambda: t0 + 0.5)
+    d.dock_drc_tick()
+    assert sim.stick[1:] == (0.0, 0.0, 0.0, 0.0)
+    sent_down = [p["method"] for t, p in sim.replies if t.endswith("/drc/down")]
+    assert sent_down[-1] == "heart_beat" and sent_down[-2] == "stick_control"
+    assert d.dock_hub.state[sn]["drc"]["beat_at"] == t0 + 0.5
+    # A minute with no input: stick control ends by itself, the drone holds.
+    monkeypatch.setattr(d.dock_hub, "now", lambda: t0 + 70)
+    d.dock_drc_tick()
+    assert not d.dock_hub.drc_active(sn) and not sim.drc and sim.flight["phase"] == "holding"
+    monkeypatch.undo()
+    # Return to dock while sticks are on: sticks off first, then home.
+    assert client.post(f"/api/docks/{sn}/control", json={"action": "sticks_on"}).get_json()["ok"]
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert not d.dock_hub.drc_active(sn) and not sim.drc
+    sim.speedup = 40.0
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)

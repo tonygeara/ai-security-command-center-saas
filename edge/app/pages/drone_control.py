@@ -299,7 +299,7 @@ async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))ret
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
 function takeoff(){const sim=(st.telemetry||{}).simulator;
   cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF: the simulator is OFF and the motors WILL start. Propellers on, people clear, drone in sight, pilot holding the controller?')}
-async function stopAll(){keys.clear();await sendStick(true);cmd('hover')}
+async function stopAll(){keys.clear();if(dkCtl){dkStick(true);return}await sendStick(true);cmd('hover')}
 async function toggleControl(){if(!control){if(!(await cmd('control_on',{speed:+$('speed').value})))return;control=true}
   else{await sendStick(true);await cmd('control_off');control=false}
   $('ctlBtn').textContent='Keyboard control: '+(control?'ON':'OFF');$('ctlBtn').classList.toggle('dc-ctl-on',control)}
@@ -314,18 +314,19 @@ async function sendStick(zero){const s=zero?{x:0,y:0,z:0,r:0}:stickFromInputs();
   if(isZero&&lastStickZero&&!zero)return;lastStickZero=isZero;
   try{await fetch('/api/drone/stick',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(s)})}catch(e){}}
 setInterval(()=>{if(control&&document.hasFocus())sendStick(false)},100);
+setInterval(()=>{if(dkCtl&&document.hasFocus())dkStick(false)},100);
 window.addEventListener('blur',()=>{keys.clear();if(control)sendStick(true)});
 document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.type!=='range')return;
   if(e.code==='Space'){e.preventDefault();stopAll();return}
   if(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();
-    if(control)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
+    if(control||dkCtl)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
 document.addEventListener('keyup',e=>keys.delete(e.code));
 function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
   L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);window.addMapSearch&&addMapSearch(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
   map.on('click',e=>mapClick(e.latlng.lat,e.latlng.lng));drawNofly()}
 // A click on the flat map or on the ground in 4D live: a zone corner while drawing a zone, a camera's place, else a route stop.
-function mapClick(lat,lon){nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
+function mapClick(lat,lon){dkGoto?dockGoto(lat,lon):nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
@@ -556,11 +557,19 @@ function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE')
   if(v.streaming)tags.unshift('● LIVE · '+(v.device==='dock'?'dock camera':(LN[v.lens]||v.lens||'')));
   // Phase 3: missions
   const m=x.mission,ma=m&&m.active,MS={starting:'starting',sent:'starting',in_progress:'flying',paused:'paused',returning:'returning to dock'};
-  if(ma)tags.unshift(`🛫 ${esc(m.name)} · ${MS[m.status]||esc(m.status)}${m.status==='in_progress'?' · '+m.percent+'%':''}`);
+  if(ma)tags.unshift(`🛫 ${esc(m.name)} · ${m.sticks?'keyboard control':MS[m.status]||esc(m.status)}${m.status==='in_progress'?' · '+m.percent+'%':''}`);
+  if(ma&&x.drone_height!=null)tags.splice(1,0,`↑ ${fmt(x.drone_height)} m`);
   else if(m&&m.ended)tags.push(`Last route ${esc(m.name)}: ${m.status==='ok'?'done':esc(m.status)}`);
   let fly='';
   if(!found&&!x.over_limit){
-    if(ma)fly=`<button class="hud-btn danger" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'stop')">⏹ Return to dock</button>`;
+    if(ma)fly=`<button class="hud-btn danger" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'stop')">⏹ Return to dock</button>`
+      +(x.drone_in_dock===false?`<button class="hud-btn ${dkGoto===x.sn?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockGotoMode(this.dataset.sn)">📍 Fly to a point</button>`
+      +`<button class="hud-btn ${m.sticks&&dkCtl===x.sn?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockSticks(this.dataset.sn,${m.sticks?'false':'true'})">🎮 Keyboard: ${m.sticks?'ON':'OFF'}</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'photo')">📷 Photo</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'record_start')">⏺ Rec</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'record_stop')">⏹ Rec</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_down')">⤓ Look down</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_center')">⟷ Level</button>`:'');
     else if(x.auto_flights&&x.online)fly=`<select id="dkRoute_${esc(x.sn)}" data-sn="${esc(x.sn)}" onchange="dkRouteSel[this.dataset.sn]=this.value;this.blur()" style="max-width:160px">`
       +(dkRoutes.length?dkRoutes.map(r=>`<option ${dkRouteSel[x.sn]===r?'selected':''}>${esc(r)}</option>`).join(''):'<option value="">No saved routes</option>')
       +`</select><button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'fly')" ${dkRoutes.length?'':'disabled'}>🛫 Fly route</button>`;
@@ -587,7 +596,21 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   $('dockLaunches').innerHTML=(d.launches||[]).map(l=>`<div class="dk-launch"><span>🚨 Launch <b>${esc(l.name)}</b> to <b>${esc(l.camera)}</b>?</span><span class="muted">${esc(l.by)} · expires ${new Date(l.expires*1000).toLocaleTimeString()}</span>
     <button class="hud-btn danger" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,true)">🚁 Launch</button><button class="hud-btn" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,false)">✋ Don't</button></div>`).join('');
   dockData=d.docks;drawDockFleet();drawDockMap();drawDockVideos();drawDockMissions()}catch(e){}}
-let dkRoutes=[],dkRouteSel={},dkMissionLines={};
+let dkRoutes=[],dkRouteSel={},dkMissionLines={},dkGoto=null,dkCtl=null;
+// Phase 4: live control of a dock's drone
+function dockGotoMode(sn){dkGoto=dkGoto===sn?null:sn;dkMsg(dkGoto?'Click the map where the drone should go (it flies there at the response height and holds).':'');loadDocks()}
+async function dockGoto(lat,lon){const sn=dkGoto;dkGoto=null;const x=dockData.find(d=>d.sn===sn)||{};
+  if(!confirm(`Send ${x.name||'the dock'}'s drone to ${lat.toFixed(5)}, ${lon.toFixed(5)}?`)){loadDocks();return}
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:'goto',lat,lon});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockSticks(sn,on){if(on&&control){dkMsg('Turn the Drone Link keyboard control off first.',false);return}
+  const sp=+(($('speed')||{}).value||30)/100;const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:on?'sticks_on':'sticks_off',speed:sp});
+  dkCtl=d.ok&&on?sn:null;if(!on)keys.clear();dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+let dkLastZero=true;
+async function dkStick(zero){if(!dkCtl)return;const s=zero?{x:0,y:0,z:0,r:0}:stickFromInputs();const isZero=!s.x&&!s.y&&!s.z&&!s.r;
+  if(isZero&&dkLastZero&&!zero)return;dkLastZero=isZero;
+  try{const r=await fetch('/api/docks/'+encodeURIComponent(dkCtl)+'/sticks',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(s)});
+    if(r.status===409){dkCtl=null;keys.clear();dkMsg('Keyboard control has ended (no input for a minute, or the drone went home).');loadDocks()}}catch(e){}}
+async function dockCam(sn,action){const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action});dkMsg(d.ok?d.message:d.error,d.ok)}
 async function loadDockRoutes(){try{const d=await fetch('/api/routes',{cache:'no-store'}).then(r=>r.json());if(d.ok)dkRoutes=Object.keys(d.routes||{}).sort()}catch(e){}}
 async function dockMission(sn,action){const name=action==='fly'?(dkRouteSel[sn]||($('dkRoute_'+sn)||{}).value||''):'';
   if(action==='fly'){const x=dockData.find(d=>d.sn===sn)||{};

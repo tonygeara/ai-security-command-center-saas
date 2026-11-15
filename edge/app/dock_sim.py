@@ -40,6 +40,12 @@ class SimulatedDock:
         self.flight = None            # {"flight_id", "points", "index", "phase", "hover_until", "status"} while out
         self.pos = self.home
         self.height = 0.0
+        # Live control (Phase 4)
+        self.drc = False
+        self.stick = None            # (time, x, y, z, r) from the last stick_control
+        self.photos = 0
+        self.recording = False
+        self.gimbal = -45
 
     def _msg(self, method=None, data=None, **extra):
         return {"tid": str(uuid.uuid4()), "bid": str(uuid.uuid4()), "timestamp": int(time.time() * 1000),
@@ -114,11 +120,25 @@ class SimulatedDock:
                     f["index"] += 1
                 else:
                     f.update(phase="returning", status="ok")
+        if f["phase"] == "goto":
+            lat, lon, h = f["goto"][0]
+            self.height = h
+            if self._move_to((lat, lon), f.get("goto_speed", 8.0) * self.period * self.speedup):
+                f["goto"] = f["goto"][1:]
+                if not f["goto"]:
+                    f["phase"] = "holding"
+        if f["phase"] == "manual" and self.stick and time.time() - self.stick[0] < 0.5:
+            _, x, y, z, _r = self.stick
+            m = 10.0 * self.period * self.speedup  # m per tick at full stick
+            self.pos = (self.pos[0] + y * m / 111320.0, self.pos[1] + x * m / (111320.0 * math.cos(math.radians(self.pos[0]))))
+            self.height = max(5.0, min(120.0, self.height + z * 3.0 * self.period * self.speedup))
         if f["phase"] == "returning" and self._move_to(self.home, step):
             self.height, self.pos = 0.0, self.home
             self.progress(100, f["status"])
             self.flight = None
             return
+        if f["phase"] in ("goto", "holding", "manual"):
+            return  # the route is paused while an operator flies it; no route progress
         pct = 99 if f["phase"] == "returning" else int(100 * f["index"] / max(1, len(pts)))
         self.progress(pct, "in_progress")
 
@@ -149,6 +169,12 @@ class SimulatedDock:
 
     def on_message(self, topic, payload):
         self.replies = (self.replies + [(topic, payload)])[-20:]
+        if topic.endswith("/drc/down"):
+            if payload.get("method") == "stick_control" and self.drc:
+                d = payload.get("data") or {}
+                v = lambda k: (float(d.get(k, 1024)) - 1024) / 660.0  # noqa: E731
+                self.stick = (time.time(), v("roll"), v("pitch"), v("throttle"), v("yaw"))
+            return
         if topic.endswith("/services"):  # a command: say it's done (there is no real picture to send)
             method, data = payload.get("method"), payload.get("data") or {}
             result = 0
@@ -167,7 +193,40 @@ class SimulatedDock:
                     self.plan = None
             elif method == "flighttask_undo":
                 self.plan = None
+            elif method == "flighttask_pause":
+                if self.flight and self.flight["phase"] == "flying":
+                    self.flight["phase"] = "holding"
+            elif method == "fly_to_point":
+                pts = data.get("points") or []
+                if not self.flight or not pts:
+                    result = 314004
+                else:
+                    self.flight.update(phase="goto", goto=[(p["latitude"], p["longitude"], p["height"]) for p in pts],
+                                       goto_speed=float(data.get("max_speed") or 8))
+            elif method == "fly_to_point_stop":
+                if self.flight and self.flight["phase"] == "goto":
+                    self.flight["phase"] = "holding"
+            elif method == "drc_mode_enter":
+                self.drc = bool(self.flight)
+                result = 0 if self.flight else 319001
+            elif method in ("flight_authority_grab", "payload_authority_grab"):
+                result = 0 if self.drc else 319002
+                if self.drc and method == "flight_authority_grab":
+                    self.flight["phase"] = "manual"
+            elif method == "drc_mode_exit":
+                self.drc = False
+                if self.flight and self.flight["phase"] == "manual":
+                    self.flight["phase"] = "holding"
+            elif method == "camera_photo_take":
+                self.photos += 1
+                if hasattr(self, "on_photo"):
+                    self.on_photo()
+            elif method in ("camera_recording_start", "camera_recording_stop"):
+                self.recording = method.endswith("start")
+            elif method == "gimbal_reset":
+                self.gimbal = -90 if data.get("reset_mode") == 1 else 0
             elif method == "return_home":
+                self.drc = False
                 if self.flight:
                     self.flight.update(phase="returning", status="canceled")
                 else:
