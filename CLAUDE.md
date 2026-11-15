@@ -28,7 +28,9 @@ Google Docs connector isn't available in the session, say so and list the change
 
 - Edge installers: merging a new `APP_VERSION` to main builds and publishes both editions automatically
   (`.github/workflows/edge-installer.yml`, release `edge-v<version>` with `Online-INSTALL.txt` and
-  `On-prem-INSTALL.txt`). Same version again: run the workflow by hand (workflow_dispatch).
+  `On-prem-INSTALL.txt`). Same version again: run the workflow by hand (workflow_dispatch). Each release also gets
+  copies without the version in the name and is marked "latest"; the admin portal's Installers section links to
+  `releases/latest/download/...`, so it always offers the newest published installers and install guides.
 - The admin portal reads the latest version from `edge/app/launcher.pyw` at build time (`next.config.mjs`).
 - Supabase migrations and edge functions are applied/deployed directly to production after tests; keep the
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).

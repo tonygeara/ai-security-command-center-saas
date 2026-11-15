@@ -4,9 +4,11 @@
 # The edge tests run first; nothing is published if they fail.
 #
 # Runs by itself when a new APP_VERSION reaches main (edge/app/launcher.pyw changes and no release for that
-# version exists yet), so each new version is built and published, and the admin portal (which reads the same
-# APP_VERSION) links to installers that exist. Also: GitHub → Actions → "Edge installer" → Run workflow, or
-# push a tag such as edge-v11.2.0.
+# version exists yet), so each new version is built and published. Each release also carries copies without the
+# version in the name (AI-Security-Command-Center-Setup.exe, AI-Command-Centre-Lebanon-Setup.exe) and is marked
+# "latest": the admin portal links to releases/latest/download/<those names>, so it always offers the newest
+# installers that were actually published (never a version whose build is still running or failed).
+# Also: GitHub → Actions → "Edge installer" → Run workflow, or push a tag such as edge-v11.2.0.
 # The version comes from APP_VERSION in edge/app/launcher.pyw; release notes from releases/V<major>.<minor>.md.
 # The on-prem USB package's offline AI-services file (ai-command-centre-images.tar, several GB) is not built here:
 # make it on a PC with Docker Desktop with edge\installer\build_onprem.ps1.
@@ -27,7 +29,7 @@ on:
   push:
     tags: ["edge-v*"]
     branches: [main]
-    paths: ["edge/app/launcher.pyw"]
+    paths: ["edge/app/launcher.pyw", ".github/workflows/edge-installer.yml"]
 
 permissions:
   contents: write  # to create the release
@@ -58,14 +60,16 @@ jobs:
           "number=$n" >> $env:GITHUB_OUTPUT
           "notes=releases/V$(($n -split '\.')[0..1] -join '.').md" >> $env:GITHUB_OUTPUT
           Write-Host "Version $v"
-          # A push to main that didn't change the version: nothing to build if both installers are out already.
+          # A push to main that didn't change the version: nothing to build if both installers (and their copies
+          # without the version, for the admin portal's links) are out already.
           $skip = 'false'
           if ('${{ github.event_name }}' -eq 'push' -and '${{ github.ref_type }}' -eq 'branch') {
             $ErrorActionPreference = 'Continue'
             $names = gh release view "edge-v$n" --json assets --jq '.assets[].name' 2>$null
             $ErrorActionPreference = 'Stop'
             $global:LASTEXITCODE = 0  # no release yet is not an error
-            if (($names -match '^AI-Security-Command-Center-Setup-') -and ($names -match '^AI-Command-Centre-Lebanon-Setup-')) {
+            if (($names -match '^AI-Security-Command-Center-Setup-') -and ($names -match '^AI-Command-Centre-Lebanon-Setup-') -and
+                ($names -contains 'AI-Security-Command-Center-Setup.exe') -and ($names -contains 'AI-Command-Centre-Lebanon-Setup.exe')) {
               $skip = 'true'; Write-Host "edge-v$n already has both installers: nothing to build."
             }
           }
@@ -180,6 +184,11 @@ jobs:
           # The online edition's install guide, for the clients (the on-prem one comes with its build).
           if ($files | Where-Object { $_ -like '*AI-Security-Command-Center-Setup-*' }) {
             Copy-Item edge/installer/saas-INSTALL.txt dist/Online-INSTALL.txt; $files += (Resolve-Path dist/Online-INSTALL.txt).Path }
+          # The same installers without the version in the name: the admin portal's fixed "latest release" links.
+          New-Item -ItemType Directory -Force dist/latest | Out-Null
+          foreach ($exe in @($files | Where-Object { $_ -match "-Setup-$([regex]::Escape($n))\.exe$" })) {
+            $plain = Join-Path dist/latest ((Split-Path $exe -Leaf) -replace "-$([regex]::Escape($n))\.exe$", '.exe')
+            Copy-Item $exe $plain; $files += (Resolve-Path $plain).Path }
           $ErrorActionPreference = 'Continue'
           gh release view $tag *> $null
           $exists = $LASTEXITCODE -eq 0
@@ -188,7 +197,7 @@ jobs:
             gh release upload $tag @files --clobber
           } else {
             $notes = "${{ needs.version.outputs.notes }}"
-            $ghArgs = @($tag) + $files + @('--title', "Edge Agent V$n", '--target', "${{ github.sha }}")
+            $ghArgs = @($tag) + $files + @('--title', "Edge Agent V$n", '--target', "${{ github.sha }}", '--latest')
             if (Test-Path $notes) { $ghArgs += @('--notes-file', $notes) } else { $ghArgs += @('--notes', 'Windows edge installers.') }
             gh release create @ghArgs
           }
