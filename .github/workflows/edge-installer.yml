@@ -177,6 +177,9 @@ jobs:
           $files += @(Get-ChildItem dist -Recurse -Filter INSTALL.txt | ForEach-Object {
             $to = Join-Path $_.DirectoryName 'On-prem-INSTALL.txt'; Copy-Item $_.FullName $to; $to })
           if (-not $files) { throw 'No installers were built.' }
+          # The online edition's install guide, for the clients (the on-prem one comes with its build).
+          if ($files | Where-Object { $_ -like '*AI-Security-Command-Center-Setup-*' }) {
+            Copy-Item edge/installer/saas-INSTALL.txt dist/Online-INSTALL.txt; $files += (Resolve-Path dist/Online-INSTALL.txt).Path }
           $ErrorActionPreference = 'Continue'
           gh release view $tag *> $null
           $exists = $LASTEXITCODE -eq 0
