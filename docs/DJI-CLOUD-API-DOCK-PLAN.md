@@ -101,14 +101,72 @@ exact result codes and camera indexes, and the stream reaching MediaMTX and Frig
 - Frigate camera per dock slot (same as Drone Link slots), so detection, tracking, evidence and incidents
   work unchanged. The dock's own outdoor camera can be added as a normal camera.
 
-### Phase 3: missions and patrols
-- Convert routes (manual routes, Smart patrol from `risk_patrol.py`, patrol schedules) into DJI
-  **WPML/KMZ** waylines, served to the dock over HTTP with a checksum; respect no-fly zones (`nofly.py`),
-  height/distance limits and `FLIGHT-SAFETY.md`.
-- `flighttask_prepare` → `flighttask_execute`, progress events, return home, cancel; preflight checks from
-  dock state (wind, rain, battery, cover, drone charged).
-- **Alarm response**: a verified alarm (`alarm_verify.py`) or an incident can launch the dock to that spot
-  ("fly to point"), stream video and return; confirm-first on Telegram unless auto-start is on.
+### Phase 3: patrols and alarm launches (the dock flies by itself)
+Status: **planned** (15 Nov), not started. The first phase where a drone takes off with nobody on site.
+
+**Principle: docks join the existing machinery, they don't get a copy of it.** Routes, Smart patrol, patrol
+schedules, drone responses (auto-send, handoff, Telegram/dashboard "send a drone") and drone-verified alarms already
+pick "a ready drone" through `_pick_drone` / `_route_problem` / `_drone_ready_problem`. A dock becomes one more kind of
+drone there, with its own readiness check and its own way of flying. Drone Link drones keep working unchanged.
+
+**How a dock flies a mission: DJI waylines, not live commands.** The PC turns the route into a DJI WPML/KMZ flight plan,
+the dock downloads it, and the drone flies it on its own. If the PC, Wi-Fi or internet drops mid-flight, the dock
+finishes or returns home by itself (DJI's own lost-link behaviour), which live "go to" commands can't guarantee.
+Live steering (fly-to-point, sticks) is Phase 4.
+
+#### Steps
+**3a. Fly a route from a dock (started by an operator)**
+- `dock_wayline.py`: route → KMZ (`wpmz/template.kml` + `wpmz/waylines.wpml`): stops, height, speed, pause
+  (hover action), gimbal down 45°, end action (return to the dock; "hover/land at the last stop" are not offered for
+  docks), lost-link action = return home. Height and speed limits from the route; detours round no-fly zones are added
+  as extra points, using `nofly.detour` as for Drone Link.
+- The KMZ is served on the LAN page server (port 8767) at a one-time secret URL with its MD5 fingerprint.
+- Services: `flighttask_prepare` (immediate task, return-home height, out-of-control action = return home) →
+  `flighttask_execute`; `flighttask_progress` events (current stop, %, status) shown on the dock card, the map
+  (drone position and route) and the existing route status; **Stop** = `return_home`; `flighttask_undo` for a
+  prepared task that hasn't started.
+- Video starts automatically when the drone leaves the dock (Phase 2), so the AI watches the patrol.
+- **Dock pre-flight check** (all must pass; the reasons are shown and logged):
+  dock online and registered, within the licence's dock count, `drone_dock` on, the dock's **Automatic flights**
+  switch on (see Safety), dock idle (not debugging or updating), cover OK, drone in the dock with battery ≥ the
+  response minimum, no active dock health *warning*, dock wind and rain sensors within limits, plus the existing
+  checks: weather forecast, crewed aircraft (ADS-B), no-fly zones and airspace, every stop within the dock's range.
+- Simulator: the simulated dock "flies" the KMZ (moves the drone along it, sends progress, returns and lands), so the
+  whole flow can be tried and tested without hardware.
+
+**3b. Scheduled patrols and Smart patrol from a dock**
+- A dock can be chosen as the drone of a patrol schedule, or "any ready drone" includes docks.
+- Same confirm-first rule as today: Telegram asks Start / Skip at patrol time unless "start without asking" is on.
+- The patrol report (what was seen, photos) goes to Telegram as for Drone Link patrols.
+
+**3c. Alarm launches**
+- Wherever the system can send a drone to a camera or a spot (auto-send on detections, camera-to-drone handoff,
+  Telegram, the dashboard, the Coverage page), a ready dock can be chosen; "nearest ready drone" counts docks by
+  their distance to the target.
+- The dock flies a one-stop mission to the camera's location (or the clicked spot) at the response height, hovers for
+  the response time with video on, then returns to the dock.
+- **Confirm-first by default**: Telegram asks "Launch Roof dock to Gate camera? Launch / Don't" (expires after a few
+  minutes). A per-site "launch docks without asking" switch (admins, off by default, with a warning) allows fully
+  automatic launches.
+- Drone-verified alarms (`alarm_verify.py`) work unchanged: the dock's camera AI can verify the intrusion.
+- Air traffic during a flight: the existing crewed-aircraft action becomes **return home** for docks.
+
+#### Safety and permissions
+- **Automatic flights switch per dock** (admins, off by default). Turning it on asks the admin to confirm that the
+  site has permission for automated flights (Lebanon: DGCA) and records who confirmed and when.
+- Range per dock (admins): default 500 m from the dock, like Drone Link; at most 2 km.
+- Every launch, stop, return and refusal is in the audit log; operators can launch and stop, admins change settings.
+- The pilot-on-site override stays with DJI: Pilot 2 on the RC Plus can always take control.
+
+#### To check with real hardware before using it for real
+- KMZ accepted by the dock (WPML version, drone enum values for the Matrice 4TD/3TD, heights relative to the dock).
+- Progress event fields, return-home behaviour, and how long prepare → take-off takes (target: under 60 s for alarms).
+- First flights: short route over open ground, with someone holding the RC Plus.
+
+#### Order and size
+3a first (it carries most of the work: KMZ, mission control, pre-flight, simulator flying), then 3c (alarm launches,
+the most valuable for security), then 3b (schedules, mostly wiring). Each step ends with tests, the docs updated and a
+commit; nothing flies on real hardware until you've done the first supervised test flight.
 
 ### Phase 4: live control from the dashboard
 - DRC (drone remote control) mode over MQTT: keyboard/stick control, gimbal, photo/record and fly-to-point
