@@ -1804,7 +1804,7 @@ def on_message(
         global recent_person_object_id, recent_vehicle_object_id
 
         camera = payload_camera(data)
-        if msg.topic == MQTT_EVENTS_TOPIC and camera and _is_drone_name(camera) and data.get("type") in ("new", "update"):
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and (_is_drone_name(camera) or _is_dock_name(camera)) and data.get("type") in ("new", "update"):
             after_seen = data.get("after") if isinstance(data.get("after"), dict) else {}
             if after_seen.get("false_positive") is False:
                 note_drone_detection(camera, str(after_seen.get("label") or "").lower(), str(after_seen.get("id") or ""))
@@ -1882,12 +1882,12 @@ def on_message(
                         identity_label=drone_label,
                     )
             return
-        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update", "end"):
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and not _is_dock_name(camera) and data.get("type") in ("new", "update", "end"):
             after_t = data.get("after") if isinstance(data.get("after"), dict) else {}
             PIPELINE.publish("track", camera=camera, type=data.get("type"), object_id=str(after_t.get("id") or ""),
                              label=str(after_t.get("label") or "").lower(), box=payload_box(after_t),
                              stationary=bool(after_t.get("stationary")), false_positive=after_t.get("false_positive"))
-        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and data.get("type") in ("new", "update"):
+        if msg.topic == MQTT_EVENTS_TOPIC and camera and not _is_drone_name(camera) and not _is_dock_name(camera) and data.get("type") in ("new", "update"):
             after_auto = data.get("after") if isinstance(data.get("after"), dict) else {}
             if after_auto.get("false_positive") is False:
                 PIPELINE.publish("detection", camera=camera, label=str(after_auto.get("label") or "").lower(),
@@ -5608,6 +5608,9 @@ def api_docks():
         x["range_m"] = int(st.get("range_m") or DOCK_RANGE_DEFAULT)
         x["alerts"] = [{"key": a["key"], "level": a["level"], "text": a["text"], "t": a["t"]} for a in dock_health.active(x["sn"])]
     snap["health_log"] = dock_health.recent(15)
+    now = time.time()
+    snap["launches"] = [{k: v for k, v in x.items() if k != "target"} for x in dock_launches.values() if x["expires"] > now]
+    snap["launch_without_asking"] = bool(dock_store.data.get("launch_without_asking"))
     return jsonify({"ok": True, "allowed": dock_allowed(), "cloud_ready": dock_store.cloud_ready(),
                     "broker": {"port": dock_lib.BROKER_PORT, "running": _port("127.0.0.1", dock_lib.BROKER_PORT),
                                "connected": bool(dock_mqtt and dock_mqtt.connected)},
@@ -5622,6 +5625,10 @@ def api_docks_setup():
         data = request.get_json(silent=True) or {}
         if data.get("new_link"):
             dock_store.new_bind_token()
+        elif "launch_without_asking" in data:
+            dock_store.data["launch_without_asking"] = bool(data["launch_without_asking"])
+            dock_store.save()
+            audit_record("dock: launch without asking " + ("on" if data["launch_without_asking"] else "off"), target="DJI Docks")
         else:
             fields = {k: data.get(k) for k in ("app_id", "app_key", "app_license") if data.get(k) is not None}
             if not fields:
@@ -5804,9 +5811,9 @@ def dock_flight_problem(sn, points=None, loop=False):
     return flight_conditions(home)[0]  # weather forecast and crewed aircraft, as for every automatic flight
 
 
-def dock_fly_route(sn, name, by="dashboard"):
-    """Fly a saved route from a dock: pre-flight check, flight plan, start. {"ok", "error"|"message"}."""
-    route = load_routes().get(name or "")
+def dock_fly_route(sn, name, by="dashboard", route=None):
+    """Fly a saved route (or the route given) from a dock: pre-flight check, flight plan, start. {"ok", "error"|"message"}."""
+    route = route or load_routes().get(name or "")
     if not route:
         return {"ok": False, "error": f"No saved route named “{name}”."}
     route = _clean_route(route)
@@ -5833,8 +5840,9 @@ def dock_fly_route(sn, name, by="dashboard"):
         return {"ok": False, "error": msg}
     audit_record("dock: route started", target=sn, detail={"name": dname, "route": name, "stops": len(route["points"]), "by": by,
                                                            "flight_id": flight_id})
-    queue_telegram_alert("dock_mission", f"🛫 {dname}: route {name} started ({len(route['points'])} stops).",
-                         f"dock:{sn}:mission:{flight_id}", snapshot_bytes=b"")
+    if not name.startswith("Alarm: "):  # an alarm launch reports itself
+        queue_telegram_alert("dock_mission", f"🛫 {dname}: route {name} started ({len(route['points'])} stops).",
+                             f"dock:{sn}:mission:{flight_id}", snapshot_bytes=b"")
     warnings = flight_conditions((x["lat"], x["lon"]))[1]
     return {"ok": True, "flight_id": flight_id,
             "message": f"{dname}: route {name} started." + "".join(f" ⚠ {w}" for w in warnings)}
@@ -5845,6 +5853,68 @@ def _dock_refusal(sn, what, why, by):
 
 
 _dock_mission_seen = {}  # flight_id -> what has been done for it (video started, end reported)
+_dock_arrivals = {}      # dock slot -> (flight_id, time the drone reached its alarm target)
+dock_launches = {}       # launch id -> a launch waiting for a yes (Telegram or the Drone page)
+DOCK_LAUNCH_EXPIRE_S = 300
+DOCK_ARRIVED_M = 15
+
+
+def dock_launch(sn, camera, loc, by="dashboard", ask=None):
+    """Send a dock's drone to a camera or spot: pre-flight check, then ask first (Telegram and the Drone page) unless
+    "launch without asking" is on. {"ok", "dock", "drone", "pending"|"launched", "message"|"error"}."""
+    d = dock_store.docks().get(sn)
+    if not d:
+        return {"ok": False, "error": "Unknown dock."}
+    problem = dock_flight_problem(sn, [loc])
+    if problem:
+        _dock_refusal(sn, f"alarm launch to {camera}", problem, by)
+        return {"ok": False, "dock": sn, "error": f"{d['name']} can't launch: {problem}"}
+    if ask is None:
+        ask = not dock_store.data.get("launch_without_asking")
+    if not ask:
+        return _dock_launch_now(sn, camera, loc, by)
+    now = time.time()
+    for k in [k for k, v in dock_launches.items() if v["expires"] < now]:
+        dock_launches.pop(k, None)
+    lid = uuid.uuid4().hex[:10]
+    dock_launches[lid] = {"id": lid, "sn": sn, "name": d["name"], "camera": camera, "target": loc, "by": by,
+                          "asked": now, "expires": now + DOCK_LAUNCH_EXPIRE_S}
+    audit_record("dock: launch asked", target=sn, detail={"camera": camera, "by": by, "launch": lid})
+    if telegram_ready():
+        x = dock_hub.summary(sn)
+        far = f" ({int(_distance_m(x['lat'], x['lon'], loc['lat'], loc['lon']))} m away)" if x["lat"] else ""
+        send_telegram(f"🚨 Launch {d['name']}{far} to {camera}? Reason: {by}. Its drone takes off by itself, looks, and comes back. "
+                      f"(This question expires in {DOCK_LAUNCH_EXPIRE_S // 60} min.)", _camera_snapshot(camera),
+                      [[{"text": "🚁 Launch", "callback_data": f"dlaunch:yes:{lid}"}, {"text": "✋ Don't", "callback_data": f"dlaunch:no:{lid}"}]])
+    return {"ok": True, "pending": True, "launch": lid, "dock": sn, "drone": d["slot"],
+            "message": f"Asked whether to launch {d['name']} to {camera} (Telegram and the Drone page)."}
+
+
+def answer_dock_launch(lid, yes, who):
+    req = dock_launches.pop(lid, None)
+    if not req or req["expires"] < time.time():
+        return {"ok": False, "error": "That launch request has expired or was already answered."}
+    if not yes:
+        audit_record("dock: launch declined", target=req["sn"], detail={"camera": req["camera"], "by": who, "launch": lid})
+        return {"ok": True, "dock": req["sn"], "message": f"{req['name']} not launched."}
+    return _dock_launch_now(req["sn"], req["camera"], req["target"], f"{req['by']}, confirmed by {who}")
+
+
+def _dock_launch_now(sn, camera, loc, by):
+    cfg = load_response_settings()
+    route = {"points": [loc], "alt": cfg["altitude_m"], "speed": cfg["speed_ms"], "pause": cfg["hover_seconds"], "loop": False}
+    r = dock_fly_route(sn, f"Alarm: {camera}", by=by, route=route)
+    d = dock_store.docks()[sn]
+    if not r["ok"]:
+        return {**r, "dock": sn}
+    PIPELINE.publish("dispatch", camera=camera, drone=d["slot"], drone_label=d["name"], by=by, lat=loc["lat"], lon=loc["lon"])
+    with dock_hub.lock:
+        m = (dock_hub.state.get(sn) or {}).get("mission")
+        if m is not None:
+            m.update(camera=camera, target=loc, kind="alarm")
+    return {"ok": True, "launched": True, "dock": sn, "drone": d["slot"],
+            "message": f"{d['name']} launched to {camera}: it flies there at {int(cfg['altitude_m'])} m, looks for "
+                       f"{int(cfg['hover_seconds'])} s with video on, then returns to the dock."}
 
 
 def dock_missions_tick():
@@ -5860,6 +5930,14 @@ def dock_missions_tick():
             ok, msg, _ = dock_hub.start_video(sn, f"rtmp://{_lan_ip()}:1935/{d['slot']}", "drone")
             if not ok:
                 print(f"{d['name']}: video not started: {msg}")
+        tgt = (dock_hub.state.get(sn) or {}).get("mission", {}).get("target")
+        if m["active"] and tgt and x["drone_lat"] and "arrived" not in seen and (x["drone_height"] or 0) > 5 and \
+                _distance_m(x["drone_lat"], x["drone_lon"], tgt["lat"], tgt["lon"]) <= DOCK_ARRIVED_M:
+            seen.add("arrived")
+            _dock_arrivals[d["slot"]] = (m["flight_id"], time.time())
+            cam = (dock_hub.state.get(sn) or {}).get("mission", {}).get("camera")
+            queue_telegram_alert("dock_mission", f"🛰 {d['name']} is over {cam}. Its camera and the AI are watching.",
+                                 f"dock:{sn}:arrived:{m['flight_id']}", snapshot_bytes=_drone_snapshot(d["slot"]) or b"")
         if not m["active"] and "end" not in seen:
             seen.add("end")
             how = {"ok": "finished and is back in the dock", "canceled": "was called back and is back in the dock"}.get(
@@ -5890,6 +5968,14 @@ def api_dock_mission(sn):
         audit_record("dock: return to dock", target=sn, detail={"route": m["name"], "by": by}, result="ok" if ok else "failed")
         return jsonify({"ok": ok, "error": msg} if not ok else {"ok": True, "message": "Returning to the dock."}), (200 if ok else 409)
     return jsonify({"ok": False, "error": "Unknown action."}), 400
+
+
+@app.route("/api/docks/launches/<lid>", methods=["POST"])
+def api_dock_launch_answer(lid):
+    """Operators: answer a launch question from the Drone page. {"launch": true|false}."""
+    who = (getattr(g, "user", None) or {}).get("username") or "the dashboard"
+    r = answer_dock_launch(lid, bool((request.get_json(silent=True) or {}).get("launch")), who)
+    return jsonify(r), (200 if r["ok"] else 409)
 
 
 @app.route("/api/docks/<sn>/settings", methods=["POST"])
@@ -6193,7 +6279,22 @@ def _nearest_ready(camera):
 
 
 def dispatch_drone(camera, by="dashboard", drone=None, target=None):
-    """Send a drone to a camera (or, with target=(lat, lon), to a spot near that camera)."""
+    """Send a drone to a camera (or, with target=(lat, lon), to a spot near that camera): the nearest ready Drone Link
+    drone or DJI Dock. A dock is launched with a one-stop flight plan, after a yes on Telegram unless set otherwise."""
+    loc0 = {"lat": float(target[0]), "lon": float(target[1])} if target else load_response_settings()["camera_locations"].get(camera)
+    if drone and _is_dock_name(drone):
+        sn = _dock_sn(drone)
+        if not sn:
+            return {"ok": False, "error": "Unknown dock."}
+        if not loc0:
+            return {"ok": False, "error": f"Set {camera}'s place on the map first."}
+        return dock_launch(sn, camera, loc0, by)
+    if not drone and loc0 and dock_allowed():
+        sn, link_err = _dock_nearer(camera, loc0)
+        if sn:
+            return dock_launch(sn, camera, loc0, by)
+        if link_err:  # no Drone Link drone either: say why for both
+            return {"ok": False, "error": link_err}
     if drone_response["active"]:
         return {"ok": False, "error": f"{drone_label(drone_response['drone'])} is already responding to {drone_response['camera']}."}
     slot, problem = _pick_drone(lambda d: _drone_ready_problem(camera, d), drone) if drone else _nearest_ready(camera)
@@ -6240,6 +6341,44 @@ def dispatch_drone(camera, by="dashboard", drone=None, target=None):
     _drone_event(f"Drone response to {camera} started ({by})", slot)
     PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by, lat=loc["lat"], lon=loc["lon"])
     return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
+
+
+def _dock_sn(slot):
+    return next((sn for sn, d in dock_store.docks().items() if d.get("slot") == slot), None)
+
+
+def _ready_docks(loc):
+    """[(distance m, sn)] of docks that could launch to loc now, nearest first, and the first dock's problem otherwise."""
+    ready, problems = [], []
+    for sn, d in dock_store.docks().items():
+        problem = dock_flight_problem(sn, [loc])
+        x = dock_hub.summary(sn)
+        if problem:
+            problems.append(f"{d['name']}: {problem}")
+        elif x["lat"]:
+            ready.append((_distance_m(x["lat"], x["lon"], loc["lat"], loc["lon"]), sn))
+    return sorted(ready), problems
+
+
+def _dock_nearer(camera, loc):
+    """(dock sn to launch, '') when a ready dock is nearer than any ready Drone Link drone (or none is ready);
+    (None, '') to use a Drone Link drone; (None, why) when nothing at all is ready."""
+    ready, dock_problems = _ready_docks(loc)
+    if drone_response["active"]:
+        slot, problem = None, f"{drone_label(drone_response['drone'])} is already responding to {drone_response['camera']}."
+    else:
+        slot, problem = _nearest_ready(camera) if camera in load_response_settings()["camera_locations"] else (None, "")
+    if ready:
+        tel = get_link(slot)["telemetry"] if slot else {}
+        link_far = _distance_m(tel["lat"], tel["lon"], loc["lat"], loc["lon"]) if slot and tel.get("lat") else math.inf
+        if ready[0][0] <= link_far:
+            return ready[0][1], ""
+        return None, ""
+    if slot:
+        return None, ""
+    if dock_problems:
+        return None, (problem + " " if problem else "No drone is ready. ") + "Docks: " + " ".join(dock_problems)
+    return None, ""
 
 
 def send_drone_to_point(lat, lon, by="dashboard", drone=None):
@@ -6304,6 +6443,10 @@ HANDOFF.attach(PIPELINE)
 
 # ---------------- Drone-verified alarms (alarm_verify.py) ----------------
 def _alarm_arrived(slot):
+    if _is_dock_name(slot):
+        a = _dock_arrivals.get(slot)
+        m = dock_hub.mission(_dock_sn(slot) or "") or {}
+        return a[1] if a and m.get("active") and m.get("flight_id") == a[0] else 0
     r = drone_response
     return r.get("arrived") or 0 if r.get("active") and r.get("drone") == slot and r.get("phase") == "hovering" else 0
 
@@ -6330,7 +6473,8 @@ def _alarm_zone(camera):
 ALARMS = _alarm_verify_mod.Verifier(
     settings=lambda: {k: load_response_settings().get(k, v) for k, v in _alarm_verify_mod.DEFAULTS.items()},
     arrived=_alarm_arrived,
-    drone_active=lambda slot: bool(drone_response.get("active") and drone_response.get("drone") == slot),
+    drone_active=lambda slot: bool(drone_response.get("active") and drone_response.get("drone") == slot)
+    or (_is_dock_name(slot) and bool((dock_hub.mission(_dock_sn(slot) or "") or {}).get("active"))),
     snapshots=lambda camera, slot: (_camera_snapshot(camera), _drone_snapshot(slot)),
     publish=PIPELINE.publish,
     incident_note=lambda camera, text, sev, data: INCIDENTS.add(camera, time.time(), "alarm", text, sev, data),
@@ -6382,7 +6526,7 @@ def auto_dispatch_check(camera, label, object_id="", stationary=False):
     """A camera saw something: send the nearest ready drone if auto-dispatch is on and it is inside the night window."""
     try:
         cfg = load_response_settings()
-        if not cfg["auto_dispatch"] or not drone_control_allowed() or stationary:
+        if not cfg["auto_dispatch"] or not (drone_control_allowed() or dock_allowed()) or stationary:
             return None
         vehicle = label in ("car", "motorcycle", "truck", "bus")
         if not ((label == "person" and cfg["auto_person"]) or (vehicle and cfg["auto_vehicle"])):
@@ -6398,6 +6542,8 @@ def auto_dispatch_check(camera, label, object_id="", stationary=False):
             _auto_seen.add(object_id)
         what = "Person" if label == "person" else "Vehicle"
         r = dispatch_drone(camera, by=f"auto: {what.lower()} seen")
+        if r.get("dock"):  # a dock: it asked on Telegram, or says itself that it launched
+            return r
         if r["ok"]:
             tel, loc = get_link(r["drone"])["telemetry"], cfg["camera_locations"][camera]
             far = f", {int(_distance_m(tel['lat'], tel['lon'], loc['lat'], loc['lon']))} m away" if tel.get("lat") else ""
@@ -6787,11 +6933,27 @@ def _handle_command(text):
 def _handle_callback(data):
     if data.startswith("drone:"):
         cam = data.split(":", 1)[1]
+        loc = load_response_settings()["camera_locations"].get(cam)
         problem = _drone_ready_problem(cam)
+        if problem and loc and dock_allowed() and _ready_docks(loc)[0]:
+            problem = ""  # a dock can go
         if problem:
             return send_telegram(f"⚠️ Can't send the drone: {problem}")
         send_telegram(f"Send the drone to {cam}? It will take off if needed. Keep it in sight.",
                       buttons=[[{"text": f"✅ Yes, send to {cam}", "callback_data": f"go:{cam}"[:64]}, {"text": "Cancel", "callback_data": "cancel"}]])
+    elif data.startswith("dlaunch:"):
+        _, answer, lid = (data.split(":") + ["", ""])[:3]
+        r = answer_dock_launch(lid, answer == "yes", "Telegram")
+        send_telegram(("🚁 " + r["message"]) if r["ok"] else f"⚠️ {r['error']}",
+                      buttons=[[{"text": "🏠 Back to the dock", "callback_data": f"dhome:{r['dock']}"[:64]}]] if r.get("launched") else None)
+    elif data.startswith("dhome:"):
+        sn = data.split(":", 1)[1]
+        m = dock_hub.mission(sn)
+        if not m or not m["active"]:
+            return send_telegram("That dock's drone isn't flying.")
+        ok, msg = dock_hub.return_home(sn)
+        audit_record("dock: return to dock", target=sn, detail={"by": "Telegram"}, result="ok" if ok else "failed")
+        send_telegram("🏠 Returning to the dock." if ok else f"⚠️ {msg}")
     elif data.startswith("go:"):
         r = dispatch_drone(data.split(":", 1)[1], by="Telegram")
         send_telegram(("🚁 " + r["message"]) if r["ok"] else f"⚠️ {r['error']}")

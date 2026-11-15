@@ -61,6 +61,8 @@ BODY = r"""
 .dk-video .dk-vhead{display:flex;align-items:center;gap:8px;padding:6px 10px;background:#05131d;color:#9edfff;font:bold 12px Arial}
 .dk-video .dk-vbody{aspect-ratio:16/9;position:relative}
 .dk-video .dk-sim{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#ffcf7a;font:bold 12px Arial;letter-spacing:1px;text-align:center;padding:10px}
+.dk-launch{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 10px;padding:10px 12px;border:1px solid #a3303f;border-radius:5px;background:rgba(125,12,28,.22);color:#ffd5da}
+.dk-launch b{color:#fff}
 .dk-card.flash{box-shadow:0 0 0 2px #ffb23c}
 .dk-mark{width:22px;height:22px;border:2px solid #ffb23c;border-radius:4px;background:rgba(3,16,26,.9);color:#ffcf7a;font:bold 12px/18px Arial;text-align:center}
 .dk-mark.off{border-color:#53636d;color:#8aa0ad}
@@ -229,6 +231,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 </div></div>
 <section class="panel" id="dockPanel" style="margin-top:16px"><div class="panel-head"><div class="panel-title">🛬 DJI Docks</div><div class="live" id="dockState">…</div></div>
 <div class="panel-body"><div class="muted" style="margin-bottom:10px">A dock launches its drone with no pilot on site (DJI Cloud API). It connects to this PC over the site network; once it shows under <b>Found</b>, register it. With <b>Automatic flights</b> on (admins), operators can fly a saved route from the dock: it takes off, flies the route with video on, and lands back in the dock.</div>
+<div id="dockLaunches"></div>
 <div class="dk-list" id="dockList"></div>
 <div id="dockMsg" class="hud-msg"></div>
 <div class="dk-videos" id="dockVideos"></div>
@@ -244,6 +247,8 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div class="muted">Link: <code id="dkLink">…</code></div><div class="muted" style="margin-top:6px">Dock broker: <code id="dkBroker">…</code></div>
 <div class="muted" style="margin-top:6px">Keep this link private: it carries the dock password. Making a new link stops the old one working (docks already connected stay connected).</div>
 <div class="actions" style="margin-top:10px"><button class="hud-btn danger" onclick="dockNewLink()">New link</button></div></div></div>
+<div class="muted" style="margin-top:14px"><b>3. Alarm launches</b>: when a drone is sent to a camera (automatic dispatch, handoff, Telegram, the dashboard), the nearest ready dock can go. By default the system asks first (Telegram and this page, “Launch / Don't”, expires after 5 min).</div>
+<label class="muted" style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="dkNoAsk" onchange="dockNoAsk(this)"> Launch docks <b>without asking</b> (the drone takes off by itself as soon as an alarm needs it)</label>
 <div class="muted" style="margin-top:14px"><b>No dock yet?</b> Add a simulated Dock 3 with a Matrice 4TD to try the steps (it appears under Found at the map's centre).</div>
 <div class="actions" style="margin-top:8px"><button class="hud-btn" id="dkSimBtn" onclick="dockSimulate()">+ Simulated dock</button></div>
 </details></div></section>
@@ -576,6 +581,9 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   const hl=d.health_log||[];$('dockHealth').innerHTML=hl.length?'<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">HEALTH</b>'+hl.map(a=>`<div class="${a.active?'on':''}"><small>${new Date(a.t*1000).toLocaleString()}</small>${a.active?(a.level==='warning'?'⚠ ':'● '):'✓ '}${esc(a.text)}</div>`).join(''):'';
   if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
   if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed;
+  if($('dkNoAsk'))$('dkNoAsk').checked=!!d.launch_without_asking;
+  $('dockLaunches').innerHTML=(d.launches||[]).map(l=>`<div class="dk-launch"><span>🚨 Launch <b>${esc(l.name)}</b> to <b>${esc(l.camera)}</b>?</span><span class="muted">${esc(l.by)} · expires ${new Date(l.expires*1000).toLocaleTimeString()}</span>
+    <button class="hud-btn danger" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,true)">🚁 Launch</button><button class="hud-btn" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,false)">✋ Don't</button></div>`).join('');
   dockData=d.docks;drawDockFleet();drawDockMap();drawDockVideos();drawDockMissions()}catch(e){}}
 let dkRoutes=[],dkRouteSel={},dkMissionLines={};
 async function loadDockRoutes(){try{const d=await fetch('/api/routes',{cache:'no-store'}).then(r=>r.json());if(d.ok)dkRoutes=Object.keys(d.routes||{}).sort()}catch(e){}}
@@ -584,6 +592,9 @@ async function dockMission(sn,action){const name=action==='fly'?(dkRouteSel[sn]|
     if(!confirm(`${x.name||'The dock'} will take off by itself and fly route “${name}”, then return to the dock.\n\nThe area must be clear and the flight permitted. Continue?`))return}
   dkMsg(action==='fly'?'Checking and sending the flight plan to the dock…':'Calling the drone back…');
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/mission',{action,route:name});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockLaunch(id,yes){const d=await dkPost('/api/docks/launches/'+encodeURIComponent(id),{launch:yes});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockNoAsk(el){if(el.checked&&!confirm('Launch docks without asking?\n\nWhen an alarm needs a drone, a ready dock\'s drone will take off by itself with nobody confirming. Only for sites with permission for automated flights and a safe area.')){el.checked=false;return}
+  const d=await dkPost('/api/docks/setup',{launch_without_asking:el.checked});dkMsg(d.ok?(el.checked?'Docks launch without asking.':'Docks ask before launching.'):d.error,d.ok)}
 async function dockAuto(sn,on){const x=dockData.find(d=>d.sn===sn)||{};let body={auto_flights:!on};
   if(!on){if(!confirm(`Allow ${x.name||'this dock'}'s drone to take off by itself (routes now; patrols and alarm launches later)?\n\nOnly switch this on when the site has permission for automated flights (Lebanon: DGCA) and the area is safe. Your name and the time are recorded.`))return;body.confirm=true}
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/settings',body);dkMsg(d.ok?`Automatic flights ${d.auto_flights?'on':'off'}.`:d.error,d.ok);loadDocks()}

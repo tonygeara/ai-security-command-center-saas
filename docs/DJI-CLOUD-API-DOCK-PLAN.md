@@ -102,7 +102,7 @@ exact result codes and camera indexes, and the stream reaching MediaMTX and Frig
   work unchanged. The dock's own outdoor camera can be added as a normal camera.
 
 ### Phase 3: patrols and alarm launches (the dock flies by itself)
-Status: **3a built** (15 Nov, not merged yet); 3c and 3b planned. The first phase where a drone takes off with nobody
+Status: **3a and 3c built** (15 Nov, not merged yet); 3b planned. The first phase where a drone takes off with nobody
 on site.
 
 3a as built: `edge/app/dock_wayline.py` (route → KMZ: detours round no-fly zones, height 20-120 m above the dock, speed
@@ -145,6 +145,15 @@ Live steering (fly-to-point, sticks) is Phase 4.
   checks: weather forecast, crewed aircraft (ADS-B), no-fly zones and airspace, every stop within the dock's range.
 - Simulator: the simulated dock "flies" the KMZ (moves the drone along it, sends progress, returns and lands), so the
   whole flow can be tried and tested without hardware.
+
+3c as built: `dispatch_drone` (used by auto-dispatch, handoff, Telegram, the dashboard, Coverage page) picks the nearest
+ready responder: a Drone Link drone, or a dock that passes `dock_flight_problem` for the target (distance from the
+dock). `dock_launch` asks first (Telegram "🚁 Launch / ✋ Don't" + the Drone page, expires in 5 min) unless the admin
+setting "launch docks without asking" is on; `_dock_launch_now` flies a one-stop flight plan at the response height,
+hovering for the response time. The "dispatch" event goes to the pipeline as for drones, so drone-verified alarms work:
+the dock's arrival over the target (within 15 m) is its arrival time and its camera's detections are drone detections
+(dock cameras no longer feed the fixed-camera pipeline, so they can't trigger auto-dispatch). Telegram: "is over <camera>"
+and a "🏠 Back to the dock" button.
 
 **3b. Scheduled patrols and Smart patrol from a dock**
 - A dock can be chosen as the drone of a patrol schedule, or "any ready drone" includes docks.

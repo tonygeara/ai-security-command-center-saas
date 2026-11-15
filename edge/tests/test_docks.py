@@ -687,3 +687,105 @@ def test_aircraft_sends_dock_home(flying_dock, monkeypatch):
     assert d.dock_hub.mission(sn)["status"] == "returning"
     sim.speedup = 40.0
     assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+# ---------- Phase 3c: alarm launches ----------
+
+@pytest.fixture
+def alarm_dock(flying_dock, monkeypatch):
+    d, client, sn, sim, sent = flying_dock
+    asked = []
+    monkeypatch.setattr(d, "telegram_ready", lambda config=None: True)
+    monkeypatch.setattr(d, "send_telegram", lambda text, photo=None, buttons=None: asked.append((text, buttons)) or {"ok": True})
+    monkeypatch.setattr(d, "_camera_snapshot", lambda cam: None)
+    monkeypatch.setattr(d, "_drone_snapshot", lambda slot=None: None)
+    cam = {"lat": 45.5048 + 0.0004, "lon": -75.6636}  # 44 m north of the dock
+    client.post("/api/response/settings", json={"camera_locations": {"gate": cam}, "min_battery": 20, "hover_seconds": 10,
+                                                "altitude_m": 30})
+    yield d, client, sn, sim, sent, asked, cam
+    d.dock_launches.clear()
+    d.dock_store.data["launch_without_asking"] = False
+    client.post("/api/response/settings", json={"camera_locations": {}})
+
+
+def test_alarm_launch_asks_then_flies(alarm_dock):
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    slot = d.dock_store.docks()[sn]["slot"]
+    r = d.dispatch_drone("gate", by="auto: person seen")  # no Drone Link drone is ready: the dock is nearest
+    assert r["ok"] and r["pending"] and r["dock"] == sn and r["drone"] == slot
+    text, buttons = asked[-1]
+    assert "Launch Patrol dock (44 m away) to gate?" in text and "auto: person seen" in text
+    assert buttons[0][0]["callback_data"] == f"dlaunch:yes:{r['launch']}"
+    assert not d.dock_hub.mission(sn)  # nothing flies before the yes
+    page = client.get("/api/docks").get_json()
+    assert page["launches"][0]["camera"] == "gate" and "target" not in page["launches"][0]
+    d._handle_callback(f"dlaunch:yes:{r['launch']}")  # "Launch" pressed on Telegram
+    assert asked[-1][0].startswith("🚁 Patrol dock launched to gate") and asked[-1][1][0][0]["callback_data"] == f"dhome:{sn}"
+    m = d.dock_hub.mission(sn)
+    assert m["active"] and m["name"] == "Alarm: gate" and len(m["points"]) == 1
+    assert client.post(f"/api/docks/launches/{r['launch']}", json={"launch": True}).status_code == 409  # answered already
+
+    def arrived():
+        d.dock_missions_tick()
+        return d._alarm_arrived(slot)
+    assert wait_until(arrived, 15)  # over the camera: alarm verification can use the dock's camera
+    assert any("is over gate" in t for t in sent)
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+    assert d._alarm_arrived(slot) == 0
+
+
+def test_alarm_launch_declined_expired_or_without_asking(alarm_dock):
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    r = d.dispatch_drone("gate", by="dashboard")
+    assert client.post(f"/api/docks/launches/{r['launch']}", json={"launch": False}).get_json()["message"] == "Patrol dock not launched."
+    assert not d.dock_hub.mission(sn)
+    r = d.dispatch_drone("gate", by="dashboard")
+    d.dock_launches[r["launch"]]["expires"] = time.time() - 1
+    assert "expired" in client.post(f"/api/docks/launches/{r['launch']}", json={"launch": True}).get_json()["error"]
+    assert client.post("/api/docks/setup", json={"launch_without_asking": True}).get_json()["ok"]
+    r = d.send_drone_to_point(cam["lat"], cam["lon"] + 0.0002, by="Coverage page")  # a spot, not a camera
+    assert r["ok"] and r["launched"] and d.dock_hub.mission(sn)["active"]
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+    import users
+    assert users.allowed("operator", "POST", "/api/docks/launches/abc123") and not users.allowed("viewer", "POST", "/api/docks/launches/abc123")
+
+
+def test_alarm_launch_refused_says_why(alarm_dock):
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    client.post(f"/api/docks/{sn}/settings", json={"auto_flights": False})
+    r = d.dispatch_drone("gate", by="dashboard")
+    assert not r["ok"] and "Docks: Patrol dock: Automatic flights are off" in r["error"]
+    r = d.dispatch_drone("gate", by="dashboard", drone=d.dock_store.docks()[sn]["slot"])  # this dock, asked for by name
+    assert not r["ok"] and "Patrol dock can't launch: Automatic flights are off" in r["error"]
+
+
+def test_nearest_of_drone_and_dock(alarm_dock, monkeypatch):
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    link = d.get_link("drone")
+    monkeypatch.setattr(d, "_nearest_ready", lambda camera: ("drone", ""))
+    monkeypatch.setitem(link, "telemetry", {"lat": cam["lat"] + 0.0001, "lon": cam["lon"]})  # 11 m from the camera
+    assert d._dock_nearer("gate", cam) == (None, "")  # the Drone Link drone is nearer
+    monkeypatch.setitem(link, "telemetry", {"lat": cam["lat"] + 0.01, "lon": cam["lon"]})  # 1.1 km away
+    assert d._dock_nearer("gate", cam) == (sn, "")
+
+
+def test_dock_camera_verifies_alarm(alarm_dock):
+    """Verified alarms: the dock arrives, its camera's AI sees a person, the alarm is verified."""
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    slot = d.dock_store.docks()[sn]["slot"]
+    d.ALARMS.items.clear()
+    d.dock_store.data["launch_without_asking"] = True
+    old = d.load_response_settings().get("verified_alarms")
+    client.post("/api/alarms/settings", json={"verified_alarms": True})
+    try:
+        r = d.dispatch_drone("gate", by="auto: person seen")
+        assert r["ok"] and r["launched"]
+        assert wait_until(lambda: [v for v in d.ALARMS.items.values() if v["drone"] == slot], 5)
+        assert wait_until(lambda: (d.dock_missions_tick(), d._alarm_arrived(slot))[1], 15)
+        d.note_drone_detection(slot, "person", "obj-1")
+        assert wait_until(lambda: [v for v in d.ALARMS.items.values() if v["drone"] == slot and v["status"] == "verified"], 5)
+    finally:
+        client.post("/api/alarms/settings", json={"verified_alarms": bool(old)})
+        client.post(f"/api/docks/{sn}/mission", json={"action": "stop"})
+        wait_until(lambda: not (d.dock_hub.mission(sn) or {}).get("active"), 20)
