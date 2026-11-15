@@ -789,3 +789,67 @@ def test_dock_camera_verifies_alarm(alarm_dock):
         client.post("/api/alarms/settings", json={"verified_alarms": bool(old)})
         client.post(f"/api/docks/{sn}/mission", json={"action": "stop"})
         wait_until(lambda: not (d.dock_hub.mission(sn) or {}).get("active"), 20)
+
+
+# ---------- Phase 3b: scheduled patrols from a dock ----------
+
+@pytest.fixture
+def patrol_dock(alarm_dock, monkeypatch):
+    d, client, sn, sim, sent, asked, cam = alarm_dock
+    d.patrol_state["pending"].clear()
+    d.patrol_state["fired"].clear()
+    yield d, client, sn, sim, sent, asked
+    client.post("/api/response/settings", json={"patrol_schedules": []})
+    d.patrol_state["pending"].clear()
+    d.patrol_state["fired"].clear()
+
+
+def _due(d, client, drone, auto_start=False):
+    now = time.time()
+    lt = time.localtime(now)
+    client.post("/api/response/settings", json={"patrol_schedules": [{"id": "dk1", "route": "Dock loop", "time": time.strftime("%H:%M", lt),
+                                                                     "days": [lt.tm_wday], "enabled": True, "auto_start": auto_start, "drone": drone}]})
+    assert d.load_response_settings()["patrol_schedules"][0]["drone"] == drone  # a dock slot is kept
+    return now
+
+
+def test_scheduled_patrol_from_a_dock_asks_then_flies(patrol_dock):
+    d, client, sn, sim, sent, asked = patrol_dock
+    slot = d.dock_store.docks()[sn]["slot"]
+    now = _due(d, client, slot)
+    d.patrol_scheduler_tick(now)
+    text, buttons = asked[-1]
+    assert "Patrol “Dock loop” is due now. Patrol dock: drone battery" in text and "flies by itself" in text
+    assert buttons[0][0]["callback_data"] == "patrolgo:dk1" and not d.dock_hub.mission(sn)
+    d.patrol_scheduler_tick(now)  # once a day only
+    assert len([a for a in asked if "is due now" in a[0]]) == 1
+    d._handle_callback("patrolgo:dk1")
+    assert d.dock_hub.mission(sn)["active"] and d.dock_hub.mission(sn)["name"] == "Dock loop"
+    assert any("route Dock loop started" in t for t in sent)
+    d.note_drone_detection(slot, "person", "p-1")
+    d.note_drone_detection(slot, "car", "c-1")
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+    d.dock_missions_tick()
+    end = [t for t in sent if "route Dock loop finished" in t][-1]
+    assert "Seen: 1 person, 1 vehicle" in end
+
+
+def test_scheduled_patrol_auto_start_and_any_drone(patrol_dock):
+    d, client, sn, sim, sent, asked = patrol_dock
+    now = _due(d, client, "", auto_start=True)  # "any ready drone or dock": no Drone Link drone is ready
+    d.patrol_scheduler_tick(now)
+    assert d.dock_hub.mission(sn)["active"] and not any("is due now" in a[0] for a in asked)
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+def test_scheduled_patrol_skipped_with_the_reason(patrol_dock):
+    d, client, sn, sim, sent, asked = patrol_dock
+    client.post(f"/api/docks/{sn}/settings", json={"auto_flights": False})
+    now = _due(d, client, d.dock_store.docks()[sn]["slot"])
+    d.patrol_scheduler_tick(now)
+    assert "skipped: Patrol dock: Automatic flights are off" in asked[-1][0]
+    client.post("/api/response/settings", json={"patrol_schedules": [{"id": "dk2", "route": "Dock loop", "time": "03:00", "days": [0],
+                                                                     "drone": "dock99"}]})
+    r = d.start_scheduled_patrol("dk2", "test")
+    assert not r["ok"] and "no longer registered" in r["error"]

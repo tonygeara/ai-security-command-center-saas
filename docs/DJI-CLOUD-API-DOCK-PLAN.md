@@ -102,7 +102,7 @@ exact result codes and camera indexes, and the stream reaching MediaMTX and Frig
   work unchanged. The dock's own outdoor camera can be added as a normal camera.
 
 ### Phase 3: patrols and alarm launches (the dock flies by itself)
-Status: **3a and 3c built** (15 Nov, not merged yet); 3b planned. The first phase where a drone takes off with nobody
+Status: **built** (3a, 3c, 3b; 15 Nov, not merged yet). Next: a supervised first flight on real hardware. The first phase where a drone takes off with nobody
 on site.
 
 3a as built: `edge/app/dock_wayline.py` (route → KMZ: detours round no-fly zones, height 20-120 m above the dock, speed
@@ -171,6 +171,12 @@ and a "🏠 Back to the dock" button.
   automatic launches.
 - Drone-verified alarms (`alarm_verify.py`) work unchanged: the dock's camera AI can verify the intrusion.
 - Air traffic during a flight: the existing crewed-aircraft action becomes **return home** for docks.
+
+3b as built: a patrol schedule's drone can be a dock (`dock1`…); `_patrol_pick` chooses who flies (a named drone or
+dock must be ready; "any ready drone or dock" tries Drone Link drones first, as before, then the ready dock nearest the
+first stop). `patrol_scheduler_tick` (one pass of the scheduler, every 20 s) and the Telegram "Start patrol" use it;
+the Smart patrol is a normal schedule, so it can be flown by a dock too. The dock's end-of-route message says what its
+camera saw ("Seen: 1 person, 1 vehicle"). The schedule editor on the Drone page lists the docks.
 
 #### Safety and permissions
 - **Automatic flights switch per dock** (admins, off by default). Turning it on asks the admin to confirm that the

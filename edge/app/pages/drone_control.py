@@ -266,7 +266,9 @@ async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no
   const bk=$('rtBackup');if(bk){const v=bk.value;bk.innerHTML='<option value="">None</option>'+d.drones.filter(x=>x.drone!==DRONE).map(x=>
     `<option value="${esc(x.drone)}" ${x.mission==='route'||x.mission==='backup'?'disabled':''}>${esc(x.label)}${x.mission==='route'?' (flying a route)':x.mission==='backup'?' (backup for another route)':x.drone_connected?'':' (offline)'}</option>`).join('');
     bk.value=[...bk.options].some(o=>o.value===v&&!o.disabled)?v:''}
-  const sel=$('scDrone');if(sel&&sel.options.length!==d.drones.length+1){const v=sel.value;sel.innerHTML='<option value="">Any ready drone</option>'+d.drones.map(x=>`<option value="${esc(x.drone)}">${esc(x.label)}</option>`).join('');sel.value=v;sel.style.display=many?'':'none'}
+  const docks=(typeof dockData!=='undefined'?dockData:[]).filter(x=>!x.over_limit);docks.forEach(x=>droneNames[x.slot]=x.name);
+  const sel=$('scDrone');if(sel&&sel.options.length!==d.drones.length+docks.length+1){const v=sel.value;sel.innerHTML='<option value="">Any ready drone or dock</option>'+d.drones.map(x=>`<option value="${esc(x.drone)}">${esc(x.label)}</option>`).join('')
+    +docks.map(x=>`<option value="${esc(x.slot)}">🛬 ${esc(x.name)}</option>`).join('');sel.value=v;sel.style.display=many||docks.length?'':'none'}
   $('fleet').innerHTML=d.drones.map(x=>{const dot=x.drone_connected?'ok':x.phone_connected?'half':'';
     const info=x.over_limit?'over licence':x.mission?(x.mission==='route'?'on route':x.mission==='backup'?'backup':'responding'):x.drone_connected?(x.flying?'flying':'ready')+(x.battery!=null?' · '+x.battery+'%':''):x.phone_connected?'drone off':'not paired';
     return `<a href="/drone-control?drone=${encodeURIComponent(x.drone)}" class="${x.drone===DRONE?'on':''}"><i class="${dot}"></i>${esc(x.label)} <small>${esc(info)}</small></a>`}).join('')

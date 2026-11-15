@@ -5942,6 +5942,12 @@ def dock_missions_tick():
             seen.add("end")
             how = {"ok": "finished and is back in the dock", "canceled": "was called back and is back in the dock"}.get(
                 m["status"], f"ended: {m['status']}")
+            seen_kinds = {}
+            for t, slot_, kind, _ in drone_detections[-2000:]:
+                if slot_ == d["slot"] and t >= (m.get("since") or 0):
+                    seen_kinds[kind] = seen_kinds.get(kind, 0) + 1
+            how += (". Seen: " + ", ".join(f"{n} {k}{'s' if n > 1 and not k.endswith('s') else ''}" for k, n in seen_kinds.items())
+                    if seen_kinds else ". Nothing seen by its camera")
             audit_record("dock: route ended", target=sn, detail={"name": d["name"], "route": m["name"], "status": m["status"]})
             queue_telegram_alert("dock_mission", f"{'🛬' if m['status'] in ('ok', 'canceled') else '⚠️'} {d['name']}: route {m['name']} {how}.",
                                  f"dock:{sn}:mission-end:{m['flight_id']}", snapshot_bytes=b"")
@@ -8728,8 +8734,51 @@ def _clean_schedules(items):
         drone = str(s.get("drone") or "")
         out.append({"id": re.sub(r"[^\w-]", "", str(s.get("id") or "")) or os.urandom(4).hex(), "route": str(s["route"])[:40],
                     "time": t, "days": days, "enabled": bool(s.get("enabled", True)), "auto_start": bool(s.get("auto_start", False)),
-                    "drone": drone if _is_drone_name(drone) else ""})
+                    "drone": drone if _is_drone_name(drone) or _is_dock_name(drone) else ""})
     return out[:20]
+
+
+def _patrol_pick(route, drone=""):
+    """Who flies a scheduled patrol: ("drone", slot, "") for a Drone Link drone, ("dock", sn, "") for a DJI Dock,
+    or (None, None, why not). A named drone or dock must be ready; "any" tries the Drone Link drones first (as before
+    docks existed), then the ready dock nearest the first stop."""
+    if not route:
+        return None, None, "The route no longer exists."
+    if drone and _is_dock_name(drone):
+        sn = _dock_sn(drone)
+        if not sn:
+            return None, None, "That dock is no longer registered."
+        problem = dock_flight_problem(sn, _clean_route(route)["points"], _clean_route(route)["loop"])
+        return ("dock", sn, "") if not problem else (None, None, f"{dock_store.docks()[sn]['name']}: {problem}")
+    slot, problem = _pick_drone(lambda d: _patrol_preflight(route, d), drone or None)
+    if slot or drone or not dock_allowed():
+        return ("drone", slot, "") if slot else (None, None, problem)
+    r = _clean_route(route)
+    first = r["points"][0] if r["points"] else None
+    ready, dock_problems = [], []
+    for sn, d in dock_store.docks().items():
+        why = dock_flight_problem(sn, r["points"], r["loop"])
+        x = dock_hub.summary(sn)
+        if why:
+            dock_problems.append(f"{d['name']}: {why}")
+        elif first and x["lat"]:
+            ready.append((_distance_m(x["lat"], x["lon"], first["lat"], first["lon"]), sn))
+    if ready:
+        return "dock", min(ready)[1], ""
+    return None, None, problem + (" Docks: " + " ".join(dock_problems) if dock_problems else "")
+
+
+def _patrol_start(kind, who, name, by):
+    return dock_fly_route(who, name, by=by) if kind == "dock" else fly_route(name, by=by, drone=who)
+
+
+def _patrol_facts(kind, who, route):
+    if kind == "dock":
+        x = dock_hub.summary(who)
+        return f"{dock_store.docks()[who]['name']}: drone battery {x['battery']}%, {len(route['points'])} stops, flies by itself."
+    tel = get_link(who)["telemetry"]
+    lead = f"{drone_label(who)}: " if len(drone_slots()) > 1 else ""
+    return f"{lead}Battery {tel.get('battery')}%, GPS {tel.get('gps_satellites')}, {len(route['points'])} stops."
 
 
 def _patrol_preflight(route, slot=None):
@@ -8766,47 +8815,53 @@ def start_scheduled_patrol(sid, by):
     route = load_routes().get(s["route"])
     if not route:
         return {"ok": False, "error": f"Route “{s['route']}” no longer exists."}
-    slot, problem = _pick_drone(lambda d: _patrol_preflight(route, d), s.get("drone") or None)
+    kind, who, problem = _patrol_pick(route, s.get("drone") or "")
     if problem:
         return {"ok": False, "error": problem}
-    return fly_route(s["route"], by=by, drone=slot)
+    return _patrol_start(kind, who, s["route"], by)
 
 
 def _patrol_scheduler_worker():
     while True:
         time.sleep(20)
         try:
-            now = time.time()
-            today, hhmm, wday = time.strftime("%Y-%m-%d"), time.strftime("%H:%M"), time.localtime(now).tm_wday
-            for sid, deadline in list(patrol_state["pending"].items()):
-                if now > deadline:
-                    patrol_state["pending"].pop(sid, None)
-                    send_telegram("⏭ Patrol skipped: no answer within %d minutes." % PATROL_CONFIRM_MINUTES)
-            for s in load_response_settings()["patrol_schedules"]:
-                if not s["enabled"] or wday not in s["days"] or s["time"] != hhmm or patrol_state["fired"].get(s["id"]) == today:
-                    continue
-                patrol_state["fired"][s["id"]] = today  # once per day, never flown late
-                route = load_routes().get(s["route"])
-                slot, problem = (_pick_drone(lambda d: _patrol_preflight(route, d), s.get("drone") or None) if route
-                                 else (None, f"Route “{s['route']}” no longer exists."))
-                if problem:
-                    _drone_event(f"Scheduled patrol {s['route']} skipped: {problem}", s.get("drone") or None)
-                    send_telegram(f"⏭ Scheduled patrol “{s['route']}” skipped: {problem}")
-                    continue
-                tel = get_link(slot)["telemetry"]
-                who = f"{drone_label(slot)}: " if len(drone_slots()) > 1 else ""
-                facts = f"{who}Battery {tel.get('battery')}%, GPS {tel.get('gps_satellites')}, {len(route['points'])} stops."
-                if s["auto_start"]:
-                    r = fly_route(s["route"], by="schedule", drone=slot)
-                    if not r["ok"]:
-                        send_telegram(f"⚠️ Scheduled patrol “{s['route']}” could not start: {r['error']}")
-                else:
-                    patrol_state["pending"][s["id"]] = now + PATROL_CONFIRM_MINUTES * 60
-                    send_telegram(f"🗺️ Patrol “{s['route']}” is due now. {facts}\nStart it? (skipped if no answer in {PATROL_CONFIRM_MINUTES} min)",
-                                  buttons=[[{"text": "✅ Start patrol", "callback_data": f"patrolgo:{s['id']}"[:64]},
-                                            {"text": "⏭ Skip", "callback_data": f"patrolskip:{s['id']}"[:64]}]])
+            patrol_scheduler_tick()
         except Exception as e:
             print("Patrol scheduler error:", e)
+
+
+def patrol_scheduler_tick(now=None):
+    """One look at the patrol schedules (every 20 s): expire unanswered questions, start or ask about what is due."""
+    now = now or time.time()
+    lt = time.localtime(now)
+    today, hhmm, wday = time.strftime("%Y-%m-%d", lt), time.strftime("%H:%M", lt), lt.tm_wday
+    for sid, deadline in list(patrol_state["pending"].items()):
+        if now > deadline:
+            patrol_state["pending"].pop(sid, None)
+            send_telegram("⏭ Patrol skipped: no answer within %d minutes." % PATROL_CONFIRM_MINUTES)
+    for s in load_response_settings()["patrol_schedules"]:
+        if not s["enabled"] or wday not in s["days"] or s["time"] != hhmm or patrol_state["fired"].get(s["id"]) == today:
+            continue
+        patrol_state["fired"][s["id"]] = today  # once per day, never flown late
+        route = load_routes().get(s["route"])
+        kind, who, problem = (_patrol_pick(route, s.get("drone") or "") if route
+                              else (None, None, f"Route “{s['route']}” no longer exists."))
+        if problem:
+            if not _is_dock_name(s.get("drone") or ""):
+                _drone_event(f"Scheduled patrol {s['route']} skipped: {problem}", s.get("drone") or None)
+            audit_record("patrol skipped", target=s["route"], detail={"why": problem}, result="refused", source="system")
+            send_telegram(f"⏭ Scheduled patrol “{s['route']}” skipped: {problem}")
+            continue
+        facts = _patrol_facts(kind, who, route)
+        if s["auto_start"]:
+            r = _patrol_start(kind, who, s["route"], "schedule")
+            if not r["ok"]:
+                send_telegram(f"⚠️ Scheduled patrol “{s['route']}” could not start: {r['error']}")
+        else:
+            patrol_state["pending"][s["id"]] = now + PATROL_CONFIRM_MINUTES * 60
+            send_telegram(f"🗺️ Patrol “{s['route']}” is due now. {facts}\nStart it? (skipped if no answer in {PATROL_CONFIRM_MINUTES} min)",
+                          buttons=[[{"text": "✅ Start patrol", "callback_data": f"patrolgo:{s['id']}"[:64]},
+                                    {"text": "⏭ Skip", "callback_data": f"patrolskip:{s['id']}"[:64]}]])
 
 
 # ---------------- Smart patrols (risk_patrol.py) ----------------
