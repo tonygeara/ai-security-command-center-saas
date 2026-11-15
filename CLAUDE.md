@@ -23,3 +23,31 @@ Google Docs connector isn't available in the session, say so and list the change
 - `app/`, `lib/`: the Next.js website, customer portal and admin portal (deployed on Vercel).
 - `supabase/`: migrations and edge functions for the production project `qfnxwuejfotofuxlyqjd`.
 - `drone-link-android/`: the Drone Link Android app (DJI Mobile SDK v5).
+
+## Releases and deployment
+
+- Edge installers: merging a new `APP_VERSION` to main builds and publishes both editions automatically
+  (`.github/workflows/edge-installer.yml`, release `edge-v<version>` with `Online-INSTALL.txt` and
+  `On-prem-INSTALL.txt`). Same version again: run the workflow by hand (workflow_dispatch).
+- The admin portal reads the latest version from `edge/app/launcher.pyw` at build time (`next.config.mjs`).
+- Supabase migrations and edge functions are applied/deployed directly to production after tests; keep the
+  repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
+- Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
+
+## Where we left off (15 November 2026)
+
+- Released: Edge **V11.9.0** (one sign-in with portal accounts, every feature a per-client licence switch,
+  Block/Unblock client, Users grouped by client, Windows settings-save retry). Installers rebuilt on
+  15 Nov with the client install guides. Website: demo request form (emails via Resend to the super
+  admins), no public sign-in/sign-up links (`/login` still works).
+- Roles: super admin (owner) > client Admin (manages own Editors/Viewers within the licence's user
+  limit) > Editor / Viewer. Super admin manages everything in Admin (Clients, Licences, Devices, Users,
+  Demo requests).
+- Client install guide also in the owner's Drive folder "camera system":
+  https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit
+- Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
+  (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator, DJI Cloud API / Dock
+  (multi-drone stays one controller + phone per drone with Drone Link).
+- Open items are the improvements list in the Capabilities doc (next: confirm client creation live,
+  test with real equipment, leaked-password protection in Supabase, alerts when something breaks,
+  automatic backups).
