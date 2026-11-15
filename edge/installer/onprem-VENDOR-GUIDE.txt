@@ -28,7 +28,7 @@ PART 1 - PREPARE THE USB STICK (on your PC)
 1. Use a USB stick with at least 4 GB free.
 2. Copy these 3 files from C:\AI-Security\edge\installer\output\onprem-usb\ to the USB,
    all in the SAME folder:
-     AI-Command-Centre-Lebanon-Setup-11.1.0.exe
+     On-prem-AI-Command-Centre-Setup-<version>.exe
      ai-command-centre-images.tar
      INSTALL.txt
 3. Optional but recommended: also put the Docker Desktop installer on the USB
@@ -54,7 +54,7 @@ Steps:
    Open Docker Desktop once and wait until it shows "Engine running".
    Settings > General > tick "Start Docker Desktop when you sign in".
    (Internet makes this step easiest; everything after it works offline.)
-2. Plug in the USB and run AI-Command-Centre-Lebanon-Setup-11.1.0.exe FROM THE USB FOLDER
+2. Plug in the USB and run On-prem-AI-Command-Centre-Setup-<version>.exe FROM THE USB FOLDER
    (the .tar must be next to it).
    If Windows says "Windows protected your PC": More info > Run anyway.
 3. Open "AI Command Centre Lebanon" from the desktop.
@@ -121,7 +121,7 @@ On your PC:
      powershell -ExecutionPolicy Bypass -File edge\installer\build_onprem.ps1 -SkipImages
    Leave out -SkipImages only if the Docker images changed (e.g. a new Frigate version
    in edge\runtime\docker-compose.yml) - then also send him the new .tar.
-4. New file: edge\installer\output\onprem-usb\AI-Command-Centre-Lebanon-Setup-<new>.exe
+4. New file: edge\installer\output\onprem-usb\On-prem-AI-Command-Centre-Setup-<new>.exe
 
 On Karim's laptop:
 5. Close the app (launcher > Stop System, then close it).

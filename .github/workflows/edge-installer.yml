@@ -1,11 +1,11 @@
 # Builds the Windows edge installers on GitHub's Windows machines and publishes them as one GitHub release:
 #   AI-Security-Command-Center-Setup-<version>.exe   standard (cloud / SaaS) edition, paired with the portal
-#   AI-Command-Centre-Lebanon-Setup-<version>.exe     on-prem edition, offline licence file, compiled code
+#   On-prem-AI-Command-Centre-Setup-<version>.exe    on-prem edition, offline licence file, compiled code
 # The edge tests run first; nothing is published if they fail.
 #
 # Runs by itself when a new APP_VERSION reaches main (edge/app/launcher.pyw changes and no release for that
 # version exists yet), so each new version is built and published. Each release also carries copies without the
-# version in the name (AI-Security-Command-Center-Setup.exe, AI-Command-Centre-Lebanon-Setup.exe) and is marked
+# version in the name (AI-Security-Command-Center-Setup.exe, On-prem-AI-Command-Centre-Setup.exe) and is marked
 # "latest": the admin portal links to releases/latest/download/<those names>, so it always offers the newest
 # installers that were actually published (never a version whose build is still running or failed).
 # Also: GitHub → Actions → "Edge installer" → Run workflow, or push a tag such as edge-v11.2.0.
@@ -68,8 +68,8 @@ jobs:
             $names = gh release view "edge-v$n" --json assets --jq '.assets[].name' 2>$null
             $ErrorActionPreference = 'Stop'
             $global:LASTEXITCODE = 0  # no release yet is not an error
-            if (($names -match '^AI-Security-Command-Center-Setup-') -and ($names -match '^AI-Command-Centre-Lebanon-Setup-') -and
-                ($names -contains 'AI-Security-Command-Center-Setup.exe') -and ($names -contains 'AI-Command-Centre-Lebanon-Setup.exe')) {
+            if (($names -match '^AI-Security-Command-Center-Setup-') -and ($names -match '^On-prem-AI-Command-Centre-Setup-') -and
+                ($names -contains 'AI-Security-Command-Center-Setup.exe') -and ($names -contains 'On-prem-AI-Command-Centre-Setup.exe')) {
               $skip = 'true'; Write-Host "edge-v$n already has both installers: nothing to build."
             }
           }

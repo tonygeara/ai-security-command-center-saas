@@ -38,7 +38,10 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (15 November 2026)
 
-- Released: Edge **V11.10.0** (15 Nov, release `edge-v11.10.0`): **DJI Docks** through DJI Cloud API, Phases 1-5
+- Released: Edge **V11.10.1** (15 Nov): on-prem build fix (V11.10.0's on-prem installer missed the dock modules;
+  `edge/tests/test_packaging.py` now checks every module is in the on-prem build), on-prem installer renamed
+  `On-prem-AI-Command-Centre-Setup-<version>.exe` (app name and install ID unchanged), admin portal links always the
+  latest published installers. V11.10.0 (release `edge-v11.10.0`): **DJI Docks** through DJI Cloud API, Phases 1-5
   (registration, health alerts, live video into the AI, route flights, alarm launches with Launch/Don't, scheduled
   patrols, live control, photos/videos saved on the PC), next to Drone Link. Off per client until the **DJI Docks**
   licence switch and a dock count are set (Supabase part live since 15 Nov). Plan and details:

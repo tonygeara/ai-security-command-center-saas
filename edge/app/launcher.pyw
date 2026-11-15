@@ -5,7 +5,7 @@ from tkinter import ttk, messagebox
 import edition
 import browser_mode as browser_mode_lib
 
-APP_VERSION = 'V11.10.0'
+APP_VERSION = 'V11.10.1'
 PRODUCT_NAME = edition.PRODUCT_NAME
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 FROZEN = getattr(sys, 'frozen', False)

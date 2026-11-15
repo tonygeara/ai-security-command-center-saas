@@ -5,7 +5,7 @@ import type {SupabaseClient} from "@supabase/supabase-js";
 // The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
 // new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
 // published automatically when that version reaches main (.github/workflows/edge-installer.yml).
-export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.10.0";
+export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.10.1";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>, marked
 // "latest", with copies whose names carry no version. The links below go to GitHub's latest release, so they always
 // give the newest installers that were actually published: right after a merge (build still running) or if a build
@@ -16,7 +16,7 @@ const latest = (file: string) => `${REPO}/releases/latest/download/${file}`;
 export const INSTALLERS = [
   {edition: "Online (cloud)", file: "AI-Security-Command-Center-Setup.exe", guide: latest("Online-INSTALL.txt"),
    note: "Paired with this portal: features, limits and drone control are set per client here."},
-  {edition: "On-prem", file: "AI-Command-Centre-Lebanon-Setup.exe", guide: latest("On-prem-INSTALL.txt"),
+  {edition: "On-prem AI Command Centre", file: "On-prem-AI-Command-Centre-Setup.exe", guide: latest("On-prem-INSTALL.txt"),
    note: "Works offline with a licence file from Licences. For a USB install without internet, add the AI-services file made with build_onprem.ps1."},
 ].map(i => ({...i, url: latest(i.file)}));
 const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
