@@ -36,7 +36,7 @@ Google Docs connector isn't available in the session, say so and list the change
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (15 November 2026)
+## Where we left off (17 November 2026)
 
 - Released: Edge **V11.10.1** (15 Nov): on-prem build fix (V11.10.0's on-prem installer missed the dock modules;
   `edge/tests/test_packaging.py` now checks every module is in the on-prem build), on-prem installer renamed
@@ -54,8 +54,14 @@ Google Docs connector isn't available in the session, say so and list the change
 - Roles: super admin (owner) > client Admin (manages own Editors/Viewers within the licence's user
   limit) > Editor / Viewer. Super admin manages everything in Admin (Clients, Licences, Devices, Users,
   Demo requests).
-- Client install guide also in the owner's Drive folder "camera system":
-  https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit
+- Client install guide (online edition) also in the owner's Drive folder "camera system":
+  https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit . Updated 17 Nov for DJI Docks
+  (optional dock, allow the app on Private networks, dock setup by an admin, dock media kept 30 days). Keep it and
+  `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
+  was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
+  on-prem one is `edge/installer/onprem-INSTALL.txt`.
+- Features and Capabilities docs checked and current on 17 Nov (V11.10.1; 76 features; 31 capabilities, 19
+  improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
 - Decided 15 Nov: **DJI Cloud API for Docks** with the MQTT broker on the edge PC; Drone Link (phone + RC-N1) stays.
