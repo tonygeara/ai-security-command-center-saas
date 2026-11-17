@@ -51,7 +51,7 @@ STEP 5 - ADD CAMERAS
   - Dashboard > Devices > Add camera: scan the network to find your cameras, or enter the
     camera's RTSP address, for example rtsp://username:password@192.168.1.50:554/stream1
   - Recorders (NVR/DVR): add all channels at once from the same page.
-  - The number of cameras and drones is set by your licence.
+  - The number of cameras, drones and DJI Docks is set by your licence.
   - Camera passwords stay on this computer; they are never sent to the portal.
 
 STEP 6 - ADD YOUR TEAM (portal)
