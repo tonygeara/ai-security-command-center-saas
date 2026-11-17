@@ -16,7 +16,8 @@ COMPUTER REQUIREMENTS
   - SSD with at least 256 GB free (recordings: ~150-250 GB per camera)
   - Internet connection (it keeps working for up to 7 days if the internet drops)
   - IP cameras with RTSP video, 1080p or better, on the same network as the computer
-  - Optional drones: DJI aircraft with the Drone Link app on the controller (ask your provider)
+  - Optional drones: DJI aircraft with the Drone Link app on the controller, or a DJI Dock
+    (Dock 2 or Dock 3) whose drone flies by itself (ask your provider)
 
 STEP 1 - SIGN IN TO THE PORTAL (5 minutes)
   - Open https://www.aisecuritycommandcenter.com/login and sign in with your email and the
@@ -33,6 +34,8 @@ STEP 3 - INSTALL THE PROGRAM
   - Run AI-Security-Command-Center-Setup-<version>.exe.
   - Windows may show "Windows protected your PC": click More info > Run anyway.
   - No administrator rights are needed.
+  - If Windows asks whether AI Security may use the network, allow it on Private networks
+    (drones and docks connect to this computer over your network).
   - The program starts with Windows and opens in your web browser. The first start downloads the
     AI services and takes several minutes.
 
@@ -59,6 +62,12 @@ STEP 6 - ADD YOUR TEAM (portal)
 
 OPTIONAL
   - Drones: dashboard > Drone > + Add drone, then scan the QR code with the Drone Link app.
+  - DJI Dock: your provider switches DJI Docks on for your company. Then an admin opens
+    dashboard > Drone > DJI Docks > Set up a dock, enters the DJI Cloud API keys, opens the link
+    shown there in DJI Pilot 2 on the dock's controller, and registers the dock when it appears
+    under Found. Its drone only takes off by itself once an admin switches Automatic flights on
+    for that dock, which needs permission for automated flights at your site. Do the first
+    flights together with your provider.
   - Telegram alerts with pictures and buttons: your provider sets them up with you.
   - Phone access (incidents and live pictures on your phone through the portal): dashboard >
     Settings > Phone access. Off until you switch it on.
@@ -75,6 +84,7 @@ FORGOT A PASSWORD?
 
 GOOD TO KNOW
   - Closing the browser does not stop protection. To stop everything: Settings > Shut down.
-  - Motion recordings are kept 3 days, alerts and snapshots 14 days, event history 30 days.
+  - Motion recordings are kept 3 days, alerts and snapshots 14 days, event history 30 days,
+    photos and videos from a DJI Dock 30 days.
   - Data folder: %LOCALAPPDATA%\AI-Security-System (back it up to keep faces and events).
   - Support: contact your provider.
