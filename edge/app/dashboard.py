@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.11.0"
+APP_VERSION = "V11.12.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -6092,7 +6092,9 @@ def _dock_drc_worker():
 @app.route("/api/docks/<sn>/control", methods=["POST"])
 def api_dock_control(sn):
     """Operators, while the dock's drone is out: {"action": "goto", "lat", "lon", "alt"} | "goto_stop" | "sticks_on" (speed) |
-    "sticks_off" | "photo" | "record_start" | "record_stop" | "gimbal_down" | "gimbal_center"."""
+    "sticks_off" | "photo" | "record_start" | "record_stop" | "gimbal_down" | "gimbal_center" | "look_at" (lat, lon) |
+    "aim" (x, y on the video, 0-1) | "thermal_point" (x, y) | "thermal_area" (x, y, w, h) | "thermal_off" |
+    "orbit" (lat, lon, speed; Dock 4) | "orbit_stop" | "stop" (emergency stop: holds where it is)."""
     d = dock_store.docks().get(sn)
     if not d:
         return jsonify({"ok": False, "error": "Unknown dock."}), 404
@@ -6140,11 +6142,105 @@ def api_dock_control(sn):
         ok, msg = dock_hub.camera(sn, action)
         result = {"photo": "Photo taken.", "record_start": "Recording on the drone.", "record_stop": "Recording stopped.",
                   "gimbal_down": "Camera pointing straight down.", "gimbal_center": "Camera level."}[action]
+    elif action in ("look_at", "orbit"):
+        try:
+            lat, lon = float(data["lat"]), float(data["lon"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Click the map on the spot."}), 400
+        limit = int(d.get("range_m") or DOCK_RANGE_DEFAULT)
+        dist = _distance_m(x["lat"], x["lon"], lat, lon) if x["lat"] else 0
+        if action == "look_at":
+            if dist > max(limit, 2000):
+                return jsonify({"ok": False, "error": f"That spot is {int(dist)} m from {d['name']}: too far to look at."}), 409
+            ok, msg = dock_hub.look_at(sn, lat, lon)
+            result = "The camera turns to the spot (the drone turns with it)."
+        else:
+            problem = _orbit_problem(sn, d, x, lat, lon)
+            if problem:
+                return jsonify({"ok": False, "error": problem}), 409
+            if dock_hub.drc_active(sn):
+                dock_hub.drc_exit(sn)
+            ok, msg = dock_hub.orbit(sn, lat, lon, float(data.get("speed") or 3.0))
+            result = "Orbiting the spot at the drone's current distance and height, camera on it. Stop orbit to hold."
+    elif action == "orbit_stop":
+        ok, msg = dock_hub.orbit_stop(sn)
+        result = "Orbit stopped: holding position."
+    elif action in ("aim", "thermal_point", "thermal_area"):
+        try:
+            vx, vy = float(data["x"]), float(data["y"])
+        except (KeyError, TypeError, ValueError):
+            return jsonify({"ok": False, "error": "Click the drone's video."}), 400
+        if action == "aim":
+            ok, msg = dock_hub.aim(sn, vx, vy)
+            result = "Camera pointed at the spot."
+        elif action == "thermal_point":
+            ok, msg = dock_hub.thermal(sn, "point", vx, vy)
+            result = "Measuring the temperature at that spot (shown on the video)."
+        else:
+            ok, msg = dock_hub.thermal(sn, "area", vx, vy, float(data.get("w") or 0.2), float(data.get("h") or 0.2))
+            result = "Measuring the temperatures in that area (shown on the video)."
+    elif action == "thermal_off":
+        ok, msg = dock_hub.thermal(sn, "off")
+        result = "Temperature measuring off."
+    elif action == "stop":
+        ok, msg = dock_hub.emergency_stop(sn)
+        result = "Emergency stop sent: the drone holds where it is. Use Return to dock or fly it on."
+        if ok:
+            queue_telegram_alert("dock_mission", f"⛔ {d['name']}: emergency stop by {by}. The drone is holding position.", f"dock-stop:{sn}")
     else:
         return jsonify({"ok": False, "error": "Unknown action."}), 400
-    audit_record(f"dock: {action}", target=sn, detail={"name": d["name"], "by": by, **({k: data.get(k) for k in ("lat", "lon", "alt")} if action == "goto" else {})},
+    audit_record(f"dock: {action}", target=sn, detail={"name": d["name"], "by": by, **({k: data.get(k) for k in ("lat", "lon", "alt")} if action in ("goto", "look_at", "orbit") else {})},
                  result="ok" if ok else "failed")
     return (jsonify({"ok": True, "message": result}) if ok else jsonify({"ok": False, "error": msg or "The dock refused."})), (200 if ok else 409)
+
+
+def _orbit_problem(sn, d, x, lat, lon):
+    """'' when circling this spot at the drone's current distance stays inside the dock's range and out of no-fly zones."""
+    if not dock_hub.is_dock4(sn):
+        return "Orbiting a point needs a Dock 4."
+    if not x["drone_lat"]:
+        return "The drone's position isn't known yet."
+    radius = _distance_m(x["drone_lat"], x["drone_lon"], lat, lon)
+    if radius < 5:
+        return "The drone is right above that spot: fly it a little away first (the orbit keeps its current distance)."
+    if radius > 300:
+        return f"The drone is {int(radius)} m from that spot: fly closer first (the orbit keeps its current distance, 300 m at most)."
+    limit = int(d.get("range_m") or DOCK_RANGE_DEFAULT)
+    for i in range(24):
+        a = math.radians(i * 15)
+        plat = lat + radius * math.cos(a) / 111320.0
+        plon = lon + radius * math.sin(a) / (111320.0 * math.cos(math.radians(lat)))
+        if x["lat"] and _distance_m(x["lat"], x["lon"], plat, plon) > limit:
+            return f"The orbit would leave {d['name']}'s range ({limit} m)."
+        z = nofly.zone_at(nofly_zones(), plat, plon)
+        if z:
+            return f"The orbit would cross no-fly zone “{z['name']}”."
+    return ""
+
+
+@app.route("/api/docks/<sn>/deterrent", methods=["POST"])
+def api_dock_deterrent(sn):
+    """Operators: the dock's siren-and-lights alarm and its floodlight ({"siren": true/false} and/or {"light": true/false})."""
+    d = dock_store.docks().get(sn)
+    if not d:
+        return jsonify({"ok": False, "error": "Unknown dock."}), 404
+    if not dock_allowed() or sn in _docks_over_limit():
+        return _dock_refused()
+    if not dock_hub.online(sn):
+        return jsonify({"ok": False, "error": f"{d['name']} is offline."}), 409
+    data = request.get_json(silent=True) or {}
+    siren = None if data.get("siren") is None else bool(data["siren"])
+    light = None if data.get("light") is None else bool(data["light"])
+    if siren is None and light is None:
+        return jsonify({"ok": False, "error": "Say siren or light."}), 400
+    ok, msg = dock_hub.deterrent(sn, siren=siren, light=light)
+    by = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    audit_record("dock: deterrent", target=sn, detail={"name": d["name"], "by": by, "siren": siren, "light": light},
+                 result="ok" if ok else "failed")
+    if not ok:
+        return jsonify({"ok": False, "error": msg or "The dock refused."}), 409
+    parts = ([f"siren {'on' if siren else 'off'}"] if siren is not None else []) + ([f"floodlight {'on' if light else 'off'}"] if light is not None else [])
+    return jsonify({"ok": True, "message": f"{d['name']}: " + " and ".join(parts) + "."})
 
 
 @app.route("/api/docks/<sn>/battery", methods=["POST"])

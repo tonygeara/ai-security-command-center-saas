@@ -33,6 +33,7 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/docks/launches/[0-9a-f]+$",  # answer "launch this dock?"
     r"^/api/docks/[^/]+/(control|sticks)$",  # fly a dock's drone live: fly to a point, sticks, camera
     r"^/api/docks/[^/]+/battery$",  # Dock 4: swap in a charged battery from the bays
+    r"^/api/docks/[^/]+/deterrent$",  # the dock's siren-and-lights alarm and floodlight
     r"^/api/virtual-drones/[^/]+$",
     r"^/api/maps(/plan|/[a-f0-9]{12}/(fly|stop|photos|process|cancel))?$",  # 3D maps: plan, fly, add photos, process
     r"^/api/(routes/optimize|rf/check)$",  # planning helpers (they change nothing)

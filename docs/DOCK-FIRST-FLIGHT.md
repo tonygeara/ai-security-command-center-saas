@@ -64,6 +64,17 @@ what the Drone page, the audit log and Pilot 2 say.
       take off without waiting for a charge.
 - [ ] Switch the dock off (keep the ground station on): the card goes offline with an alert, and back when it's on.
 
+## 8. More control (V11.12; drone in the air, supervised, at a safe height)
+- [ ] **👁 Look at** a spot on the map: the drone turns and the spot is in the middle of the picture.
+- [ ] **🎯 Aim**: click the video; the camera points there.
+- [ ] **🌡 Temperature** with the thermal lens: click a person or a warm object; a sensible °C shows on the video.
+- [ ] Dock 4: **🌀 Orbit** a spot 20-30 m from the drone: it circles at that distance with the camera on the spot;
+      **Stop orbit** holds it.
+- [ ] **⛔ Stop now** at 30 m or more, clear of obstacles: the drone stops and **hovers** (confirm it doesn't descend or
+      cut motors), then Return to dock. Dock 2/3: try it once with keyboard control on and once with it off.
+- [ ] **🚨 Siren** and **💡 Light** with the drone in the dock: both work without DJI's remote-debugging mode (if the
+      dock refuses, note the DJI code).
+
 ## After the test
 - Set the range back to what the site needs (default 500 m).
 - Leave **Launch docks without asking** off unless the client explicitly wants fully automatic launches.

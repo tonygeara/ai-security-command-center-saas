@@ -317,6 +317,8 @@ class DockHub:
                 self._hms(self.gateway_of(sn), msg.get("data") or {})
             elif msg.get("method") == "flighttask_progress":
                 self._progress(sn, msg.get("data") or {})
+            elif msg.get("method") == "poi_status_notify":
+                self._poi_status(self.gateway_of(sn), msg.get("data") or {})
             elif msg.get("method") == "file_upload_callback" and self.on_media:
                 f = (msg.get("data") or {}).get("file")
                 if isinstance(f, dict) and f.get("object_key"):
@@ -526,6 +528,8 @@ class DockHub:
         """Bring the drone back to the dock now (or cancel a mission that hasn't taken off)."""
         if self.drc_active(gw):
             self.drc_exit(gw)  # sticks off first: DJI's return to home takes over
+        if (self.state.get(gw) or {}).get("poi"):
+            self.orbit_stop(gw)
         ok, msg, _ = self.call(gw, "return_home", {}, timeout=15.0)
         if ok:
             with self.lock:
@@ -575,6 +579,8 @@ class DockHub:
         m = self.mission(gw) or {}
         if m.get("status") in ("in_progress", "starting", "sent"):
             self.call(gw, "flighttask_pause", {}, timeout=10.0)  # a route in progress must be paused first
+        if (self.state.get(gw) or {}).get("poi"):
+            self.orbit_stop(gw)
         ok, msg, _ = self.call(gw, "fly_to_point", {"fly_to_id": str(uuid.uuid4()), "max_speed": int(max(1, min(15, speed))),
                                                      "points": [{"latitude": a, "longitude": b, "height": h} for a, b, h in points]},
                                timeout=15.0)
@@ -646,6 +652,141 @@ class DockHub:
         ok, msg, _ = self.call(gw, method, {"payload_index": idx, **data}, timeout=10.0)
         return ok, msg
 
+    # --- more control (V11.12): look at, aim, thermal readings, orbit, emergency stop, siren and floodlight ---
+    def is_dock4(self, gw):
+        return self._sub_gateway(gw)
+
+    def _payload_call(self, gw, method, data, timeout=10.0):
+        """A camera command after taking the camera's control (DJI needs payload authority; asking again is harmless)."""
+        idx = self.payload_index(gw)
+        if not idx:
+            return False, "The drone isn't reporting a camera."
+        self.call(gw, "payload_authority_grab", {"payload_index": idx}, timeout=timeout)
+        ok, msg, _ = self.call(gw, method, {"payload_index": idx, **data}, timeout=timeout)
+        return ok, msg
+
+    def ground_height(self, gw):
+        """Ellipsoid height of the ground around the dock (DJI's look-at and orbit points are in ellipsoid heights)."""
+        s = self.state.get(gw) or {}
+        o, gs, d = s.get("osd") or {}, s.get("gs_osd") or {}, s.get("drone_osd") or {}
+        for h in (gs.get("height"), o.get("height")):
+            if isinstance(h, (int, float)) and h != 32767:
+                return float(h)
+        if isinstance(d.get("height"), (int, float)) and isinstance(d.get("elevation"), (int, float)):
+            return float(d["height"]) - float(d["elevation"])  # drone's ellipsoid height minus its height above take-off
+        return None
+
+    def look_at(self, gw, lat, lon, above_ground=1.5):
+        """Turn the drone (heading locked to the camera) so the camera looks at this spot on the ground."""
+        g = self.ground_height(gw)
+        if g is None:
+            return False, "The dock hasn't reported its height yet."
+        return self._payload_call(gw, "camera_look_at", {"latitude": float(lat), "longitude": float(lon),
+                                                         "height": max(2.0, g + above_ground), "locked": True})
+
+    def aim(self, gw, x, y):
+        """Point the camera at a spot clicked on its video (x, y from 0 to 1, from the top left)."""
+        live = (self.state.get(gw) or {}).get("live") or {}
+        lens = {"wide": "wide", "zoom": "zoom", "ir": "ir"}.get(live.get("lens"), "wide")
+        return self._payload_call(gw, "camera_aim", {"camera_type": lens, "locked": True,
+                                                     "x": max(0.0, min(1.0, float(x))), "y": max(0.0, min(1.0, float(y)))})
+
+    def thermal(self, gw, mode, x=0.5, y=0.5, w=0.2, h=0.2):
+        """Thermal readings: mode "point" (x, y), "area" (x, y = top left, w, h) or "off". The values come back in the
+        drone's telemetry (summary()["thermal"])."""
+        code = {"off": 0, "point": 1, "area": 2}[mode]
+        ok, msg = self._payload_call(gw, "ir_metering_mode_set", {"mode": code})
+        if not ok or mode == "off":
+            return ok, msg
+        c = lambda v: max(0.0, min(1.0, float(v)))  # noqa: E731
+        if mode == "point":
+            return self._payload_call(gw, "ir_metering_point_set", {"x": c(x), "y": c(y)})
+        return self._payload_call(gw, "ir_metering_area_set", {"x": c(x), "y": c(y), "width": c(w), "height": c(h)})
+
+    def thermal_reading(self, gw):
+        """What the drone's thermal camera measures now: {"mode", "point", "average", "max", "min", "scene_max", "scene_min"}."""
+        d = (self.state.get(gw) or {}).get("drone_osd") or {}
+        cams = d.get("cameras") if isinstance(d.get("cameras"), list) else []
+        ok = lambda v: v if isinstance(v, (int, float)) and abs(v) < 1000 else None  # noqa: E731
+        for cam in cams:
+            if not isinstance(cam, dict):
+                continue
+            mode = {0: "off", 1: "point", 2: "area"}.get(cam.get("ir_metering_mode"))
+            pt, ar = cam.get("ir_metering_point") or {}, cam.get("ir_metering_area") or {}
+            out = {"mode": mode, "point": ok(pt.get("temperature")), "average": ok(ar.get("aver_temperature")),
+                   "max": ok((ar.get("max_temperature_point") or {}).get("temperature")),
+                   "min": ok((ar.get("min_temperature_point") or {}).get("temperature")),
+                   "scene_max": ok(cam.get("thermal_global_temperature_max")), "scene_min": ok(cam.get("thermal_global_temperature_min"))}
+            if mode or any(v is not None for k, v in out.items() if k != "mode"):
+                return out
+        return None
+
+    def orbit(self, gw, lat, lon, speed=3.0):
+        """Dock 4: circle this spot at the drone's current distance and height (DJI POI mode), camera on it."""
+        if not self.is_dock4(gw):
+            return False, "Orbiting a point needs a Dock 4."
+        g = self.ground_height(gw)
+        if g is None:
+            return False, "The dock hasn't reported its height yet."
+        m = self.mission(gw) or {}
+        if m.get("status") in ("in_progress", "starting", "sent"):
+            self.call(gw, "flighttask_pause", {}, timeout=10.0)
+        ok, msg, _ = self.call(gw, "poi_mode_enter", {"latitude": float(lat), "longitude": float(lon), "height": g + 1.5}, timeout=15.0)
+        if not ok:
+            return False, msg
+        self.call(gw, "poi_circle_speed_set", {"circle_speed": float(max(0.5, min(10.0, speed)))}, timeout=10.0)
+        with self.lock:
+            self.state[gw]["poi"] = {"lat": float(lat), "lon": float(lon), "status": "in_progress", "since": self.now()}
+        self._set_mission(gw, status="manual")
+        return True, ""
+
+    def orbit_stop(self, gw):
+        ok, msg, _ = self.call(gw, "poi_mode_exit", {}, timeout=10.0)
+        if ok:
+            with self.lock:
+                (self.state.get(gw) or {}).pop("poi", None)
+        return ok, msg
+
+    def _poi_status(self, gw, data):
+        with self.lock:
+            p = (self.state.get(gw) or {}).get("poi")
+            if p is not None:
+                p["status"] = str(data.get("status") or p["status"])
+                p["radius"] = data.get("circle_radius")
+                if p["status"] != "in_progress":
+                    self.state[gw].pop("poi", None)
+
+    def emergency_stop(self, gw):
+        """Stop the drone where it is now. Dock 4: DJI's emergency stop. Dock 2/3: DJI's DRC emergency stop while
+        stick control is on, otherwise pause the route and stop any fly-to (both hold position)."""
+        if self.is_dock4(gw):
+            ok, msg, _ = self.call(gw, "emergency_stop", {}, timeout=5.0)
+        elif self.drc_active(gw):
+            self.publish(f"thing/product/{gw}/drc/down", {"method": "drone_emergency_stop", "data": {}})
+            ok, msg = True, ""
+        else:
+            a, _, _ = self.call(gw, "flighttask_pause", {}, timeout=5.0)
+            b, _, _ = self.call(gw, "fly_to_point_stop", {}, timeout=5.0)
+            ok, msg = a or b, "" if (a or b) else "The dock didn't confirm the stop."
+        with self.lock:
+            (self.state.get(gw) or {}).pop("poi", None)
+        if ok:
+            self._set_mission(gw, status="manual")
+        return ok, msg
+
+    def deterrent(self, gw, siren=None, light=None):
+        """The dock's sound-and-light alarm and its floodlight (True on, False off; None leaves it)."""
+        target = {"device_sn": (self.state.get(gw) or {}).get("dock_sn")} if self.is_dock4(gw) else {}
+        if siren is not None:
+            ok, msg, _ = self.call(gw, "alarm_state_switch", {"action": 1 if siren else 0, **target}, timeout=10.0)
+            if not ok:
+                return False, msg
+        if light is not None:
+            ok, msg, _ = self.call(gw, "supplement_light_open" if light else "supplement_light_close", target, timeout=10.0)
+            if not ok:
+                return False, msg
+        return True, ""
+
     def clear_mission(self, gw):
         with self.lock:
             (self.state.get(gw) or {}).pop("mission", None)
@@ -690,6 +831,8 @@ class DockHub:
         return {"sn": gw, "model": s.get("model") or "", "online": self.online(gw), "last_seen": s.get("last_seen"),
                 "dock_sn": s.get("dock_sn") or "", "gateway_model": s.get("gateway_model") or "",
                 "swapping": o.get("mode_code") == 8, "bays": self.bays(gw),
+                "siren": _flag(o.get("alarm_state")), "light": _flag(o.get("supplement_light_state")),
+                "thermal": self.thermal_reading(gw) if drone_on else None, "orbit": dict(s["poi"]) if s.get("poi") else None,
                 "drone_sn": s.get("drone_sn") or "", "drone_model": s.get("drone_model") or "",
                 "drone_online": drone_on, "drone_in_dock": _flag(o.get("drone_in_dock")),
                 "mode": DOCK_MODES.get(o.get("mode_code"), ""), "cover": COVER_STATES.get(o.get("cover_state"), ""),
@@ -698,7 +841,7 @@ class DockHub:
                 "rain": RAIN.get(o.get("rainfall"), ""),
                 "lat": lat, "lon": lon,
                 "drone_lat": d.get("latitude") if drone_on else None, "drone_lon": d.get("longitude") if drone_on else None,
-                "drone_height": d.get("height") if drone_on else None,
+                "drone_height": (d["elevation"] if isinstance(d.get("elevation"), (int, float)) else d.get("height")) if drone_on else None,
                 "simulated": gw in self.local,
                 "mission": self.mission(gw),
                 "video": {"streaming": bool(s.get("live")), "lens": (s.get("live") or {}).get("lens"),
