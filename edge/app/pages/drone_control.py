@@ -332,7 +332,7 @@ function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
   map.on('click',e=>mapClick(e.latlng.lat,e.latlng.lng));drawNofly()}
 // A click on the flat map or on the ground in 4D live: a zone corner while drawing a zone, a camera's place, else a route stop.
-function mapClick(lat,lon){dkGoto?dockGoto(lat,lon):nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
+function mapClick(lat,lon){dkGoto?dockMapClick(lat,lon):nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
@@ -566,6 +566,9 @@ function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE')
   const m=x.mission,ma=m&&m.active,MS={starting:'starting',sent:'starting',in_progress:'flying',paused:'paused',returning:'returning to dock'};
   if(ma)tags.unshift(`🛫 ${esc(m.name)} · ${m.sticks?'keyboard control':MS[m.status]||esc(m.status)}${m.status==='in_progress'?' · '+m.percent+'%':''}`);
   if(ma&&x.drone_height!=null)tags.splice(1,0,`↑ ${fmt(x.drone_height)} m`);
+  if(x.orbit)tags.splice(1,0,'🌀 orbiting'+(x.orbit.radius?' · '+Math.round(x.orbit.radius)+' m':''));
+  const th=x.thermal;if(th&&th.mode&&th.mode!=='off'){const t=th.mode==='point'?th.point:th.max;if(t!=null)tags.splice(1,0,'🌡 '+fmt(t)+' °C')}
+  if(x.siren)tags.unshift('🚨 SIREN ON');
   else if(m&&m.ended)tags.push(`Last route ${esc(m.name)}: ${m.status==='ok'?'done':esc(m.status)}`);
   let fly='';
   if(!found&&!x.over_limit){
@@ -576,11 +579,20 @@ function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE')
       +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'record_start')">⏺ Rec</button>`
       +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'record_stop')">⏹ Rec</button>`
       +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_down')">⤓ Look down</button>`
-      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_center')">⟷ Level</button>`:'');
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'gimbal_center')">⟷ Level</button>`
+      +`<button class="hud-btn ${dkGoto===x.sn&&dkMapAct==='look_at'?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockMapMode(this.dataset.sn,'look_at')" title="Click the map: the camera turns to that spot">👁 Look at</button>`
+      +(x.gateway_model?(x.orbit?`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'orbit_stop')">⏹ Stop orbit</button>`
+        :`<button class="hud-btn ${dkGoto===x.sn&&dkMapAct==='orbit'?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockMapMode(this.dataset.sn,'orbit')" title="Click the map: the drone circles that spot at its current distance, camera on it">🌀 Orbit</button>`):'')
+      +`<button class="hud-btn ${dkVid&&dkVid.sn===x.sn&&dkVid.act==='aim'?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockVidMode(this.dataset.sn,'aim')" title="Click the drone's video: the camera points there">🎯 Aim</button>`
+      +((x.thermal||{}).mode&&(x.thermal||{}).mode!=='off'?`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockCam(this.dataset.sn,'thermal_off')">🌡 Temperature off</button>`
+        :`<button class="hud-btn ${dkVid&&dkVid.sn===x.sn&&dkVid.act==='thermal_point'?'dc-ctl-on':''}" data-sn="${esc(x.sn)}" onclick="dockVidMode(this.dataset.sn,'thermal_point')" title="Click the drone's video: measures the temperature there (thermal camera)">🌡 Temperature</button>`)
+      +`<button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockStop(this.dataset.sn,this.dataset.name)" title="Emergency stop: the drone stops and holds where it is">⛔ Stop now</button>`:'');
     else if(x.auto_flights&&x.online)fly=`<select id="dkRoute_${esc(x.sn)}" data-sn="${esc(x.sn)}" onchange="dkRouteSel[this.dataset.sn]=this.value;this.blur()" style="max-width:160px">`
       +(dkRoutes.length?dkRoutes.map(r=>`<option ${dkRouteSel[x.sn]===r?'selected':''}>${esc(r)}</option>`).join(''):'<option value="">No saved routes</option>')
       +`</select><button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'fly')" ${dkRoutes.length?'':'disabled'}>🛫 Fly route</button>`;
     else if(!x.auto_flights)fly=`<span class="muted" style="font-size:12px">Automatic flights off</span>`;
+    if(x.online)fly+=`<button class="hud-btn ${x.siren?'danger':''}" data-sn="${esc(x.sn)}" onclick="dockDeter(this.dataset.sn,'siren',${x.siren?'false':'true'})" title="The dock's sound-and-light alarm">🚨 Siren: ${x.siren?'ON':'OFF'}</button>`
+      +`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockDeter(this.dataset.sn,'light',${x.light?'false':'true'})" title="The dock's floodlight">💡 Light: ${x.light?'ON':'OFF'}</button>`;
     if(!ma&&bays&&x.online&&x.drone_in_dock&&!x.swapping)fly+=`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockSwap(this.dataset.sn)" ${bays.best!=null?'title="Put the fullest battery from the bays into the drone (about 25 s)"':'disabled title="No charged battery in the bays"'}>🔋 Swap battery${bays.best!=null?' ('+bays.best+'%)':''}</button>`;
   }
   const adm=DK_ADMIN&&!found?`<button class="hud-btn" data-sn="${esc(x.sn)}" data-on="${x.auto_flights?1:0}" onclick="dockAuto(this.dataset.sn,this.dataset.on==='1')" title="Lets this dock's drone take off by itself">Automatic flights: ${x.auto_flights?'ON':'OFF'}</button>`
@@ -605,9 +617,24 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   $('dockLaunches').innerHTML=(d.launches||[]).map(l=>`<div class="dk-launch"><span>🚨 Launch <b>${esc(l.name)}</b> to <b>${esc(l.camera)}</b>?</span><span class="muted">${esc(l.by)} · expires ${new Date(l.expires*1000).toLocaleTimeString()}</span>
     <button class="hud-btn danger" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,true)">🚁 Launch</button><button class="hud-btn" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,false)">✋ Don't</button></div>`).join('');
   dockData=d.docks;drawDockFleet();drawDockMap();drawDockVideos();drawDockMissions()}catch(e){}}
-let dkRoutes=[],dkRouteSel={},dkMissionLines={},dkGoto=null,dkCtl=null;
+let dkRoutes=[],dkRouteSel={},dkMissionLines={},dkGoto=null,dkCtl=null,dkMapAct='goto',dkVid=null;
+const DK_MAP_HINT={goto:'Click the map where the drone should go (it flies there at the response height and holds).',
+  look_at:'Click the map: the camera turns to that spot.',orbit:'Click the map on the spot to circle (the drone keeps its current distance and height).'};
+function dockMapMode(sn,act){const on=!(dkGoto===sn&&dkMapAct===act);dkGoto=on?sn:null;dkMapAct=act;dkMsg(on?DK_MAP_HINT[act]:'');loadDocks()}
+function dockMapClick(lat,lon){if(dkMapAct==='goto')return dockGoto(lat,lon);const sn=dkGoto,act=dkMapAct;dkGoto=null;dkMapAct='goto';
+  if(act==='orbit'){const x=dockData.find(d=>d.sn===sn)||{};if(!confirm(`Circle ${lat.toFixed(5)}, ${lon.toFixed(5)} with ${x.name||'the dock'}'s drone?`)){loadDocks();return}}
+  dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:act,lat,lon}).then(d=>{dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()})}
+function dockVidMode(sn,act){const on=!(dkVid&&dkVid.sn===sn&&dkVid.act===act);dkVid=on?{sn,act}:null;
+  dkMsg(on?(act==='aim'?'Click the drone video where the camera should point.':'Click the drone video where to measure the temperature (thermal lens).'):'');
+  if(on&&act==='thermal_point'){const x=dockData.find(d=>d.sn===sn)||{};if(!(x.video||{}).streaming)dkMsg('Start the drone video first, then click it.',false)}loadDocks()}
+async function dockVidClick(sn,ev){if(!dkVid||dkVid.sn!==sn)return;const r=ev.currentTarget.getBoundingClientRect();
+  const act=dkVid.act;dkVid=null;const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:act,x:(ev.clientX-r.left)/r.width,y:(ev.clientY-r.top)/r.height});
+  dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockStop(sn,name){if(!confirm(`Emergency stop ${name}'s drone? It stops and holds where it is.`))return;
+  const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:'stop'});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
+async function dockDeter(sn,what,on){const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/deterrent',{[what]:on});dkMsg(d.ok?d.message:d.error,d.ok);setTimeout(loadDocks,800)}
 // Phase 4: live control of a dock's drone
-function dockGotoMode(sn){dkGoto=dkGoto===sn?null:sn;dkMsg(dkGoto?'Click the map where the drone should go (it flies there at the response height and holds).':'');loadDocks()}
+function dockGotoMode(sn){dockMapMode(sn,'goto')}
 async function dockGoto(lat,lon){const sn=dkGoto;dkGoto=null;const x=dockData.find(d=>d.sn===sn)||{};
   if(!confirm(`Send ${x.name||'the dock'}'s drone to ${lat.toFixed(5)}, ${lon.toFixed(5)}?`)){loadDocks();return}
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:'goto',lat,lon});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
@@ -658,9 +685,12 @@ function drawDockVideos(){const box=$('dockVideos');if(!box)return;
       el.innerHTML=`<div class="dk-vhead"><i class="dot good"></i><span></span></div><div class="dk-vbody">`
         +(x.simulated?'<div class="dk-sim">SIMULATED DOCK · NO PICTURE<br>A real dock streams here, and Frigate runs the AI on it.</div>'
           :`<div class="live-slot" data-live-camera="${esc(x.slot)}"></div>`)+'</div>';
-      box.appendChild(el);const s=el.querySelector('.live-slot');if(s&&window.attachLiveCamera)window.attachLiveCamera(s)}
+      box.appendChild(el);const s=el.querySelector('.live-slot');if(s&&window.attachLiveCamera)window.attachLiveCamera(s);
+      const sn=x.sn;el.querySelector('.dk-vbody').addEventListener('click',ev=>dockVidClick(sn,ev))}
+    el.querySelector('.dk-vbody').style.cursor=dkVid&&dkVid.sn===x.sn?'crosshair':'';
     const v=x.video,LN={wide:'wide',zoom:'zoom',ir:'thermal',normal:'main'};
-    el.querySelector('.dk-vhead span').textContent=`${x.name} · ${v.device==='dock'?'dock camera':(x.drone_model||'drone')+' · '+(LN[v.lens]||v.lens||'')}`})}
+    const th=x.thermal,tt=th&&th.mode==='point'&&th.point!=null?` · 🌡 ${fmt(th.point)} °C`:th&&th.mode==='area'&&th.max!=null?` · 🌡 max ${fmt(th.max)} °C, avg ${fmt(th.average)} °C`:'';
+    el.querySelector('.dk-vhead span').textContent=`${x.name} · ${v.device==='dock'?'dock camera':(x.drone_model||'drone')+' · '+(LN[v.lens]||v.lens||'')}${tt}`})}
 async function dockVideo(sn,action,lens,device){dkMsg(action==='start'?'Asking the dock to start the video…':action==='stop'?'Stopping the video…':'Changing lens…');
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/video',{action,lens,device});
   dkMsg(d.ok?(action==='start'?'Video started. The picture appears below in a few seconds.':action==='stop'?'Video stopped.':'Lens changed.'):d.error,d.ok);loadDocks()}

@@ -1171,3 +1171,116 @@ def test_dock4_manual_swap_and_low_battery_hint(dock4):
         assert r.status_code == 409 and "no battery bays" in r.get_json()["error"]
     finally:
         client.delete(f"/api/docks/{sn3}")
+
+
+# ---------- V11.12: look at, aim, thermal readings, orbit, emergency stop, siren and floodlight ----------
+
+def _out_and_away(d, sn, metres=8):
+    """Wait until the dock's drone is out and at least this far from the dock."""
+    def away():
+        x = d.dock_hub.summary(sn)
+        return x["drone_in_dock"] is False and x["drone_lat"] and d._distance_m(x["lat"], x["lon"], x["drone_lat"], x["drone_lon"]) >= metres
+    return wait_until(away, 15)
+
+
+def test_look_aim_thermal_and_stop_dock3(flying_dock):
+    d, client, sn, sim, sent = flying_dock
+    ctl = lambda **b: client.post(f"/api/docks/{sn}/control", json=b)  # noqa: E731
+    assert ctl(action="look_at", lat=45.505, lon=-75.663).status_code == 409  # not flying
+    sim.speedup = 1.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).get_json()["ok"]
+    assert _out_and_away(d, sn)
+    x = d.dock_hub.summary(sn)
+    assert x["drone_height"] is not None and x["drone_height"] < 130  # height above take-off, not the ellipsoid height
+    r = ctl(action="look_at", lat=45.5052, lon=-75.6630).get_json()
+    assert r["ok"], r
+    assert sim.looked_at == (45.5052, -75.663)
+    assert ctl(action="look_at", lat=46.0, lon=-75.0).status_code == 409  # far away
+    assert ctl(action="aim", x=0.7, y=0.4).get_json()["ok"] and sim.aimed == (0.7, 0.4)
+    assert ctl(action="aim").status_code == 400
+    assert ctl(action="thermal_point", x=0.5, y=0.5).get_json()["ok"]
+    assert wait_until(lambda: (d.dock_hub.summary(sn)["thermal"] or {}).get("point") == 36.4, 5)
+    assert ctl(action="thermal_area", x=0.2, y=0.2, w=0.3, h=0.3).get_json()["ok"]
+    assert wait_until(lambda: (d.dock_hub.summary(sn)["thermal"] or {}).get("max") == 36.4, 5)
+    assert ctl(action="thermal_off").get_json()["ok"] and sim.ir["mode"] == 0
+    r = ctl(action="orbit", lat=45.5048, lon=-75.6636)
+    assert r.status_code == 409 and "Dock 4" in r.get_json()["error"]
+    # Emergency stop on a Dock 3 without stick control: the route is paused, the drone holds.
+    r = ctl(action="stop").get_json()
+    assert r["ok"] and "holds where it is" in r["message"]
+    assert sim.flight["phase"] == "holding" and d.dock_hub.mission(sn)["status"] == "manual"
+    assert any("emergency stop" in t for t in sent)
+    sim.speedup = 40.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+def test_emergency_stop_with_sticks_dock3(flying_dock, monkeypatch):
+    d, client, sn, sim, sent = flying_dock
+    sim.speedup = 1.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock loop"}).get_json()["ok"]
+    assert _out_and_away(d, sn, 3)
+    assert client.post(f"/api/docks/{sn}/control", json={"action": "sticks_on"}).get_json()["ok"]
+    assert client.post(f"/api/docks/{sn}/control", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: sim.stopped, 3)  # DJI's DRC emergency stop went down the stick channel
+    sim.speedup = 40.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+def test_dock4_orbit_and_emergency_stop(dock4, monkeypatch):
+    d, client, sn, sim = dock4
+    ctl = lambda **b: client.post(f"/api/docks/{sn}/control", json=b)  # noqa: E731
+    sim.speedup = 1.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock4 hop"}).get_json()["ok"]
+    assert _out_and_away(d, sn, 8)
+    home = (45.5048, -75.6636)
+    # A no-fly zone on the circle: refused.
+    school = {"name": "School"}  # everything west of the dock
+    monkeypatch.setattr(d, "nofly_zones", lambda: [school])
+    monkeypatch.setattr(d.nofly, "zone_at", lambda zones, lat, lon: school if zones and lon < home[1] - 0.00002 else None)
+    r = ctl(action="orbit", lat=home[0], lon=home[1])
+    assert r.status_code == 409 and "School" in r.get_json()["error"]
+    monkeypatch.setattr(d, "nofly_zones", lambda: [])
+    r = ctl(action="orbit", lat=home[0], lon=home[1], speed=4).get_json()
+    assert r["ok"], r
+    assert sim.flight["phase"] == "orbit" and sim.flight["orbit"]["speed"] == 4.0
+    assert wait_until(lambda: (d.dock_hub.summary(sn)["orbit"] or {}).get("radius"), 5)
+    assert d.dock_hub.mission(sn)["status"] == "manual"
+    assert ctl(action="orbit_stop").get_json()["ok"]
+    assert sim.flight["phase"] == "holding" and d.dock_hub.summary(sn)["orbit"] is None
+    assert ctl(action="orbit", lat=home[0], lon=home[1]).get_json()["ok"]
+    r = ctl(action="stop").get_json()
+    assert r["ok"] and sim.stopped and sim.flight["phase"] == "holding" and d.dock_hub.summary(sn)["orbit"] is None
+    page = client.get("/drone-control").get_data(as_text=True)
+    assert "🌀 Orbit" in page and "⛔ Stop now" in page and "🎯 Aim" in page and "🌡 Temperature" in page and "👁 Look at" in page
+    sim.speedup = 40.0
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "stop"}).get_json()["ok"]
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"], 20)
+
+
+def test_dock_siren_and_floodlight(dock4):
+    d, client, sn, sim = dock4
+    deter = lambda **b: client.post(f"/api/docks/{sn}/deterrent", json=b)  # noqa: E731
+    assert deter().status_code == 400
+    r = deter(siren=True, light=True).get_json()
+    assert r["ok"] and "siren on and floodlight on" in r["message"]
+    assert sim.siren and sim.light
+    assert wait_until(lambda: d.dock_hub.summary(sn)["siren"] and d.dock_hub.summary(sn)["light"], 5)
+    assert [p for t, p in sim.replies if p.get("method") == "alarm_state_switch"]  # the hub got the dock's answer
+    assert deter(siren=False).get_json()["ok"] and not sim.siren and sim.light
+    assert deter(light=False).get_json()["ok"] and not sim.light
+    assert client.post("/api/docks/NOPE123/deterrent", json={"siren": True}).status_code == 404
+
+
+def test_hub_thermal_reading_and_heights(hub):
+    hub.handle("sys/product/DOCK1/status", topo())
+    hub.handle("thing/product/DOCK1/osd", {"data": {"latitude": 33.9, "longitude": 35.5, "height": 120.0}})
+    hub.handle("thing/product/UAV1/osd", {"data": {"height": 160.5, "elevation": 40.5, "latitude": 33.9, "longitude": 35.5, "cameras": [
+        {"payload_index": "99-0-0", "ir_metering_mode": 2, "thermal_global_temperature_max": 41.0, "thermal_global_temperature_min": 12.0,
+         "ir_metering_area": {"aver_temperature": 25.5, "max_temperature_point": {"temperature": 39.9},
+                              "min_temperature_point": {"temperature": 14.1}}}]}})
+    x = hub.summary("DOCK1")
+    assert x["drone_height"] == 40.5  # above take-off, not DJI's ellipsoid height
+    assert x["thermal"] == {"mode": "area", "point": None, "average": 25.5, "max": 39.9, "min": 14.1, "scene_max": 41.0, "scene_min": 12.0}
+    assert hub.ground_height("DOCK1") == 120.0

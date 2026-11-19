@@ -59,6 +59,14 @@ class SimulatedDock:
         self.photos = 0
         self.recording = False
         self.gimbal = -45
+        # V11.12: look at, aim, thermal, orbit, emergency stop, siren and floodlight
+        self.ground = 50.0          # ellipsoid height of the ground at the dock (m)
+        self.looked_at = None       # (lat, lon) of the last look-at
+        self.aimed = None           # (x, y) of the last aim
+        self.ir = {"mode": 0, "x": 0.5, "y": 0.5, "w": 0.2, "h": 0.2}
+        self.siren = False
+        self.light = False
+        self.stopped = False        # emergency stop received
 
     def _msg(self, method=None, data=None, **extra):
         return {"tid": str(uuid.uuid4()), "bid": str(uuid.uuid4()), "timestamp": int(time.time() * 1000),
@@ -109,24 +117,37 @@ class SimulatedDock:
         if swap4:
             self.send(f"thing/product/{self.sn}/osd", self._msg(data={  # the ground station: the dock's position
                 "mode_code": 4 if out else 0, "basestation_work_mode": 1, "latitude": self.home[0], "longitude": self.home[1],
+                "height": self.ground,
                 "network_state": {"type": 2, "quality": 5, "rate": 12000}}))
         extra = {"battery_swap_times": self.swaps, "battery_system": {
             "total_slots": len(self.bays), "present_count": sum(b is not None for b in self.bays),
             "slots": [{"slot_id": i, "pack_presence": 0 if b is None else 4 if b >= 100 else 2,
                        **({} if b is None else {"capacity_percent": int(b), "soh_percent": 98, "battery_sn": f"SIMBAT{i}"})}
-                      for i, b in enumerate(self.bays, 1)]}} if swap4 else {"latitude": self.home[0], "longitude": self.home[1]}
+                      for i, b in enumerate(self.bays, 1)]}} if swap4 else {"latitude": self.home[0], "longitude": self.home[1], "height": self.ground}
         self.send(f"thing/product/{self.dock_sn}/osd", self._msg(data={
             "mode_code": 8 if self.swap else 4 if out else 0, "cover_state": 3 if f == "cover" else 1 if out else 0,
-            "drone_in_dock": 0 if out else 1, **extra,
+            "drone_in_dock": 0 if out else 1, **extra, "alarm_state": int(self.siren), "supplement_light_state": int(self.light),
             "environment_temperature": 47.5 if f == "hot" else round(24 + random.uniform(-0.3, 0.3), 1), "temperature": 28.0,
             "wind_speed": 14.2 if f == "wind" else round(random.uniform(1.0, 3.5), 1), "rainfall": 3 if f == "rain" else 0,
             "network_state": {"type": 2, "quality": 5, "rate": 12000},
             "drone_charge_state": {"state": 1 if charging else 0, "capacity_percent": int(self.battery)}}))
         self.send(f"thing/product/{self.drone_sn}/osd", self._msg(data={
             "mode_code": (9 if self.flight["phase"] == "returning" else 5) if out else 14,
-            "latitude": self.pos[0], "longitude": self.pos[1], "height": round(self.height, 1), "elevation": round(self.height, 1),
-            "horizontal_speed": 0, "vertical_speed": 0, "attitude_head": 0,
+            "latitude": self.pos[0], "longitude": self.pos[1], "height": round(self.ground + self.height, 1), "elevation": round(self.height, 1),
+            "horizontal_speed": 0, "vertical_speed": 0, "attitude_head": 0, "cameras": [self.camera_state()],
             "battery": {"capacity_percent": int(self.battery), "remain_flight_time": int(self.battery * 0.4 * 60)}}))
+
+    def camera_state(self):
+        """The drone camera's telemetry: thermal readings while measuring (a warm spot where it last looked or aimed)."""
+        warm = 36.4 if (self.looked_at or self.aimed) else 21.0
+        m = self.ir["mode"]
+        return {"payload_index": DRONE_CAMERA[self.model], "camera_mode": 0, "ir_metering_mode": m,
+                "thermal_global_temperature_min": 18.5, "thermal_global_temperature_max": max(warm, 24.0),
+                **({"ir_metering_point": {"x": self.ir["x"], "y": self.ir["y"], "temperature": warm}} if m == 1 else {}),
+                **({"ir_metering_area": {"x": self.ir["x"], "y": self.ir["y"], "width": self.ir["w"], "height": self.ir["h"],
+                                         "aver_temperature": round((warm + 19.0) / 2, 1),
+                                         "max_temperature_point": {"x": 0.5, "y": 0.5, "temperature": warm},
+                                         "min_temperature_point": {"x": 0.1, "y": 0.1, "temperature": 19.0}}} if m == 2 else {})}
 
     def hms(self):
         """A DJI health message about the dock, repeated while it lasts, as real docks do."""
@@ -160,6 +181,14 @@ class SimulatedDock:
                 f["goto"] = f["goto"][1:]
                 if not f["goto"]:
                     f["phase"] = "holding"
+        if f["phase"] == "orbit":
+            o = f["orbit"]
+            o["angle"] += o["speed"] * self.period * self.speedup / max(5.0, o["radius"])
+            lat, lon = o["center"]
+            self.pos = (lat + o["radius"] * math.cos(o["angle"]) / 111320.0,
+                        lon + o["radius"] * math.sin(o["angle"]) / (111320.0 * math.cos(math.radians(lat))))
+            self.send(f"thing/product/{self.sn}/events", self._msg("poi_status_notify", {
+                "status": "in_progress", "reason": 0, "circle_radius": o["radius"], "circle_speed": o["speed"], "max_circle_speed": 10}))
         if f["phase"] == "manual" and self.stick and time.time() - self.stick[0] < 0.5:
             _, x, y, z, _r = self.stick
             m = 10.0 * self.period * self.speedup  # m per tick at full stick
@@ -172,7 +201,7 @@ class SimulatedDock:
             if self.model == "dock4" and self.battery < SWAP_BELOW:
                 self.start_swap()
             return
-        if f["phase"] in ("goto", "holding", "manual"):
+        if f["phase"] in ("goto", "holding", "manual", "orbit"):
             return  # the route is paused while an operator flies it; no route progress
         pct = 99 if f["phase"] == "returning" else int(100 * f["index"] / max(1, len(pts)))
         self.progress(pct, "in_progress")
@@ -255,6 +284,9 @@ class SimulatedDock:
                 d = payload.get("data") or {}
                 v = lambda k: (float(d.get(k, 1024)) - 1024) / 660.0  # noqa: E731
                 self.stick = (time.time(), v("roll"), v("pitch"), v("throttle"), v("yaw"))
+            elif payload.get("method") == "drone_emergency_stop" and self.flight:
+                self.stopped, self.stick = True, None
+                self.flight["phase"] = "holding"
             return
         if topic.endswith("/services"):  # a command: say it's done (there is no real picture to send)
             method, data = payload.get("method"), payload.get("data") or {}
@@ -290,9 +322,11 @@ class SimulatedDock:
             elif method == "drc_mode_enter":
                 self.drc = bool(self.flight)
                 result = 0 if self.flight else 319001
-            elif method in ("flight_authority_grab", "payload_authority_grab"):
+            elif method == "payload_authority_grab":
+                result = 0 if self.flight else 319002
+            elif method == "flight_authority_grab":
                 result = 0 if self.drc else 319002
-                if self.drc and method == "flight_authority_grab":
+                if self.drc:
                     self.flight["phase"] = "manual"
             elif method == "drc_mode_exit":
                 self.drc = False
@@ -305,6 +339,50 @@ class SimulatedDock:
                 self.recording = method.endswith("start")
             elif method == "gimbal_reset":
                 self.gimbal = -90 if data.get("reset_mode") == 1 else 0
+            elif method == "camera_look_at":
+                if not self.flight or float(data.get("height") or 0) < 2:
+                    result = 319003
+                else:
+                    self.looked_at = (data.get("latitude"), data.get("longitude"))
+            elif method == "camera_aim":
+                if not self.flight:
+                    result = 319003
+                else:
+                    self.aimed = (data.get("x"), data.get("y"))
+            elif method == "ir_metering_mode_set":
+                self.ir["mode"] = int(data.get("mode") or 0)
+            elif method == "ir_metering_point_set":
+                self.ir.update(x=data.get("x"), y=data.get("y"))
+            elif method == "ir_metering_area_set":
+                self.ir.update(x=data.get("x"), y=data.get("y"), w=data.get("width"), h=data.get("height"))
+            elif method == "poi_mode_enter":
+                if self.model != "dock4":
+                    result = 314000  # Dock 2/3 don't have it
+                elif not self.flight:
+                    result = 314004
+                else:
+                    c = (float(data["latitude"]), float(data["longitude"]))
+                    dn = (self.pos[0] - c[0]) * 111320.0
+                    de = (self.pos[1] - c[1]) * 111320.0 * math.cos(math.radians(c[0]))
+                    self.flight.update(phase="orbit", orbit={"center": c, "radius": math.hypot(dn, de), "speed": 3.0,
+                                                             "angle": math.atan2(de, dn)})
+            elif method == "poi_circle_speed_set":
+                if self.flight and self.flight.get("orbit"):
+                    self.flight["orbit"]["speed"] = float(data.get("circle_speed") or 3.0)
+            elif method == "poi_mode_exit":
+                if self.flight and self.flight["phase"] == "orbit":
+                    self.flight["phase"] = "holding"
+                    self.send(f"thing/product/{self.sn}/events", self._msg("poi_status_notify", {"status": "ok", "reason": 0}))
+            elif method == "emergency_stop":
+                if self.model != "dock4":
+                    result = 314000
+                elif self.flight:
+                    self.stopped = True
+                    self.flight["phase"] = "holding"
+            elif method == "alarm_state_switch":
+                self.siren = bool(data.get("action"))
+            elif method in ("supplement_light_open", "supplement_light_close"):
+                self.light = method.endswith("open")
             elif method == "manual_battery_swap":
                 ok = self.start_swap(int(data.get("slot_id") or 0) or None)
                 self.send(topic + "_reply", {"tid": payload.get("tid"), "bid": payload.get("bid"), "method": method,

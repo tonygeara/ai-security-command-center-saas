@@ -246,6 +246,19 @@ From DJI's Cloud API docs (Dock 4 and Matrice 5TD pages, Nov 2026), and what the
   is the same as for Dock 3), the swap timing and events, the dock camera's video, and whether a flight right after a
   swap needs anything else.
 
+## More control (V11.12)
+
+From the Dock 3 / Dock 4 Cloud API pages: `camera_look_at` (lat, lon, ellipsoid height, `locked`), `camera_aim`
+(x, y on the picture, lens), `ir_metering_mode_set` / `ir_metering_point_set` / `ir_metering_area_set` with the readings
+in the drone's `cameras[]` telemetry (`ir_metering_point.temperature`, `ir_metering_area.aver_temperature`, max/min
+points, `thermal_global_temperature_max/min`), `poi_mode_enter` / `poi_circle_speed_set` / `poi_mode_exit` with
+`poi_status_notify` events (Dock 4 only), `emergency_stop` (Dock 4 service) and `drone_emergency_stop` (DRC, Dock 2/3/4),
+`alarm_state_switch` and `supplement_light_open/close` (the dock's siren-and-lights and floodlight; `device_sn` sent for
+Dock 4). Camera commands take payload authority first. Heights for look-at and orbit are the ground's ellipsoid height
+(the ground station's or the dock's `height`, or the drone's `height - elevation`) plus 1.5 m.
+To confirm on a real dock: that emergency stop holds position (DJI's docs don't say), and that the siren and light
+don't need remote-debugging mode.
+
 ## Testing
 - Unit/integration tests against `dock_sim.py` in `edge/tests` (no hardware).
 - With hardware: bind, telemetry, video, a short wayline over the site in a safe area, alarm launch,
