@@ -256,7 +256,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <div class="muted" style="margin-top:14px"><b>3. Alarm launches</b>: when a drone is sent to a camera (automatic dispatch, handoff, Telegram, the dashboard), the nearest ready dock can go. By default the system asks first (Telegram and this page, “Launch / Don't”, expires after 5 min).</div>
 <label class="muted" style="display:flex;gap:8px;align-items:center;margin-top:8px"><input type="checkbox" id="dkNoAsk" onchange="dockNoAsk(this)"> Launch docks <b>without asking</b> (the drone takes off by itself as soon as an alarm needs it)</label>
 <div class="muted" style="margin-top:14px"><b>No dock yet?</b> Add a simulated Dock 3 with a Matrice 4TD to try the steps (it appears under Found at the map's centre).</div>
-<div class="actions" style="margin-top:8px"><button class="hud-btn" id="dkSimBtn" onclick="dockSimulate()">+ Simulated dock</button></div>
+<div class="actions" style="margin-top:8px"><button class="hud-btn" id="dkSimBtn" onclick="dockSimulate()">+ Simulated dock</button><button class="hud-btn" id="dkSim4Btn" onclick="dockSimulate('dock4')" title="A Dock 4 with a Matrice 5TD, which swaps batteries">+ Simulated Dock 4</button></div>
 </details></div></section>
 </main>
 <script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
@@ -547,6 +547,7 @@ let dkFull=false;
 function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE');
   if(x.drone_model)tags.push((x.drone_in_dock===false?'✈ ':'⌂ ')+esc(x.drone_model)+(x.drone_in_dock===false?' out':' in dock'));
   if(x.battery!=null)tags.push('🔋 '+x.battery+'%'+(x.charging?' charging':''));
+  const bays=x.bays;if(bays)tags.push('🔋 Bays: '+(bays.slots||[]).filter(b=>b.state!=='empty').map(b=>b.percent!=null?b.percent+'%':esc(b.state)).join(', ')+(bays.swaps!=null?` · ${bays.swaps} swaps`:''));
   if(x.cover)tags.push(x.cover==='cover fault'?'Cover fault':'Cover '+esc(x.cover));if(x.mode)tags.push(esc(x.mode));
   if(x.temperature!=null)tags.push('🌡 '+fmt(x.temperature)+' °C');if(x.wind!=null)tags.push('💨 '+fmt(x.wind)+' m/s');
   if(x.rain&&x.rain!=='none')tags.push('🌧 '+esc(x.rain));if(x.simulated)tags.push('SIMULATED');
@@ -580,6 +581,7 @@ function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE')
       +(dkRoutes.length?dkRoutes.map(r=>`<option ${dkRouteSel[x.sn]===r?'selected':''}>${esc(r)}</option>`).join(''):'<option value="">No saved routes</option>')
       +`</select><button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockMission(this.dataset.sn,'fly')" ${dkRoutes.length?'':'disabled'}>🛫 Fly route</button>`;
     else if(!x.auto_flights)fly=`<span class="muted" style="font-size:12px">Automatic flights off</span>`;
+    if(!ma&&bays&&x.online&&x.drone_in_dock&&!x.swapping)fly+=`<button class="hud-btn" data-sn="${esc(x.sn)}" onclick="dockSwap(this.dataset.sn)" ${bays.best!=null?'title="Put the fullest battery from the bays into the drone (about 25 s)"':'disabled title="No charged battery in the bays"'}>🔋 Swap battery${bays.best!=null?' ('+bays.best+'%)':''}</button>`;
   }
   const adm=DK_ADMIN&&!found?`<button class="hud-btn" data-sn="${esc(x.sn)}" data-on="${x.auto_flights?1:0}" onclick="dockAuto(this.dataset.sn,this.dataset.on==='1')" title="Lets this dock's drone take off by itself">Automatic flights: ${x.auto_flights?'ON':'OFF'}</button>`
     +`<button class="hud-btn" data-sn="${esc(x.sn)}" data-r="${x.range_m||500}" onclick="dockRange(this.dataset.sn,this.dataset.r)">Range ${x.range_m||500} m</button>`:'';
@@ -587,7 +589,7 @@ function dkCard(x,found){const tags=[];if(x.over_limit)tags.push('OVER LICENCE')
   const btns=!DK_ADMIN?'':found?`<input id="dkName_${esc(x.sn)}" placeholder="Name, e.g. Roof dock" style="flex:1;min-width:120px"><button class="hud-btn" onclick="dockRegister('${esc(x.sn)}')" ${dkFull&&!x.simulated?'disabled title="The licence\'s dock count is used up"':''}>Register</button>`
     :`<button class="hud-btn" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRename(this.dataset.sn,this.dataset.name)">Rename</button><button class="hud-btn danger" data-sn="${esc(x.sn)}" data-name="${esc(x.name)}" onclick="dockRemove(this.dataset.sn,this.dataset.name)">Remove</button>`;
   return `<div class="dk-card${found?' found':''}${sev}" id="dkCard_${esc(x.sn)}"${x.over_limit?' style="opacity:.55" title="Over the licence\'s dock count: not watched. Remove a dock or ask your provider for more."':''}><h4><i class="dot ${dot}"></i>${found?'Found: ':''}${esc(found?(x.model||'Dock'):x.name)}</h4>
-    <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
+    <div class="dk-sub">${esc(found?'':(x.model||'Dock')+' · ')}SN ${esc(x.sn)}${x.dock_sn?' · dock SN '+esc(x.dock_sn)+' via '+esc(x.gateway_model||'ground station'):''}${found?'':' · '+esc(x.slot)} · ${x.online?'online':'offline'}</div>
     ${alerts}<div class="dk-tags">${tags.map(t=>'<span>'+t+'</span>').join('')}</div>${fly?`<div class="actions" style="gap:6px;margin-bottom:6px">${fly}</div>`:''}${vid?`<div class="actions" style="gap:6px;margin-bottom:6px">${vid}</div>`:''}${adm?`<div class="actions" style="gap:6px;margin-bottom:6px">${adm}</div>`:''}<div class="actions" style="gap:6px">${btns}${test}</div></div>`}
 async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
   dkFull=d.limit!=null&&d.used>=d.limit;
@@ -598,6 +600,7 @@ async function loadDocks(){try{const d=await fetch('/api/docks',{cache:'no-store
   const hl=d.health_log||[];$('dockHealth').innerHTML=hl.length?'<b style="color:#5bd9ff;font-size:11px;letter-spacing:1px">HEALTH</b>'+hl.map(a=>`<div class="${a.active?'on':''}"><small>${new Date(a.t*1000).toLocaleString()}</small>${a.active?(a.level==='warning'?'⚠ ':'● '):'✓ '}${esc(a.text)}</div>`).join(''):'';
   if(!keep)$('dockList').innerHTML=cards.length?cards.join(''):'<div class="muted">No dock yet.'+(DK_ADMIN?' Open “Set up a dock” below.':' An admin can set one up.')+'</div>';
   if($('dkSimBtn'))$('dkSimBtn').disabled=!d.can_simulate||!d.allowed;
+  if($('dkSim4Btn'))$('dkSim4Btn').disabled=!d.can_simulate||!d.allowed;
   if($('dkNoAsk'))$('dkNoAsk').checked=!!d.launch_without_asking;
   $('dockLaunches').innerHTML=(d.launches||[]).map(l=>`<div class="dk-launch"><span>🚨 Launch <b>${esc(l.name)}</b> to <b>${esc(l.camera)}</b>?</span><span class="muted">${esc(l.by)} · expires ${new Date(l.expires*1000).toLocaleTimeString()}</span>
     <button class="hud-btn danger" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,true)">🚁 Launch</button><button class="hud-btn" data-id="${esc(l.id)}" onclick="dockLaunch(this.dataset.id,false)">✋ Don't</button></div>`).join('');
@@ -706,7 +709,8 @@ async function dockRemove(sn,name){if(!confirm(`Remove ${name}? It stops being p
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{},'DELETE');dkMsg(d.ok?'Removed.':d.error,d.ok);loadDocks()}
 async function dockFault(sel){const d=await dkPost('/api/docks/'+encodeURIComponent(sel.dataset.sn)+'/fault',{fault:sel.value});sel.blur();
   dkMsg(d.ok?(d.fault?'Test problem set. The alert shows here and on Telegram within a few seconds'+(d.fault==='offline'?' (offline: after 1 minute).':'.'):'All clear set.'):d.error,d.ok);setTimeout(loadDocks,800)}
-async function dockSimulate(){const c=map&&map.getCenter?map.getCenter():null;const d=await dkPost('/api/docks/simulate',c?{lat:c.lat,lon:c.lng}:{});
+async function dockSwap(sn){const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/battery',{});dkMsg(d.ok?d.message:d.error,d.ok);setTimeout(loadDocks,800)}
+async function dockSimulate(model){const c=map&&map.getCenter?map.getCenter():null;const d=await dkPost('/api/docks/simulate',{...(c?{lat:c.lat,lon:c.lng}:{}),...(model?{model}:{})});
   dkMsg(d.ok?`Simulated dock ${d.sn} added: it shows under Found in a moment. Register it to try the steps.`:d.error,d.ok);setTimeout(loadDocks,1500)}
 loadDocks();setInterval(loadDocks,3000);loadDockSetup();
 $('speedVal').textContent='30%';loadFleet();setInterval(loadFleet,3000);loadPair();poll();loadResp();loadRoutes().then(loadScheds);setInterval(poll,500);

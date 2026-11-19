@@ -4,6 +4,10 @@ It sends the hub what a real dock sends over MQTT (DJI Cloud API): its topology 
 dock telemetry (cover, weather, drone charging) and the drone's telemetry, once a second, and takes the hub's
 replies. It flies the flight plans the PC sends (Phase 3): it downloads the KMZ, takes off, flies the waypoints
 (hovering where the plan says), reports flighttask_progress, returns to the dock and lands. speedup makes tests quick.
+
+model "dock4" is a DJI Dock 4 with a Matrice 5TD: an O4 ground station is the gateway (sn) with the dock (sn-DOCK)
+and the drone behind it, as DJI's Cloud API documents. It doesn't charge the drone: after landing below 79% it swaps
+in the fullest battery from its bays (25 s) and charges the old one there; manual_battery_swap does it on demand.
 """
 import math
 import random
@@ -14,7 +18,12 @@ import uuid
 MODELS = {  # simulated model -> (dock domain, type, sub_type), (drone domain, type, sub_type)
     "dock3": ((3, 3, 0), (0, 100, 1)),   # Dock 3 with Matrice 4TD
     "dock2": ((3, 2, 0), (0, 91, 1)),    # Dock 2 with Matrice 3TD
+    "dock4": ((8, 135, 0), (0, 130, 0)),  # O4 ground station (gateway) with Dock 4 and Matrice 5TD behind it
 }
+DOCK4 = (9, 131, 0)
+SWAP_SECONDS = 25      # Dock 4 battery swap
+SWAP_BELOW = 79        # Dock 4 swaps by itself after landing below this %
+DRONE_CAMERA = {"dock3": "99-0-0", "dock2": "99-0-0", "dock4": "122-0-0"}
 
 
 class SimulatedDock:
@@ -24,6 +33,10 @@ class SimulatedDock:
         self.send = send            # send(topic, dict): into the hub
         self.home = (float(home[0]), float(home[1]))
         self.model = model if model in MODELS else "dock3"
+        self.dock_sn = sn + "-DOCK" if self.model == "dock4" else sn   # the dock's own sn (Dock 4: behind the gateway)
+        self.bays = [96.0, 71.0, None, None] if self.model == "dock4" else []  # Dock 4: 4 bays, 2 batteries besides the drone's
+        self.swaps = 0
+        self.swap = None            # (ends at, slot) while swapping
         self.period = period
         self.battery = 64.0
         self.powered = True
@@ -53,10 +66,14 @@ class SimulatedDock:
 
     def topology(self):
         (dd, dt, ds), (ud, ut, us) = MODELS[self.model]
+        subs = [{"sn": self.drone_sn, "domain": ud, "type": ut, "sub_type": us, "index": "A",
+                 "device_secret": "sim", "nonce": "sim", "version": "1.0.0"}]
+        if self.model == "dock4":
+            subs.append({"sn": self.dock_sn, "domain": DOCK4[0], "type": DOCK4[1], "sub_type": DOCK4[2],
+                         "device_secret": "sim", "nonce": "sim", "thing_version": "1.3.0"})
         self.send(f"sys/product/{self.sn}/status", self._msg("update_topo", {
             "domain": dd, "type": dt, "sub_type": ds, "version": "1.0.0", "device_secret": "sim", "nonce": "sim",
-            "sub_devices": [{"sn": self.drone_sn, "domain": ud, "type": ut, "sub_type": us, "index": "A",
-                             "device_secret": "sim", "nonce": "sim", "version": "1.0.0"}]}))
+            "sub_devices": subs}))
 
     def go_offline(self):
         self.send(f"sys/product/{self.sn}/status", self._msg("update_topo", {}))
@@ -66,25 +83,41 @@ class SimulatedDock:
         self.send(f"thing/product/{self.sn}/state", self._msg(data={"live_capacity": {
             "available_video_number": 2, "coexist_video_number_max": 1, "device_list": [
                 {"sn": self.drone_sn, "available_video_number": 1, "coexist_video_number_max": 1, "camera_list": [
-                    {"camera_index": "99-0-0", "available_video_number": 1, "coexist_video_number_max": 1,
+                    {"camera_index": DRONE_CAMERA[self.model], "available_video_number": 1, "coexist_video_number_max": 1,
                      "video_list": [{"video_index": "normal-0", "video_type": "normal", "switchable_video_types": ["wide", "zoom", "ir"]}]}]},
-                {"sn": self.sn, "available_video_number": 1, "coexist_video_number_max": 1, "camera_list": [
+                {"sn": self.dock_sn, "available_video_number": 1, "coexist_video_number_max": 1, "camera_list": [
                     {"camera_index": "165-0-7", "available_video_number": 1, "coexist_video_number_max": 1,
                      "video_list": [{"video_index": "normal-0", "video_type": "normal", "switchable_video_types": []}]}]}]}}))
 
     def osd(self):
         f = self.fault
+        swap4 = self.model == "dock4"
         if f == "battery":
             self.battery, charging = 12.0, False
+            self.bays = [10.0 if b is not None else None for b in self.bays]
+        elif swap4:  # Dock 4 doesn't charge the drone; it charges the batteries in its bays
+            charging = False
+            self.bays = [min(100.0, b + 0.5 * self.speedup) if b is not None else None for b in self.bays]
         else:
             charging = self.battery < 100
             self.battery = min(100.0, self.battery + 0.5)
         out = self.flight is not None
         if out:
             self.battery, charging = max(5.0, self.battery - 0.3), False
-        self.send(f"thing/product/{self.sn}/osd", self._msg(data={
-            "mode_code": 4 if out else 0, "cover_state": 3 if f == "cover" else 1 if out else 0, "drone_in_dock": 0 if out else 1,
-            "latitude": self.home[0], "longitude": self.home[1],
+        if self.swap and time.time() >= self.swap[0]:
+            self._finish_swap()
+        if swap4:
+            self.send(f"thing/product/{self.sn}/osd", self._msg(data={  # the ground station: the dock's position
+                "mode_code": 4 if out else 0, "basestation_work_mode": 1, "latitude": self.home[0], "longitude": self.home[1],
+                "network_state": {"type": 2, "quality": 5, "rate": 12000}}))
+        extra = {"battery_swap_times": self.swaps, "battery_system": {
+            "total_slots": len(self.bays), "present_count": sum(b is not None for b in self.bays),
+            "slots": [{"slot_id": i, "pack_presence": 0 if b is None else 4 if b >= 100 else 2,
+                       **({} if b is None else {"capacity_percent": int(b), "soh_percent": 98, "battery_sn": f"SIMBAT{i}"})}
+                      for i, b in enumerate(self.bays, 1)]}} if swap4 else {"latitude": self.home[0], "longitude": self.home[1]}
+        self.send(f"thing/product/{self.dock_sn}/osd", self._msg(data={
+            "mode_code": 8 if self.swap else 4 if out else 0, "cover_state": 3 if f == "cover" else 1 if out else 0,
+            "drone_in_dock": 0 if out else 1, **extra,
             "environment_temperature": 47.5 if f == "hot" else round(24 + random.uniform(-0.3, 0.3), 1), "temperature": 28.0,
             "wind_speed": 14.2 if f == "wind" else round(random.uniform(1.0, 3.5), 1), "rainfall": 3 if f == "rain" else 0,
             "network_state": {"type": 2, "quality": 5, "rate": 12000},
@@ -97,8 +130,8 @@ class SimulatedDock:
 
     def hms(self):
         """A DJI health message about the dock, repeated while it lasts, as real docks do."""
-        (dd, dt, ds), _ = MODELS[self.model]
-        self.send(f"thing/product/{self.sn}/events", self._msg("hms", {"list": [
+        dd, dt, ds = DOCK4 if self.model == "dock4" else MODELS[self.model][0]
+        self.send(f"thing/product/{self.dock_sn}/events", self._msg("hms", {"list": [
             {"level": 2, "module": 3, "in_the_sky": 0, "code": "0x19110000", "device_type": f"{dd}-{dt}-{ds}", "imminent": 0,
              "args": {"component_index": 0, "sensor_index": 0}}]}, need_reply=0))
 
@@ -136,6 +169,8 @@ class SimulatedDock:
             self.height, self.pos = 0.0, self.home
             self.progress(100, f["status"])
             self.flight = None
+            if self.model == "dock4" and self.battery < SWAP_BELOW:
+                self.start_swap()
             return
         if f["phase"] in ("goto", "holding", "manual"):
             return  # the route is paused while an operator flies it; no route progress
@@ -187,6 +222,22 @@ class SimulatedDock:
             self.uploaded = getattr(self, "uploaded", 0) + 1
         except Exception as e:  # noqa: BLE001
             self.upload_error = str(e)
+
+    def start_swap(self, slot=None):
+        """Dock 4: swap the drone's battery for the fullest one in the bays (or this slot's). False if it can't."""
+        if self.flight or self.swap or self.model != "dock4":
+            return False
+        full = [(b, i) for i, b in enumerate(self.bays, 1) if b is not None and (slot is None or i == slot)]
+        if not full:
+            return False
+        self.swap = (time.time() + SWAP_SECONDS / self.speedup, max(full)[1])
+        return True
+
+    def _finish_swap(self):
+        _, slot = self.swap
+        self.battery, self.bays[slot - 1] = self.bays[slot - 1], self.battery
+        self.swaps += 1
+        self.swap = None
 
     def set_fault(self, fault):
         """Test alerts on a simulated dock; "" clears. offline: the dock goes silent (no goodbye, like a power cut)."""
@@ -254,6 +305,13 @@ class SimulatedDock:
                 self.recording = method.endswith("start")
             elif method == "gimbal_reset":
                 self.gimbal = -90 if data.get("reset_mode") == 1 else 0
+            elif method == "manual_battery_swap":
+                ok = self.start_swap(int(data.get("slot_id") or 0) or None)
+                self.send(topic + "_reply", {"tid": payload.get("tid"), "bid": payload.get("bid"), "method": method,
+                                             "timestamp": int(time.time() * 1000),
+                                             "data": {"result": 0, "device_sn": self.dock_sn,
+                                                      "output": {"status": "in_progress" if ok else "failed"}}})
+                return
             elif method == "return_home":
                 self.drc = False
                 if self.flight:

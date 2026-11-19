@@ -17,7 +17,7 @@ COMPUTER REQUIREMENTS
   - Internet connection (it keeps working for up to 7 days if the internet drops)
   - IP cameras with RTSP video, 1080p or better, on the same network as the computer
   - Optional drones: DJI aircraft with the Drone Link app on the controller, or a DJI Dock
-    (Dock 2 or Dock 3) whose drone flies by itself (ask your provider)
+    (Dock 2, Dock 3 or Dock 4) whose drone flies by itself (ask your provider)
 
 STEP 1 - SIGN IN TO THE PORTAL (5 minutes)
   - Open https://www.aisecuritycommandcenter.com/login and sign in with your email and the
