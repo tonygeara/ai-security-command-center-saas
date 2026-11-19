@@ -1002,3 +1002,172 @@ def test_media_receiver_with_aws_sdk(d, tmp_path):
         assert cfg["endpoint"] == "http://192.168.1.20:8769" and cfg["credentials"]["access_key_id"] == store.access_key
     finally:
         server.shutdown()
+
+
+# ---------- DJI Dock 4: behind an O4 ground station, swaps batteries ----------
+
+def topo4(gw="GSTN1", dock="DOCK4A", drone="UAV5", subs=True):
+    return {"tid": "t4", "bid": "b4", "method": "update_topo", "data": {
+        "domain": "8", "type": 135, "sub_type": 0, "thing_version": "1.3.0",
+        "sub_devices": [{"sn": drone, "domain": "0", "type": 130, "sub_type": 0, "index": "P2P"},
+                        {"sn": dock, "domain": "9", "type": 131, "sub_type": 0}] if subs else []}}
+
+
+def bay_system(*bays):
+    """bays: percent, None (empty) or "fault"."""
+    return {"total_slots": len(bays), "present_count": sum(b is not None for b in bays), "slots": [
+        {"slot_id": i, "pack_presence": 0 if b is None else 7 if b == "fault" else 4 if b == 100 else 2,
+         **({"capacity_percent": b, "soh_percent": 97} if isinstance(b, int) else {})} for i, b in enumerate(bays, 1)]}
+
+
+def test_hub_dock4_behind_ground_station(dock_mod, hub):
+    sent = []
+    hub.publish_mqtt = lambda topic, payload: sent.append((topic, payload))
+    hub.handle("sys/product/GSTN1/status", topo4())
+    assert sent[-1][0] == "sys/product/GSTN1/status_reply" and sent[-1][1]["data"] == {"result": 0}
+    hub.handle("thing/product/GSTN1/osd", {"data": {"mode_code": 0, "latitude": 33.9, "longitude": 35.5}})  # the ground station
+    hub.handle("thing/product/DOCK4A/osd", {"data": {"mode_code": 8, "cover_state": 0, "drone_in_dock": 1, "wind_speed": 2.0,
+                                                     "battery_swap_times": 12, "battery_system": bay_system(95, None, 40, "fault")}})
+    hub.handle("thing/product/UAV5/osd", {"data": {"battery": {"capacity_percent": 33}}})
+    f = hub.snapshot()["found"]
+    assert len(f) == 1 and f[0]["sn"] == "GSTN1"  # registered by the gateway: every command goes to its topics
+    f = f[0]
+    assert f["model"] == "DJI Dock 4" and f["gateway_model"] == "DJI O4 Ground Station" and f["dock_sn"] == "DOCK4A"
+    assert f["drone_model"] == "Matrice 5TD" and f["drone_sn"] == "UAV5" and f["online"]
+    assert f["lat"] == 33.9 and f["lon"] == 35.5  # Dock 4's position comes from its ground station
+    assert f["mode"] == "swapping the battery" and f["swapping"] and f["battery"] == 33 and f["cover"] == "closed"
+    b = f["bays"]
+    assert b["total"] == 4 and b["ready"] == 2 and b["best"] == 95 and b["best_slot"] == 1 and b["swaps"] == 12
+    assert [x["state"] for x in b["slots"]] == ["charging", "empty", "charging", "fault (unrecoverable)"] and b["slots"][3]["fault"]
+    # Messages on the dock's own sn (health, video capacity) belong to the gateway.
+    hub.handle("thing/product/DOCK4A/events", {"tid": "h", "bid": "h", "method": "hms", "need_reply": 1, "data": {"list": [
+        {"level": 2, "module": 3, "in_the_sky": 0, "code": "0x19110000", "device_type": "9-131-0", "imminent": 0}]}})
+    assert sent[-1][0] == "thing/product/DOCK4A/events_reply" and hub.hms_active("GSTN1")
+    hub.handle("thing/product/DOCK4A/state", {"data": {"live_capacity": {"device_list": [
+        {"sn": "UAV5", "camera_list": [{"camera_index": "122-0-0", "video_list": [{"video_index": "normal-0", "switchable_video_types": ["wide", "ir"]}]}]},
+        {"sn": "DOCK4A", "camera_list": [{"camera_index": "165-0-7", "video_list": [{"video_index": "normal-0"}]}]}]}}})
+    assert [v["device"] for v in hub.video_sources("GSTN1")] == ["drone", "dock"]
+    # Dock 4 commands name their device: live video gets device_sn, a lens change the camera; swaps go to the gateway.
+    def answer(topic, payload):
+        sent.append((topic, payload))
+        if topic.endswith("/services"):
+            out = {"status": "in_progress"} if payload["method"] == "manual_battery_swap" else {}
+            hub.handle(topic + "_reply", {"tid": payload["tid"], "data": {"result": 0, "output": out}})
+    hub.publish_mqtt = answer
+    assert hub.start_video("GSTN1", "rtmp://pc/dock1")[0]
+    push = [p for t, p in sent if p.get("method") == "live_start_push"][-1]
+    assert push["data"]["device_sn"] == "UAV5" and push["data"]["video_id"] == "UAV5/122-0-0/normal-0"
+    assert hub.change_lens("GSTN1", "ir")[0]
+    lens = [p for t, p in sent if p.get("method") == "live_lens_change"][-1]
+    assert lens["data"]["payload_index"] == "122-0-0"
+    assert hub.swap_battery("GSTN1") == (True, "")
+    t, p = [(t, p) for t, p in sent if p.get("method") == "manual_battery_swap"][-1]
+    assert t == "thing/product/GSTN1/services" and p["data"] == {"slot_id": 1}  # the fullest bay
+    # The ground station stays up while the dock is off: the dock is offline, still known as a Dock 4.
+    hub.handle("sys/product/GSTN1/status", topo4(subs=False))
+    x = hub.summary("GSTN1")
+    assert not x["online"] and x["model"] == "DJI Dock 4" and x["dock_sn"] == "DOCK4A"
+    hub.handle("sys/product/GSTN1/status", topo4())
+    assert hub.summary("GSTN1")["online"]
+
+
+def test_dock3_commands_unchanged(hub):
+    """Dock 1-3 are their own gateway: no device_sn or payload_index added, no battery bays."""
+    sent = []
+
+    def answer(topic, payload):
+        sent.append(payload)
+        if topic.endswith("/services"):
+            hub.handle(topic + "_reply", {"tid": payload["tid"], "data": {"result": 0}})
+    hub.publish_mqtt = answer
+    hub.handle("sys/product/DOCK1/status", topo())
+    hub.handle("thing/product/DOCK1/state", {"data": {"live_capacity": {"device_list": [
+        {"sn": "UAV1", "camera_list": [{"camera_index": "99-0-0", "video_list": [{"video_index": "normal-0", "switchable_video_types": ["wide", "ir"]}]}]}]}}})
+    assert hub.start_video("DOCK1", "rtmp://pc/dock1")[0] and hub.change_lens("DOCK1", "ir")[0]
+    push = [p for p in sent if p.get("method") == "live_start_push"][-1]["data"]
+    lens = [p for p in sent if p.get("method") == "live_lens_change"][-1]["data"]
+    assert "device_sn" not in push and "payload_index" not in lens
+    assert hub.summary("DOCK1")["bays"] is None and hub.swap_battery("DOCK1")[0] is False
+
+
+def test_health_dock4_batteries(dock_mod, hub):
+    health = dock_mod.DockHealth(hub)
+    hub.handle("sys/product/GSTN1/status", topo4())
+    hub.store.register("GSTN1", "Gate dock")
+    hub.handle("thing/product/GSTN1/osd", {"data": {"latitude": 33.9, "longitude": 35.5}})
+
+    def dock(drone, *bays):
+        hub.handle("thing/product/DOCK4A/osd", {"data": {"mode_code": 0, "drone_in_dock": 1, "cover_state": 0,
+                                                         "drone_charge_state": {"state": 0, "capacity_percent": drone},
+                                                         "battery_system": bay_system(*bays)}})
+    dock(12, 90, 60)  # low drone, but a charged battery waits in the bays: no alert (Dock 4 doesn't charge the drone)
+    assert health.check() == []
+    dock(12, 15, None, "fault")  # nothing charged and bay 3 broken
+    keys = {a["key"]: a for a in health.check()}
+    assert set(keys) == {"battery", "bay3"}
+    assert "no charged battery" in keys["battery"]["text"] and "bay 3" in keys["bay3"]["text"]
+    dock(95, 15, None, 80)  # swapped and the bay is fine again
+    cleared = {a["key"]: a for a in health.check()}
+    assert not any(a["active"] for a in cleared.values()) and "bay 3 is fine again" in cleared["bay3"]["text"]
+
+
+@pytest.fixture
+def dock4(d, client, monkeypatch):
+    """A registered simulated Dock 4 (fast simulator, automatic flights on) and a saved route."""
+    port = _free_port()
+    monkeypatch.setattr(d, "DOCK_PILOT_PORT", port)
+    monkeypatch.setattr(d, "_lan_ip", lambda: "127.0.0.1")
+    server = d.dock_lib.start_pilot_server(d.dock_store, d._dock_creds, lambda: "127.0.0.1", port=port, bind="127.0.0.1")
+    monkeypatch.setattr(d, "queue_telegram_alert", lambda *a, **k: None)
+    home = (45.5048, -75.6636)
+    r = client.post("/api/docks/simulate", json={"lat": home[0], "lon": home[1], "model": "dock4"}).get_json()
+    assert r["ok"] and r["model"] == "dock4"
+    sn = r["sn"]
+    sim = d.dock_hub.local[sn]
+    sim.speedup, sim.period = 40.0, 0.2
+    assert wait_until(lambda: d.dock_hub.summary(sn)["lat"] and d.dock_hub.summary(sn)["bays"] and d.dock_hub.video_sources(sn), 10)
+    assert client.post("/api/docks/register", json={"sn": sn, "name": "Dock four"}).get_json()["ok"]
+    assert client.post("/api/docks/" + sn + "/settings", json={"auto_flights": True, "confirm": True}).get_json()["auto_flights"]
+    stops = [{"lat": home[0] + 0.0003, "lon": home[1]}]
+    assert client.post("/api/routes", json={"name": "Dock4 hop", "points": stops, "alt": 40, "speed": 8, "pause": 0}).get_json()["ok"]
+    yield d, client, sn, sim
+    client.delete("/api/routes", json={"name": "Dock4 hop"})
+    client.delete(f"/api/docks/{sn}")
+    server.shutdown()
+
+
+def test_simulated_dock4_flies_and_swaps_battery(dock4):
+    d, client, sn, sim = dock4
+    x = [x for x in client.get("/api/docks").get_json()["docks"] if x["sn"] == sn][0]
+    assert x["model"] == "DJI Dock 4" and x["drone_model"] == "Matrice 5TD" and x["dock_sn"] == sn + "-DOCK"
+    assert x["gateway_model"] == "DJI O4 Ground Station" and x["bays"]["total"] == 4 and x["bays"]["ready"] == 2
+    sim.battery, sim.speedup = 70.0, 2.0  # lands below 79%: the dock swaps by itself
+    assert client.post(f"/api/docks/{sn}/mission", json={"action": "fly", "route": "Dock4 hop"}).get_json()["ok"]
+    assert wait_until(lambda: d.dock_hub.summary(sn)["drone_in_dock"] is False, 10)
+    assert client.post(f"/api/docks/{sn}/battery", json={}).status_code == 409  # not while it flies
+    sim.speedup = 40.0
+    assert wait_until(lambda: not d.dock_hub.mission(sn)["active"] and d.dock_hub.summary(sn)["drone_in_dock"], 20)
+    assert wait_until(lambda: d.dock_hub.summary(sn)["swapping"], 5)
+    assert "swapping" in d.dock_flight_problem(sn)  # busy while it swaps
+    assert wait_until(lambda: not d.dock_hub.summary(sn)["swapping"] and d.dock_hub.summary(sn)["bays"]["swaps"] == 1, 10)
+    assert d.dock_hub.summary(sn)["battery"] >= 90  # the fullest bay battery went in
+
+
+def test_dock4_manual_swap_and_low_battery_hint(dock4):
+    d, client, sn, sim = dock4
+    sim.battery = 15.0
+    assert wait_until(lambda: d.dock_hub.summary(sn)["battery"] == 15, 5)
+    problem = d.dock_flight_problem(sn)
+    assert "battery is 15%" in problem and "swap it in from the Drone page" in problem
+    r = client.post(f"/api/docks/{sn}/battery", json={}).get_json()
+    assert r["ok"] and "swapping" in r["message"]
+    assert wait_until(lambda: d.dock_hub.summary(sn)["battery"] >= 90 and not d.dock_hub.summary(sn)["swapping"], 10)
+    # A Dock 3 has no bays.
+    sn3 = client.post("/api/docks/simulate", json={}).get_json()["sn"]
+    try:
+        assert wait_until(lambda: d.dock_hub.summary(sn3)["online"], 10)
+        assert client.post("/api/docks/register", json={"sn": sn3, "name": "Old dock"}).get_json()["ok"]
+        r = client.post(f"/api/docks/{sn3}/battery", json={})
+        assert r.status_code == 409 and "no battery bays" in r.get_json()["error"]
+    finally:
+        client.delete(f"/api/docks/{sn3}")

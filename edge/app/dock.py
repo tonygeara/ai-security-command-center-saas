@@ -49,9 +49,21 @@ MODELS = {
     "0-91-0": "Matrice 3D", "0-91-1": "Matrice 3TD",
     "0-99-0": "Matrice 4E", "0-99-1": "Matrice 4T",
     "0-100-0": "Matrice 4D", "0-100-1": "Matrice 4TD",
+    "0-103-0": "Matrice 400", "0-130-0": "Matrice 5TD",
     "2-119-0": "DJI RC Plus", "2-144-0": "DJI RC Pro Enterprise", "2-174-0": "DJI RC Plus 2",
+    "9-131-0": "DJI Dock 4", "8-135-0": "DJI O4 Ground Station", "6-610-0": "DJI O4 Ground Station (relay)",
+    "7-262-1": "DJI Power",
 }
-DOCK_MODES = {0: "idle", 1: "on-site debugging", 2: "remote debugging", 3: "updating firmware", 4: "working"}
+# DJI Dock 4 doesn't connect by itself: a DJI O4 Ground Station (domain 8) is the gateway and the dock (domain 9) and
+# its Matrice 5TD are sub-devices in its topology. Every command still goes to the gateway's topics; the dock and the
+# drone report telemetry on their own serial numbers. The hub keeps the gateway's sn as the dock's id (what is
+# registered); the dock's own sn is shown next to it.
+GATEWAY_DOMAIN, SUB_DOCK_DOMAIN = "8", "9"
+DOCK_MODES = {0: "idle", 1: "on-site debugging", 2: "remote debugging", 3: "updating firmware", 4: "working",
+              5: "to be calibrated", 6: "low power", 8: "swapping the battery", 9: "reporting logs"}
+# Dock 4 battery bays (battery_system.slots[].pack_presence): which states can go into the drone, and which are faults.
+BAY_READY = {1: "available", 2: "charging", 3: "fast charging", 4: "full", 9: "storage mode"}
+BAY_FAULT = {5: "communication fault", 6: "fault (recoverable)", 7: "fault (unrecoverable)"}
 COVER_STATES = {0: "closed", 1: "open", 2: "half open", 3: "cover fault"}
 # Health alerts (Telegram and the Drone page). A condition must clear past its "back" value to end (no flapping).
 OFFLINE_ALERT_SECONDS = 60     # a registered dock silent this long
@@ -247,6 +259,7 @@ class DockHub:
         self.lock = threading.Lock()
         self.state = {}       # gateway sn -> live state
         self.drone_of = {}    # drone sn -> gateway sn
+        self.dock_of = {}     # Dock 4: the dock's own sn -> its ground station (gateway) sn
         self.local = {}       # gateway sn -> simulated dock
         self.publish_mqtt = None
         self.on_change = None  # called with (event, gateway sn): "online", "offline", "found"
@@ -286,7 +299,7 @@ class DockHub:
         elif kind == "thing" and leaf == "osd":
             self._osd(sn, msg.get("data") or {})
         elif kind == "thing" and leaf == "state":
-            gw = self.drone_of.get(sn, sn)
+            gw = self.gateway_of(sn)
             self._touch(gw)
             cap = (msg.get("data") or {}).get("live_capacity")
             if isinstance(cap, dict):
@@ -299,37 +312,51 @@ class DockHub:
                 waiting["reply"] = msg
                 waiting["event"].set()
         elif kind == "thing" and leaf == "events":
-            self._touch(sn)
+            self._touch(self.gateway_of(sn))
             if msg.get("method") == "hms":
-                self._hms(self.drone_of.get(sn, sn), msg.get("data") or {})
+                self._hms(self.gateway_of(sn), msg.get("data") or {})
             elif msg.get("method") == "flighttask_progress":
                 self._progress(sn, msg.get("data") or {})
             elif msg.get("method") == "file_upload_callback" and self.on_media:
                 f = (msg.get("data") or {}).get("file")
                 if isinstance(f, dict) and f.get("object_key"):
                     try:
-                        self.on_media(self.drone_of.get(sn, sn), f)
+                        self.on_media(self.gateway_of(sn), f)
                     except Exception as e:  # noqa: BLE001 - the dock still gets its reply
                         print("Dock media error:", e)
             if msg.get("need_reply"):
                 self._reply(topic, msg, {"result": 0})
         elif kind == "thing" and leaf == "requests":
-            self._touch(sn)
+            self._touch(self.gateway_of(sn))
             self._request(topic, msg)
 
     def _status(self, topic, gw, msg):
         if msg.get("method") != "update_topo":
             return
         data = msg.get("data") or {}
-        subs = data.get("sub_devices") or []
-        drone = subs[0] if subs and isinstance(subs[0], dict) else None
+        subs = [d for d in (data.get("sub_devices") or []) if isinstance(d, dict)]
+        drone = next((d for d in subs if str(d.get("domain")) == "0"), None)
+        sub_dock = next((d for d in subs if str(d.get("domain")) == SUB_DOCK_DOMAIN), None)
         with self.lock:
-            s = self.state.setdefault(gw, {"sn": gw, "osd": {}, "drone_osd": {}, "first_seen": self.now()})
+            s = self.state.setdefault(gw, {"sn": gw, "osd": {}, "drone_osd": {}, "gs_osd": {}, "first_seen": self.now()})
             new = "model" not in s
             if data:
-                s["model"] = model_name(data.get("domain"), data.get("type"), data.get("sub_type"))
-                s["is_dock"] = str(data.get("domain")) == "3"
-                s["version"] = str(data.get("version") or "")
+                gw_model = model_name(data.get("domain"), data.get("type"), data.get("sub_type"))
+                if str(data.get("domain")) == GATEWAY_DOMAIN:
+                    # A ground station: a dock only when a Dock 4 is (or was) behind it. Its sub-devices drop out of the
+                    # list while they're off, so the dock found earlier is kept.
+                    if sub_dock:
+                        s["dock_sn"] = str(sub_dock.get("sn") or "")
+                        s["model"] = model_name(sub_dock.get("domain"), sub_dock.get("type"), sub_dock.get("sub_type"))
+                        self.dock_of[s["dock_sn"]] = gw
+                    s.setdefault("model", gw_model)
+                    s["gateway_model"] = gw_model
+                    s["is_dock"] = bool(s.get("dock_sn"))
+                    s["dock_online"] = bool(sub_dock)
+                else:
+                    s["model"] = gw_model
+                    s["is_dock"] = str(data.get("domain")) == "3"
+                s["version"] = str(data.get("version") or data.get("thing_version") or "")
             if drone:
                 s["drone_sn"] = str(drone.get("sn") or "")
                 s["drone_enum"] = (int(drone.get("type") or 0), int(drone.get("sub_type") or 0))
@@ -346,6 +373,10 @@ class DockHub:
         if self.on_change:
             self.on_change("offline" if not data else "found" if new and gw not in self.store.docks() else "online", gw)
 
+    def gateway_of(self, sn):
+        """The gateway (registered dock id) a serial number reports for: itself, or its drone's / Dock 4's gateway."""
+        return self.drone_of.get(sn) or self.dock_of.get(sn) or sn
+
     def _osd(self, sn, data):
         gw = self.drone_of.get(sn)
         with self.lock:
@@ -356,10 +387,19 @@ class DockHub:
                     s["drone_seen"] = self.now()
                     s["last_seen"] = self.now()
                 return
-            s = self.state.get(sn)
+            dock_gw = self.dock_of.get(sn)
+            if dock_gw is None and (self.state.get(sn) or {}).get("gateway_model"):
+                s = self.state[sn]  # a Dock 4's ground station: its own telemetry (the dock's position is here)
+                s["gs_osd"] = {**s.get("gs_osd", {}), **data}
+                s["last_seen"] = self.now()
+                s.pop("offline_at", None)
+                return
+            s = self.state.get(dock_gw or sn)
             if s is None:
                 return  # telemetry before the topology: wait for update_topo
             s["osd"] = {**s["osd"], **data}  # docks send their fields in several partial messages
+            if dock_gw:
+                s["dock_seen"] = self.now()
             s["last_seen"] = self.now()
             s.pop("offline_at", None)
 
@@ -415,8 +455,9 @@ class DockHub:
         if src is None:
             return False, ("The drone isn't reporting a camera. Is it powered on in the dock?" if device == "drone"
                            else "This dock has no camera to stream."), None
+        extra = {"device_sn": src["video_id"].split("/")[0]} if self._sub_gateway(gw) else {}  # Dock 4 needs it
         ok, msg, _ = self.call(gw, "live_start_push", {"url_type": 1, "url": rtmp_url, "video_id": src["video_id"],
-                                                        "video_quality": int(quality)})
+                                                        "video_quality": int(quality), **extra})
         if ok or "already" in msg:
             with self.lock:
                 self.state[gw]["live"] = {"video_id": src["video_id"], "device": device, "url": rtmp_url,
@@ -424,6 +465,10 @@ class DockHub:
                                           "lenses": src["lenses"], "since": self.now()}
             return True, "", src
         return False, msg, None
+
+    def _sub_gateway(self, gw):
+        """True for a Dock 4 (behind a ground station), whose commands name the device they're for."""
+        return bool((self.state.get(gw) or {}).get("gateway_model"))
 
     def stop_video(self, gw):
         live = (self.state.get(gw) or {}).get("live")
@@ -442,7 +487,8 @@ class DockHub:
             return False, "Start the video first.", None
         if lens not in (live.get("lenses") or []):
             return False, f"This camera has no {LENS_NAMES.get(lens, lens)} lens.", None
-        ok, msg, out = self.call(gw, "live_lens_change", {"video_id": live["video_id"], "video_type": lens})
+        extra = {"payload_index": live["video_id"].split("/")[1]} if self._sub_gateway(gw) else {}
+        ok, msg, out = self.call(gw, "live_lens_change", {"video_id": live["video_id"], "video_type": lens, **extra})
         if ok:
             with self.lock:
                 self.state[gw]["live"]["lens"] = lens
@@ -627,6 +673,8 @@ class DockHub:
     # --- what the dashboard shows ---
     def online(self, gw):
         s = self.state.get(gw) or {}
+        if s.get("gateway_model") and not s.get("dock_online"):
+            return False  # Dock 4: the ground station is up but the dock itself is off or unreachable
         return bool(s.get("last_seen")) and not s.get("offline_at") and self.now() - s["last_seen"] < ONLINE_SECONDS
 
     def summary(self, gw):
@@ -637,14 +685,18 @@ class DockHub:
         if battery is None:
             battery = charge.get("capacity_percent")
         drone_on = bool(s.get("drone_seen")) and self.now() - s["drone_seen"] < ONLINE_SECONDS
+        gs = s.get("gs_osd") or {}
+        lat, lon = gs.get("latitude") or o.get("latitude") or None, gs.get("longitude") or o.get("longitude") or None
         return {"sn": gw, "model": s.get("model") or "", "online": self.online(gw), "last_seen": s.get("last_seen"),
+                "dock_sn": s.get("dock_sn") or "", "gateway_model": s.get("gateway_model") or "",
+                "swapping": o.get("mode_code") == 8, "bays": self.bays(gw),
                 "drone_sn": s.get("drone_sn") or "", "drone_model": s.get("drone_model") or "",
                 "drone_online": drone_on, "drone_in_dock": _flag(o.get("drone_in_dock")),
                 "mode": DOCK_MODES.get(o.get("mode_code"), ""), "cover": COVER_STATES.get(o.get("cover_state"), ""),
                 "battery": battery, "charging": charge.get("state") == 1,
                 "temperature": o.get("environment_temperature"), "wind": o.get("wind_speed"),
                 "rain": RAIN.get(o.get("rainfall"), ""),
-                "lat": o.get("latitude") or None, "lon": o.get("longitude") or None,
+                "lat": lat, "lon": lon,
                 "drone_lat": d.get("latitude") if drone_on else None, "drone_lon": d.get("longitude") if drone_on else None,
                 "drone_height": d.get("height") if drone_on else None,
                 "simulated": gw in self.local,
@@ -653,6 +705,41 @@ class DockHub:
                           "device": (s.get("live") or {}).get("device"),
                           "lenses": (s.get("live") or {}).get("lenses") or next((v["lenses"] for v in self.video_sources(gw)), []),
                           "sources": [v["device"] for v in self.video_sources(gw)]}}
+
+    def bays(self, gw):
+        """Dock 4 battery bays (None for docks that charge the drone instead): {"total", "present", "ready", "best",
+        "best_slot", "swaps", "slots": [{"slot", "state", "percent", "health", "fault"}]}."""
+        o = (self.state.get(gw) or {}).get("osd") or {}
+        bs = o.get("battery_system")
+        if not isinstance(bs, dict):
+            return None
+        slots = []
+        for x in bs.get("slots") or []:
+            if not isinstance(x, dict):
+                continue
+            p = x.get("pack_presence")
+            pct = x.get("capacity_percent") if p in BAY_READY else None
+            slots.append({"slot": x.get("slot_id"), "state": BAY_READY.get(p) or BAY_FAULT.get(p) or ("empty" if p == 0 else "unavailable"),
+                          "percent": pct if isinstance(pct, (int, float)) and 0 <= pct <= 100 else None,
+                          "health": x.get("soh_percent"), "fault": p in BAY_FAULT})
+        ready = [x for x in slots if x["percent"] is not None]
+        best = max(ready, key=lambda x: x["percent"], default=None)
+        return {"total": bs.get("total_slots") or len(slots), "present": bs.get("present_count"), "ready": len(ready),
+                "best": best["percent"] if best else None, "best_slot": best["slot"] if best else None,
+                "swaps": o.get("battery_swap_times"), "slots": slots}
+
+    def swap_battery(self, gw, slot=None):
+        """Dock 4: put the fullest bay battery (or this slot's) into the drone now. Returns (ok, message)."""
+        b = self.bays(gw)
+        if not b:
+            return False, "This dock charges its drone; it has no battery bays."
+        slot = slot or b["best_slot"]
+        if not slot:
+            return False, "No charged battery is in the dock's bays."
+        ok, msg, out = self.call(gw, "manual_battery_swap", {"slot_id": int(slot)}, timeout=15.0)
+        if ok and ((out or {}).get("output") or {}).get("status") == "failed":
+            return False, "The dock couldn't start the battery swap."
+        return ok, msg
 
     def snapshot(self):
         """Registered docks (with their live state) and found, not yet registered ones."""
@@ -711,8 +798,14 @@ class DockHealth:
             out["hot"] = ("caution", f"{name}: {t:.0f} °C outside the dock. Too hot for flights.")
         if t is not None and (t <= COLD_ALERT or (was("cold") and t < COLD_BACK)):
             out["cold"] = ("caution", f"{name}: {t:.0f} °C outside the dock. Too cold for flights.")
-        b = x.get("battery")
-        if x.get("drone_in_dock") and b is not None and b < LOW_BATTERY and not x.get("charging"):
+        b, bays = x.get("battery"), x.get("bays")
+        if bays:  # Dock 4 swaps in a charged battery instead of charging the drone
+            if x.get("drone_in_dock") and b is not None and b < LOW_BATTERY and not x.get("swapping") and (bays["best"] or 0) < LOW_BATTERY:
+                out["battery"] = ("warning", f"{name}: the drone in the dock is at {b}% and no charged battery is in the bays.")
+            for bay in bays["slots"]:
+                if bay["fault"]:
+                    out[f"bay{bay['slot']}"] = ("warning", f"{name}: battery bay {bay['slot']} reports a {bay['state']}.")
+        elif x.get("drone_in_dock") and b is not None and b < LOW_BATTERY and not x.get("charging"):
             out["battery"] = ("warning", f"{name}: the drone in the dock is at {b}% and not charging.")
         for h in self.hub.hms_active(sn):
             level = HMS_LEVELS.get(h["level"], "notice")
@@ -760,7 +853,9 @@ def _cleared_text(a):
     return {"offline": f"{a['name']} is back online.", "cover": f"{a['name']}: the cover fault has cleared.",
             "rain": f"{a['name']}: the heavy rain has stopped.", "wind": f"{a['name']}: the wind has dropped.",
             "hot": f"{a['name']}: the temperature is back to normal.", "cold": f"{a['name']}: the temperature is back to normal.",
-            "battery": f"{a['name']}: the drone is charging again."}.get(a["key"], f"{a['name']}: the DJI message has cleared ({a['key'][4:]}).")
+            "battery": f"{a['name']}: the drone's battery is fine again."}.get(
+        a["key"], f"{a['name']}: battery bay {a['key'][3:]} is fine again." if a["key"].startswith("bay")
+        else f"{a['name']}: the DJI message has cleared ({a['key'][4:]}).")
 
 
 def load_hms_text(path):

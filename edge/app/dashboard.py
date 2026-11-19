@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.10.1"
+APP_VERSION = "V11.11.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -5561,11 +5561,12 @@ def _dock_creds():
     return dock_lib.ensure_broker_files(DOCK_DIR)
 
 
-def _start_sim_dock(sn, home=None):
+def _start_sim_dock(sn, home=None, model=None):
     if home is None:
         d = (dock_store.data.get("sim_homes") or {}).get(sn) or VIRTUAL_DEFAULT_HOME
         home = (d[0], d[1])
-    sim = SimulatedDock(sn, dock_hub.handle, home)
+    model = model or (dock_store.data.get("sim_models") or {}).get(sn) or "dock3"
+    sim = SimulatedDock(sn, dock_hub.handle, home, model=model)
     dock_hub.local[sn] = sim
     sim.start()
     return sim
@@ -5798,7 +5799,9 @@ def dock_flight_problem(sn, points=None, loop=False):
         return "Dock warning: " + warn[0]["text"]
     battery, need = x["battery"], load_response_settings()["min_battery"]
     if battery is None or battery < need:
-        return f"The drone's battery is {battery if battery is not None else '?'}% (needs {need}%)."
+        bays = x.get("bays") or {}
+        spare = f" A {bays['best']}% battery is in bay {bays['best_slot']}: swap it in from the Drone page." if (bays.get("best") or 0) >= need else ""
+        return f"The drone's battery is {battery if battery is not None else '?'}% (needs {need}%).{spare}"
     if x["wind"] is not None and x["wind"] >= dock_lib.WIND_ALERT:
         return f"Wind at the dock is {x['wind']:.1f} m/s."
     if x["rain"] in ("moderate", "heavy"):
@@ -6144,6 +6147,35 @@ def api_dock_control(sn):
     return (jsonify({"ok": True, "message": result}) if ok else jsonify({"ok": False, "error": msg or "The dock refused."})), (200 if ok else 409)
 
 
+@app.route("/api/docks/<sn>/battery", methods=["POST"])
+def api_dock_battery(sn):
+    """Operators: a Dock 4 puts a charged battery from its bays into its drone now ({"slot"} optional: the fullest)."""
+    d = dock_store.docks().get(sn)
+    if not d:
+        return jsonify({"ok": False, "error": "Unknown dock."}), 404
+    if not dock_allowed() or sn in _docks_over_limit():
+        return _dock_refused()
+    x = dock_hub.summary(sn)
+    if not x["bays"]:
+        return jsonify({"ok": False, "error": f"{d['name']} charges its drone; it has no battery bays to swap from."}), 409
+    if x["drone_in_dock"] is not True or _dock_in_air(sn):
+        return jsonify({"ok": False, "error": f"{d['name']}'s drone must be in the dock to swap its battery."}), 409
+    if x["swapping"]:
+        return jsonify({"ok": False, "error": f"{d['name']} is already swapping the battery."}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        slot = int(data["slot"]) if data.get("slot") else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Bad bay number."}), 400
+    ok, msg = dock_hub.swap_battery(sn, slot)
+    by = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    audit_record("dock: battery swap", target=sn, detail={"name": d["name"], "by": by, "slot": slot or x["bays"]["best_slot"]},
+                 result="ok" if ok else "failed")
+    if not ok:
+        return jsonify({"ok": False, "error": msg or "The dock refused."}), 409
+    return jsonify({"ok": True, "message": f"{d['name']} is swapping the battery (about 25 seconds)."})
+
+
 @app.route("/api/docks/<sn>/sticks", methods=["POST"])
 def api_dock_sticks(sn):
     """Operators: one stick reading from the Drone page (x right, y forward, z up, r turn; -1..1), about 10 a second."""
@@ -6210,8 +6242,9 @@ def api_dock_fault(sn):
 
 @app.route("/api/docks/simulate", methods=["POST"])
 def api_docks_simulate():
-    """Admins: a simulated Dock 3 with a Matrice 4TD, for testing without hardware. It connects like a real dock and
-    shows under "Found", ready to register."""
+    """Admins: a simulated Dock 3 with a Matrice 4TD ({"model": "dock4"}: a Dock 4 with a Matrice 5TD behind an O4
+    ground station, which swaps batteries), for testing without hardware. It connects like a real dock and shows
+    under "Found", ready to register."""
     if not dock_allowed():
         return _dock_refused()
     if len(dock_hub.local) >= DOCK_SIM_MAX:
@@ -6223,10 +6256,12 @@ def api_docks_simulate():
         home = VIRTUAL_DEFAULT_HOME
     n = next(i for i in range(1, DOCK_SIM_MAX + 2) if f"SIMDOCK{i}" not in dock_hub.local and f"SIMDOCK{i}" not in dock_store.docks())
     sn = f"SIMDOCK{n}"
+    model = "dock4" if data.get("model") == "dock4" else "dock3"
     dock_store.data.setdefault("sim_homes", {})[sn] = [home[0], home[1]]
+    dock_store.data.setdefault("sim_models", {})[sn] = model
     dock_store.set_simulated(list(dock_store.data.get("simulated") or []) + [sn])
-    _start_sim_dock(sn, home)
-    return jsonify({"ok": True, "sn": sn})
+    _start_sim_dock(sn, home, model)
+    return jsonify({"ok": True, "sn": sn, "model": model})
 
 
 @app.route("/virtual-drones")

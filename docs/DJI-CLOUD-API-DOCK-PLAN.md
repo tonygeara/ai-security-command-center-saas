@@ -36,6 +36,7 @@ tracking, evidence, incidents) that Drone Link uses today.
 
 | Dock | Drone | Notes |
 |---|---|---|
+| **Dock 4** | **Matrice 5TD** (thermal) | Newest (Oct 2026): swaps the drone's battery in about 25 s instead of charging it; connects through a **DJI O4 Ground Station**. Supported from V11.11 (simulated; see "Dock 4" below). |
 | **Dock 3** | Matrice 4D / **4TD** (thermal) | Current generation; first choice. |
 | Dock 2 | Matrice 3D / **3TD** (thermal) | Previous generation; fine if cheaper. |
 | Dock 1 | Matrice 30 / 30T | End of life; avoid. |
@@ -221,13 +222,37 @@ security token with provider "minio".
 - Docks listed under the client's Devices in the portal with status and health; mission history.
 - Optional cloud MQTT broker for docks that are not on the same network as an edge PC.
 
+## Dock 4 (V11.11)
+
+From DJI's Cloud API docs (Dock 4 and Matrice 5TD pages, Nov 2026), and what the system does with them:
+- **Topology**: the gateway that connects to the broker is a **DJI O4 Ground Station** (domain 8, type 135). The Dock 4
+  (9-131-0) and the Matrice 5TD (0-130-0) are sub-devices in its `update_topo`. All services, requests and events use
+  the ground station's topics; the dock and the drone send telemetry (`osd`, `state`, HMS) on their own SNs. The hub
+  registers the dock by the ground station's SN (shown with the dock's own SN), maps the dock's SN to it, takes the
+  dock's position from the ground station, and shows the dock offline when the ground station reports it gone.
+- **Battery swap**: dock `mode_code` 8 = swapping; `battery_system` lists the bays (4 bays, up to 3 batteries) with
+  each battery's state, charge and health; `battery_swap_times` counts swaps. The dock swaps by itself after landing
+  below 79 %; `manual_battery_swap {slot_id}` (with `manual_battery_swap_progress` events) does it on demand.
+  The Drone page shows the bays and a **Swap battery** button; the low-battery alert only fires when no bay holds a
+  charged battery, and a bay fault is its own alert. A low drone with a charged bay battery is not launched; the
+  refusal says which bay to swap in.
+- **Commands**: the ones the system uses are the same as Dock 3, except `live_start_push` needs `device_sn` and
+  `live_lens_change` takes `payload_index` (both sent for Dock 4 only). Media upload (`storage_config_get`) is the same
+  for photos and videos. New in Dock 4, not used yet: point-of-interest orbit, flying speed limit, emergency stop,
+  low-power mode, eSIM.
+- **Simulated Dock 4**: "+ Simulated Dock 4" on the Drone page (a Matrice 5TD behind a ground station, with bays that
+  charge and a swap after each landing below 79 %).
+- **To confirm on the real hardware** (first flight): how the ground station is bound in Pilot 2 (the Pilot 2 page
+  is the same as for Dock 3), the swap timing and events, the dock camera's video, and whether a flight right after a
+  swap needs anything else.
+
 ## Testing
 - Unit/integration tests against `dock_sim.py` in `edge/tests` (no hardware).
 - With hardware: bind, telemetry, video, a short wayline over the site in a safe area, alarm launch,
   DRC control, weather/no-fly refusals, network loss (dock must return home on its own).
 
 ## Open questions
-- Which dock and drone to buy (Dock 3 + Matrice 4TD recommended).
+- Which dock and drone to buy (Dock 3 + Matrice 4TD, or Dock 4 + Matrice 5TD for back-to-back flights).
 - Media storage: local MinIO only, or also in the cloud?
 - Lebanon: permission needed for automated (pilotless / beyond-sight) flights.
 - Exact topic/service names and firmware versions: check against DJI's current Cloud API docs when

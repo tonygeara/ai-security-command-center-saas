@@ -1,6 +1,6 @@
 # DJI Dock: first supervised flight (checklist)
 
-Everything for DJI Docks (V11.10) was built from DJI's Cloud API documentation and tested against a simulated dock.
+Everything for DJI Docks (V11.10; Dock 4 in V11.11) was built from DJI's Cloud API documentation and tested against a simulated dock.
 Before a dock flies by itself on a client site, go through this once with the real dock, in this order, with someone
 holding the DJI RC Plus (Pilot 2) the whole time. Stop at the first step that doesn't behave as described and note
 what the Drone page, the audit log and Pilot 2 say.
@@ -52,6 +52,17 @@ what the Drone page, the audit log and Pilot 2 say.
 
 ## 6. Schedule
 - [ ] A patrol schedule a few minutes ahead, drone = this dock, "asks first": Telegram asks Start / Skip at that time.
+
+## 7. Dock 4 only (Matrice 5TD, O4 Ground Station)
+- [ ] The card says **DJI Dock 4**, with the dock's own SN "via DJI O4 Ground Station", the drone as Matrice 5TD and
+      the battery bays (charge of each).
+- [ ] Bind in Pilot 2 as above. Note if the ground station needed anything different (if the dock never shows under
+      Found, send the Pilot 2 screens).
+- [ ] With the drone in the dock: **🔋 Swap battery** → the card shows "swapping the battery" for about 25 s, then the
+      drone's battery is the bay's and the swap count goes up by one.
+- [ ] After the first route, land below 79 %: the dock swaps by itself. Start another route right after: it should
+      take off without waiting for a charge.
+- [ ] Switch the dock off (keep the ground station on): the card goes offline with an alert, and back when it's on.
 
 ## After the test
 - Set the range back to what the site needs (default 500 m).
