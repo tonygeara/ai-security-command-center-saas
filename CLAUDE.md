@@ -38,7 +38,13 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (19 November 2026)
 
-- Released: Edge **V11.11.0** (19 Nov, release `edge-v11.11.0`): **DJI Dock 4** with the Matrice 5TD. Dock 4 connects
+- Released: Edge **V11.12.0** (19 Nov, release `edge-v11.12.0`): more DJI Dock control on the Drone page: Look at (map
+  click, `camera_look_at`), Aim (video click, `camera_aim`), thermal Temperature readings (IR metering), Orbit (Dock 4
+  POI, circle checked against range and no-fly zones), Stop now (emergency stop), dock Siren and Light
+  (`/api/docks/<sn>/deterrent`); drone height shown is now above take-off. Unconfirmed on hardware: that emergency stop
+  hovers and that siren/light work without debug mode (`docs/DOCK-FIRST-FLIGHT.md` section 8).
+- DJI Docks switched on for client **doumith** on 19 Nov (licence switch on, 1 dock).
+- Before that: Edge **V11.11.0** (19 Nov, release `edge-v11.11.0`): **DJI Dock 4** with the Matrice 5TD. Dock 4 connects
   through a DJI O4 Ground Station (the gateway; dock 9-131-0 and drone 0-130-0 are its sub-devices), registered by the
   ground station's SN. Battery bays and swaps on the Drone page (Swap battery, `/api/docks/<sn>/battery`), bay-aware
   low-battery and bay-fault alerts, a simulated Dock 4. Not yet flown on a real Dock 4: Dock 4 steps added to
@@ -65,7 +71,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 19 Nov (V11.11.0; 77 features; 31 capabilities, 19
+- Features and Capabilities docs current on 19 Nov (V11.12.0; 77 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
