@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.12.0"
+APP_VERSION = "V11.12.1"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -3838,6 +3838,10 @@ NAV_ALIAS = {"maps": "drone", "safety": "drone", "license": "settings", "users":
              "events": "settings", "people": "settings", "vehicles": "settings"}
 
 
+# Shown at the top right of every page: the version and the edition (online / on-prem).
+VERSION_LABEL = f"{APP_VERSION} · {'ON-PREM' if edition.EDITION == 'onprem' else 'ONLINE'}"
+
+
 def hud_topbar(active="", nav=True):
     active = NAV_ALIAS.get(active, active)
     active_attr = ' class="active"'
@@ -3850,7 +3854,8 @@ def hud_topbar(active="", nav=True):
         '<a class="hud-brand" href="/"><div class="brand-shield">A</div>'
         f'<div><div class="brand-name">{edition.BRAND_TOP}</div><div class="brand-sub">{BRAND_SUB_HTML}</div></div></a>'
         f'<nav class="hud-nav">{links}</nav>'
-        '<div class="hud-clock"><b id="hudClock">--:--:--</b><span><i class="dot good"></i>SYSTEM PROTECTED</span></div>'
+        '<div class="hud-clock"><b id="hudClock">--:--:--</b><span><i class="dot good"></i>SYSTEM PROTECTED</span>'
+        f'<em class="hud-ver" title="{edition.PRODUCT_NAME} version">{VERSION_LABEL}</em></div>'
         '</header>'
         '<script>(function(){const c=document.getElementById("hudClock");'
         'const t=()=>{c.textContent=new Date().toLocaleTimeString()};t();setInterval(t,1000)})()</script>'
@@ -9485,7 +9490,7 @@ CAMERA_FEED_SWITCH = ('<button type="button" class="feed-switch" data-feed-switc
                       'title="Show or hide this live feed">LIVE FEED <span class="knob"></span></button>')
 
 
-PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard"))
+PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard")).replace("<!--APP_VERSION-->", VERSION_LABEL)
 # Edition branding (e.g. "AI Command Centre Lebanon" for the on-prem build).
 PAGE = (PAGE.replace("<title>\nAI Security Command Center\n</title>", f"<title>\n{edition.PRODUCT_NAME}\n</title>")
             .replace('<div class="brand-name">\nAI SECURITY\n</div>', f'<div class="brand-name">\n{edition.BRAND_TOP}\n</div>')

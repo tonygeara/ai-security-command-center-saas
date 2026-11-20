@@ -419,6 +419,18 @@ body::before {
     font-size: 8px;
 }
 
+.app-version {
+    margin-top: 3px;
+
+    color: #6d8b9d;
+
+    font-size: 9px;
+
+    letter-spacing: 1.5px;
+
+    white-space: nowrap;
+}
+
 
 /* ==========================================================
    MAIN GRID
@@ -2684,7 +2696,8 @@ body::before {
             230px 1fr;
     }
 
-    .clock-area {
+    .clock-area .clock,
+    .clock-area .date {
         display: none;
     }
 
@@ -2907,6 +2920,8 @@ LIVE ACTIVITY
 >
 --
 </div>
+
+<div class="app-version" title="Version"><!--APP_VERSION--></div>
 
 </div>
 

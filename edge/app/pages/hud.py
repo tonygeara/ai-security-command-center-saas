@@ -32,6 +32,7 @@ a{color:#5bd9ff}
 .hud-clock{display:flex;flex-direction:column;justify-content:center;align-items:flex-end;padding:0 18px;border-left:1px solid #12405a;min-width:150px;flex:none}
 .hud-clock b{color:#e9f8ff;font-size:16px;letter-spacing:1px}
 .hud-clock span{margin-top:3px;color:#24ed87;font-size:9px;letter-spacing:1.5px;display:flex;align-items:center;gap:6px}
+.hud-clock .hud-ver{margin-top:3px;color:#6d8b9d;font-size:9px;letter-spacing:1.5px;font-style:normal;white-space:nowrap}
 
 /* layout */
 .hud-main{position:relative;z-index:1;max-width:1500px;margin:0 auto;padding:22px 24px 40px}
@@ -113,6 +114,6 @@ input.toggle:checked::after{left:25px;background:#45d0ff;box-shadow:0 0 8px #45d
 .event-type{color:#5bd9ff;font-size:11px;font-weight:bold;letter-spacing:1px;text-transform:uppercase}
 .event-type.unknown{color:#ffb23c}
 
-@media(max-width:1000px){.grid-2{grid-template-columns:1fr}.stat-grid{grid-template-columns:1fr 1fr}.hud-clock{display:none}}
+@media(max-width:1000px){.grid-2{grid-template-columns:1fr}.stat-grid{grid-template-columns:1fr 1fr}.hud-clock{min-width:0;padding:0 10px}.hud-clock b,.hud-clock span{display:none}}
 @media(max-width:560px){.stat-grid{grid-template-columns:1fr}.brand-sub{display:none}.hud-main{padding:16px 12px 32px}}
 """
