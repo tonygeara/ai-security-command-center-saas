@@ -51,5 +51,6 @@ STEP 5 - ADD CAMERAS
 GOOD TO KNOW
   - Everything (video, faces, plates, recordings) stays on this computer.
   - Motion recordings are kept 3 days, alerts and snapshots 14 days, event history 30 days.
-  - Internet is only used for optional phone alerts (Telegram).
+  - Internet is only used for optional phone alerts (Telegram) and, only if you switch on
+    Settings > Updates, to check for and install new versions by itself (off by default).
   - Data folder: %LOCALAPPDATA%\AI-Command-Centre-Lebanon (back it up to keep faces/events).

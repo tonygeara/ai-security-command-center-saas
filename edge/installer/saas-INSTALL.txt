@@ -74,7 +74,10 @@ OPTIONAL
   - Map your site and camera views: dashboard > Settings > Coverage.
 
 UPDATES
-  - When a new version is out, run the new Setup file over the installed one. Cameras, faces,
+  - Automatic: dashboard > Settings > Updates ON (admins). New versions then download, are checked
+    and install by themselves; the program restarts in about a minute and waits while a drone or
+    dock is flying. Switching it on when a new version is waiting asks you first.
+  - By hand (or with Updates off): run the new Setup file over the installed one. Cameras, faces,
     events and settings are kept.
 
 FORGOT A PASSWORD?
