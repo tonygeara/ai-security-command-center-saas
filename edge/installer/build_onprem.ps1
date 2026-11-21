@@ -47,6 +47,7 @@ Copy-Item (Join-Path $App 'launcher.pyw') $Stage
 Copy-Item (Join-Path $App 'dashboard.py') $Stage
 Copy-Item (Join-Path $App 'licensing.py') $Stage
 Copy-Item (Join-Path $App 'browser_mode.py') $Stage
+Copy-Item (Join-Path $App 'docker_setup.py') $Stage  # used by the launcher, stays Python like browser_mode
 foreach ($m in 'nofly', 'users', 'audit', 'store', 'bus', 'incidents', 'web_access', 'web_records', 'evidence', 'patterns', 'coverage', 'handoff', 'cloud_sync', 'alarm_verify', 'sia_dc09', 'risk_patrol', 'geo', 'virtual_drone', 'mapping', 'weather', 'airtraffic', 'airspace', 'rf', 'dock', 'dock_sim', 'dock_wayline', 'dock_media', 'updater') { Copy-Item (Join-Path $App "$m.py") $Stage }
 Copy-Item (Join-Path $App 'pages') $Stage -Recurse
 Copy-Item (Join-Path $App 'static') $Stage -Recurse  # map + 3D viewer libraries (data, not code)

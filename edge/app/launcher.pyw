@@ -4,6 +4,7 @@ from tkinter import ttk, messagebox
 
 import edition
 import browser_mode as browser_mode_lib
+import docker_setup
 
 APP_VERSION = 'V11.13.0'
 PRODUCT_NAME = edition.PRODUCT_NAME
@@ -142,6 +143,7 @@ class App(tk.Tk):
         self.window_shown = not browser_mode
         self.quitting = False
         self.background = background  # started with Windows: run without opening the browser
+        self.need_docker = False      # Docker Desktop isn't installed: the start page / window asks to install it
         self._build()
         self.start_page = browser_mode_lib.StartPage(self, PRODUCT_NAME)
         if not self.start_page.start():
@@ -160,11 +162,22 @@ class App(tk.Tk):
     # ---- start page (browser_mode.StartPage owner) ----
     def status(self):
         return {'message': self.stage, 'ready': bool(self.ready_url) and not self.busy,
-                'url': self.ready_url, 'error': self.error}
+                'url': self.ready_url, 'error': self.error, 'need_docker': self.need_docker and not self.busy}
 
     def on_action(self, name):
         if name == 'shutdown':  # Settings → System → Shut down (the dashboard asks, admins only)
             threading.Thread(target=self._shutdown, daemon=True).start()
+        elif name == 'logout':  # Settings → System → Log out and turn off: also Docker
+            threading.Thread(target=self._logout, daemon=True).start()
+        elif name == 'install_docker':
+            if not self.busy:
+                self.need_docker = False
+                threading.Thread(target=self._install_docker, daemon=True).start()
+        elif name == 'skip_docker':
+            self.need_docker = False
+            self.error = ("The cameras' AI, recordings and drone video need Docker Desktop, so the system is not running. "
+                          "Click Try again to install it, or install Docker Desktop yourself and then Try again.")
+            self.emit('msg', 'Docker Desktop is not installed')
         else:
             self.emit(name)
 
@@ -173,6 +186,65 @@ class App(tk.Tk):
         time.sleep(1)  # let the dashboard answer its page first
         self._stop_services()
         self.emit('quit')
+
+    def _logout(self):
+        """Stop everything, Docker Desktop included. The program (and with it Docker) starts at the next Windows sign-in."""
+        self.emit('log', 'Log out asked from the dashboard: stopping the system and Docker Desktop.')
+        time.sleep(1)  # let the dashboard answer its page first
+        self._stop_services()
+        try:
+            stopped = docker_setup.stop_docker()
+            self.emit('log', 'Docker Desktop stopped.' if stopped else 'Docker Desktop may still be running.')
+        except Exception as e:
+            self.emit('log', f'Could not stop Docker Desktop: {e}')
+        if FROZEN:
+            try:
+                docker_setup.ensure_autostart(sys.executable)
+            except Exception as e:
+                self.emit('log', f'Could not set the start at Windows sign-in: {e}')
+        self.emit('quit')
+
+    def _install_docker(self):
+        """Install Docker Desktop (the person said yes), then start the system, which sets up the AI services."""
+        self.emit('busy', True); self.error = ''
+        restart = False
+        try:
+            folders = [APP_HOME, os.path.dirname(APP_HOME)] + [os.path.dirname(b) for b in OFFLINE_IMAGE_BUNDLES]
+            path = docker_setup.local_installer(folders)
+            if not path:
+                os.makedirs(os.path.join(DATA_HOME, 'updates'), exist_ok=True)
+                path = os.path.join(DATA_HOME, 'updates', docker_setup.INSTALLER_NAME)
+                self.emit('msg', 'Downloading Docker Desktop (about 600 MB)...'); self.emit('log', 'Downloading Docker Desktop...')
+                docker_setup.download(docker_setup.INSTALLER_URL[docker_setup.arch()], path,
+                                      progress=lambda pct: pct >= 0 and self.emit('msg', f'Downloading Docker Desktop... {pct}%'))
+            self.emit('msg', 'Checking the Docker Desktop installer...')
+            if not docker_setup.signature_ok(path):
+                raise RuntimeError('The Docker Desktop installer is not signed by Docker Inc., so it was not run. '
+                                   'Download it from https://www.docker.com/products/docker-desktop/ and install it yourself.')
+            self.emit('msg', 'Installing Docker Desktop: allow it when Windows asks. This takes a few minutes...')
+            self.emit('log', 'Running the Docker Desktop installer (Windows asks for permission).')
+            code = docker_setup.run_installer(path)
+            self.emit('log', f'Docker Desktop installer finished (exit code {code}).')
+            if code is None and not docker_setup.installed():
+                raise RuntimeError('Docker Desktop was not installed (the Windows permission prompt was declined). Click Try again.')
+            try:
+                docker_setup.ensure_autostart(sys.executable) if FROZEN else None
+            except Exception:
+                pass
+            if code != 0 or not docker_setup.installed():
+                restart = True
+                raise RuntimeError('Restart the computer to finish installing Docker Desktop. '
+                                   f'{PRODUCT_NAME} starts by itself after the restart and sets up the AI services.')
+            self.emit('log', 'Docker Desktop installed.')
+        except Exception as e:
+            self.error = str(e)
+            self.emit('log', ('RESTART NEEDED: ' if restart else 'ERROR: ') + str(e))
+            self.emit('msg', 'Restart needed' if restart else 'Docker Desktop was not installed')
+            if not self.browser_mode: self.emit('error', str(e))
+            self.emit('busy', False)
+            return
+        self.emit('busy', False)
+        self.emit('retry')  # start the system: Docker starts, then docker compose installs the AI services
 
     def show_window(self):
         """From now on the person drives the system from the window; closing the browser stops nothing."""
@@ -269,6 +341,12 @@ class App(tk.Tk):
                 elif kind == 'retry': self.start_system()
                 elif kind == 'quit': self.on_close()
                 elif kind == 'info': messagebox.showinfo(PRODUCT_NAME, args[0], parent=self)
+                elif kind == 'ask_docker':
+                    yes = messagebox.askyesno(PRODUCT_NAME, 'Docker Desktop is not installed on this computer. It runs the '
+                                              'cameras\' AI, recordings and drone video.\n\nInstall it now? It downloads '
+                                              '(about 600 MB, unless the installer is next to this program), Windows asks for '
+                                              'permission, and a restart may be needed.', parent=self)
+                    self.on_action('install_docker' if yes else 'skip_docker')
         except queue.Empty:
             pass
         self.after(200, self._poll)
@@ -284,6 +362,13 @@ class App(tk.Tk):
         self.emit('busy', True)
         try:
             self.emit('msg','Checking Docker Desktop...'); self.emit('log','Checking Docker engine...')
+            if os.name == 'nt' and not docker_setup.installed() and not self.docker_answers():
+                # Docker Desktop isn't on this PC: ask before installing it (start page or control window).
+                self.need_docker = True
+                self.emit('msg', 'Docker Desktop is needed to run the AI services.')
+                self.emit('log', 'Docker Desktop is not installed: asking to install it.')
+                if not self.browser_mode: self.emit('ask_docker')
+                return
             if not self.ensure_docker():
                 raise RuntimeError('Docker Desktop could not be started. Open Docker Desktop, wait until it says Engine running, then click Start System.')
             self.emit('status','Docker','Running')
@@ -379,6 +464,12 @@ class App(tk.Tk):
             if docker_container_exists(name) and docker_container_project(name) != COMPOSE_PROJECT:
                 self.emit('log', f'Replacing old {name} container with the {APP_VERSION} runtime')
                 run_hidden(['docker','rm','-f',name], timeout=60)
+
+    def docker_answers(self):
+        try:
+            return run_hidden(['docker','info'], timeout=12).returncode == 0
+        except Exception:
+            return False
 
     def ensure_docker(self):
         try:

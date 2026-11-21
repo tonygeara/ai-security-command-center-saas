@@ -9735,6 +9735,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <div class="hud-row" id="cloudRow"><div><b>Phone access</b><div class="muted">Off: nothing leaves this PC. On: incidents (unknown faces and plates, drone responses) with one snapshot each go to your portal account, and the portal can ask for live pictures of a camera while you watch on your phone. Cloud edition only.</div><div class="muted" id="cloudState"></div></div><input class="toggle" type="checkbox" data-key="cloud_incidents" onchange="save()"></div>
 <div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
 <div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
+<div class="hud-row"><div><b>Log out and turn off</b><div class="muted">Signs you out and stops everything on this PC, Docker Desktop included, until you sign in to Windows again (or open the program from the desktop icon): then Docker and the system start by themselves. Admins only.</div></div><button class="hud-btn danger" id="logoutBtn" onclick="logoutOff()">Log out and turn off</button></div>
 <div id="offMsg" class="hud-msg"></div>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
@@ -9786,6 +9787,12 @@ async function updSkip(){const d=await updPost('/api/updates/skip',{version:upd.
   updMsg.className='hud-msg';updMsg.textContent=d.ok?'Not installed. Newer versions will install by themselves.':d.error;updLoad()}
 async function updCheckNow(){updState.textContent='Checking…';await updLoad(true)}
 updLoad();setInterval(updLoad,60000);
+async function logoutOff(){const b=logoutBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to log out and turn off';setTimeout(()=>{delete b.dataset.arm;b.textContent='Log out and turn off'},4000);return}
+  b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Turning off…';
+  const r=await fetch('/api/system/logout',{method:'POST'}).catch(()=>null);const d=r?await r.json().catch(()=>({ok:false})):{ok:false,error:'No answer.'};
+  if(r&&r.status===403)d.error='Only an admin can turn the system off.';
+  if(d.ok){document.body.innerHTML='<main class="hud-main narrow"><h1 class="page-title">Logged out</h1><p class="muted">The system and Docker Desktop are turning off. Cameras and drones are no longer guarded. Everything starts again by itself when you sign in to Windows, or from the desktop icon. You can close this window.</p></main>'}
+  else{b.disabled=false;offMsg.className='hud-msg bad';offMsg.textContent=d.error||'Could not turn off.'}}
 async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to shut down';setTimeout(()=>{delete b.dataset.arm;b.textContent='Shut down system'},4000);return}
   b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Shutting down…';
   const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));

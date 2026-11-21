@@ -16,7 +16,9 @@ COMPUTER REQUIREMENTS
   - Optional: DJI drone with RTMP live streaming (DJI Fly > Live Streaming > RTMP)
 
 STEP 1 - INSTALL DOCKER DESKTOP (one time)
-  Docker Desktop runs the local AI services.
+  Docker Desktop runs the local AI services. If it is missing when the program starts, the program
+  offers to install it (from "Docker Desktop Installer.exe" in this folder if you put it here,
+  otherwise it downloads it). To do it yourself instead:
   - Download from https://www.docker.com/products/docker-desktop/ (or bring the installer
     on this USB stick) and install it with the default options (WSL 2).
   - Restart the computer if asked, open Docker Desktop once and wait for "Engine running".

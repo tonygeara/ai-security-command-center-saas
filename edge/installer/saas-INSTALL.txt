@@ -24,7 +24,9 @@ STEP 1 - SIGN IN TO THE PORTAL (5 minutes)
     temporary password. Choose your own password when asked.
 
 STEP 2 - INSTALL DOCKER DESKTOP (one time)
-  Docker Desktop runs the local AI services.
+  Docker Desktop runs the local AI services. If it is missing when the program starts, the program
+  offers to install it for you (Windows asks for permission; restart if asked) and then sets up the
+  AI services by itself. To do it yourself instead:
   - Download it from https://www.docker.com/products/docker-desktop/ and install it with the
     default options (WSL 2). Restart the computer if asked.
   - Open Docker Desktop once and wait for "Engine running".
@@ -87,6 +89,8 @@ FORGOT A PASSWORD?
 
 GOOD TO KNOW
   - Closing the browser does not stop protection. To stop everything: Settings > Shut down.
+    Settings > Log out and turn off also stops Docker Desktop; everything starts again when you
+    sign in to Windows (or from the desktop icon).
   - Motion recordings are kept 3 days, alerts and snapshots 14 days, event history 30 days,
     photos and videos from a DJI Dock 30 days.
   - Data folder: %LOCALAPPDATA%\AI-Security-System (back it up to keep faces and events).

@@ -145,7 +145,7 @@ class StartPage:
                     page.open = False
                 elif path == 'ping':
                     pass
-                elif path in ('show', 'open', 'retry', 'shutdown'):
+                elif path in ('show', 'open', 'retry', 'shutdown', 'logout', 'install_docker', 'skip_docker'):
                     page.owner.on_action(path)
                 else:
                     return self._send(404, '{"ok": false}')
@@ -192,6 +192,8 @@ h1{margin:0 0 4px;font-size:22px;color:#e8f8ff;letter-spacing:.5px}
 button{background:#0b3550;color:#e8f8ff;border:1px solid #2b7aa3;border-radius:4px;padding:8px 14px;font:inherit;cursor:pointer}
 button:hover{background:#114a6e}
 .note{margin-top:22px;color:#5d8ea6;font-size:12px}
+.ask{display:none;margin-top:16px;padding:14px;border:1px solid #2b7aa3;background:#06202f;border-radius:4px;line-height:1.5}
+.ask .row{display:flex;gap:8px;margin-top:12px}button.primary{background:#1a7fb5;border-color:#36cfff}
 </style></head><body>
 <div class="box">
   <h1>__NAME__</h1>
@@ -199,6 +201,10 @@ button:hover{background:#114a6e}
   <div class="bar" id="bar"><i></i></div>
   <div id="msg">Starting...</div>
   <div id="err"></div>
+  <div id="docker" class="ask"><b>Docker Desktop is not installed on this computer.</b> It runs the cameras' AI, recordings
+    and drone video. Install it now? It downloads (about 600 MB, unless the installer is next to this program), Windows asks
+    for permission, and a restart may be needed. After that the AI services are set up by themselves.
+    <div class="row"><button id="dockerYes" class="primary">Install Docker Desktop</button><button id="dockerNo">Not now</button></div></div>
   <div class="actions" id="actions"><button id="retry">Try again</button><button id="show">Show control window</button></div>
   <div class="note">The system keeps guarding when you close the browser. To stop it: Settings → System → Shut down.</div>
 </div>
@@ -211,6 +217,8 @@ button:hover{background:#114a6e}
       if(done)return;
       if(s.ready&&s.url){done=true;document.getElementById('msg').textContent='Opening the dashboard...';location.replace(s.url);return;}
       document.getElementById('msg').textContent=s.message||'Starting...';
+      document.getElementById('docker').style.display=s.need_docker?'block':'none';
+      if(s.need_docker){document.getElementById('bar').style.display='none';document.getElementById('actions').style.display='none';return;}
       var e=document.getElementById('err');
       if(s.error){e.style.display='block';e.textContent=s.error;document.getElementById('bar').style.display='none';document.getElementById('actions').style.display='flex';}
       else{e.style.display='none';document.getElementById('bar').style.display='';document.getElementById('actions').style.display='none';}
@@ -220,6 +228,8 @@ button:hover{background:#114a6e}
     });
   }
   document.getElementById('retry').onclick=function(){post('retry');};
+  document.getElementById('dockerYes').onclick=function(){document.getElementById('docker').style.display='none';post('install_docker');};
+  document.getElementById('dockerNo').onclick=function(){document.getElementById('docker').style.display='none';post('skip_docker');};
   document.getElementById('show').onclick=function(){post('show');};
   addEventListener('pagehide',function(){if(!done){try{navigator.sendBeacon('/bye','{}');}catch(e){}}});
   tick();setInterval(tick,1000);
