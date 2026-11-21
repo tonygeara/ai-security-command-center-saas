@@ -58,3 +58,20 @@ def test_clean_zone_needs_three_corners():
     import pytest
     with pytest.raises(ValueError):
         nofly.clean_zone({"points": [offset(0, 0), offset(1, 1)]})
+
+
+def test_save_zones_retries_while_windows_locks_the_file(tmp_path, monkeypatch):
+    import nofly
+    path = str(tmp_path / "zones.json")
+    real, calls = nofly.os.replace, []
+
+    def flaky(src, dst):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")  # another thread has the file open (Windows)
+        return real(src, dst)
+    monkeypatch.setattr(nofly.os, "replace", flaky)
+    monkeypatch.setattr(nofly.os, "name", "nt")
+    monkeypatch.setattr(nofly.time, "sleep", lambda s: None)
+    nofly.save_zones(path, [])
+    assert len(calls) == 3 and nofly.load_zones(path) == []

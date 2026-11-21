@@ -91,7 +91,15 @@ def save_zones(path, zones):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(zones, f, indent=2)
-    os.replace(tmp, path)
+    # Retried briefly: on Windows the replace is refused while another thread (a route check reading the zones) or
+    # program (backup, antivirus) has the file open for a moment.
+    for attempt in range(20):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _poly(zone, ref):
