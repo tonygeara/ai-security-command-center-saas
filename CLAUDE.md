@@ -36,11 +36,22 @@ Google Docs connector isn't available in the session, say so and list the change
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (20 November 2026)
+## Where we left off (21 November 2026)
 
-- Released: Edge **V11.12.1** (20 Nov, release `edge-v11.12.1`): the version and edition ("V11.12.1 · ONLINE" /
+- Released: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
+  and was never published, so V11.13.1 carries it):
+  - Settings → **Updates** (`edge/app/updater.py`, off by default): installs the version the client's **update channel**
+    allows, checks GitHub's SHA-256, waits while a drone or dock flies, never downgrades.
+  - **Per-client update channels** (admin portal: client page → Updates; Overview → Update channels → Approve):
+    Test = newest, Normal = approved version, Pinned = one version. Supabase migration
+    `20261121120000_update_channels` applied; `edge-agent-control` v16 returns `updates: {channel, version}`.
+    doumith is on **Test**; **V11.13.1 approved** for Normal (21 Nov).
+  - Settings → System → **Log out and turn off** (also stops Docker Desktop; the program and Docker start at the next
+    Windows sign-in). **Docker Desktop install prompt** when it's missing (`edge/app/docker_setup.py`).
+  - No-fly zones save retries on Windows file locks.
+  - Not yet tried on real Windows: the silent upgrade, installing Docker (UAC/WSL), stopping Docker.
+- Before that: Edge **V11.12.1** (20 Nov, release `edge-v11.12.1`): the version and edition ("V11.12.1 · ONLINE" /
   "ON-PREM") at the top right of every page (`VERSION_LABEL` in `hud_topbar`, `<!--APP_VERSION-->` on the main page).
-- On the branch, not merged: **V11.13.0** Settings → Updates (automatic updates, `edge/app/updater.py`, off by default).
 - Before that: Edge **V11.12.0** (19 Nov, release `edge-v11.12.0`): more DJI Dock control on the Drone page: Look at (map
   click, `camera_look_at`), Aim (video click, `camera_aim`), thermal Temperature readings (IR metering), Orbit (Dock 4
   POI, circle checked against range and no-fly zones), Stop now (emergency stop), dock Siren and Light
@@ -69,12 +80,12 @@ Google Docs connector isn't available in the session, say so and list the change
   limit) > Editor / Viewer. Super admin manages everything in Admin (Clients, Licences, Devices, Users,
   Demo requests).
 - Client install guide (online edition) also in the owner's Drive folder "camera system":
-  https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit . Updated 17 Nov for DJI Docks (19 Nov: Dock 4 added to the dock line)
+  https://docs.google.com/document/d/1whSFjy_ZTnXFhiF2wVjt0Z8h2noiIHOTRUtiAJbtB1Y/edit . Updated 17 Nov for DJI Docks (19 Nov: Dock 4; 21 Nov: automatic updates, Docker install offer, Log out and turn off)
   (optional dock, allow the app on Private networks, dock setup by an admin, dock media kept 30 days). Keep it and
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 20 Nov (V11.12.1; 77 features; 31 capabilities, 19
+- Features and Capabilities docs current on 21 Nov (V11.13.1; 80 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
