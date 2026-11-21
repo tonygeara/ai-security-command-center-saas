@@ -36,9 +36,12 @@ Google Docs connector isn't available in the session, say so and list the change
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (19 November 2026)
+## Where we left off (20 November 2026)
 
-- Released: Edge **V11.12.0** (19 Nov, release `edge-v11.12.0`): more DJI Dock control on the Drone page: Look at (map
+- Released: Edge **V11.12.1** (20 Nov, release `edge-v11.12.1`): the version and edition ("V11.12.1 · ONLINE" /
+  "ON-PREM") at the top right of every page (`VERSION_LABEL` in `hud_topbar`, `<!--APP_VERSION-->` on the main page).
+- On the branch, not merged: **V11.13.0** Settings → Updates (automatic updates, `edge/app/updater.py`, off by default).
+- Before that: Edge **V11.12.0** (19 Nov, release `edge-v11.12.0`): more DJI Dock control on the Drone page: Look at (map
   click, `camera_look_at`), Aim (video click, `camera_aim`), thermal Temperature readings (IR metering), Orbit (Dock 4
   POI, circle checked against range and no-fly zones), Stop now (emergency stop), dock Siren and Light
   (`/api/docks/<sn>/deterrent`); drone height shown is now above take-off. Unconfirmed on hardware: that emergency stop
@@ -71,7 +74,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 19 Nov (V11.12.0; 77 features; 31 capabilities, 19
+- Features and Capabilities docs current on 20 Nov (V11.12.1; 77 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.

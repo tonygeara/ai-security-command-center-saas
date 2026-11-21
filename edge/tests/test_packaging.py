@@ -48,12 +48,13 @@ def test_onprem_build_includes_every_module():
     compiled = re.search(r"foreach \(\$m in ([^)]*)\) \{\s*Write-Host \"Compiling", ps).group(1)
     own = re.search(r"\$own = (.*)", ps).group(1)
     names = lambda s: set(re.findall(r"'(\w+)'", s))  # noqa: E731
-    copied = names(copy) | {"licensing", "browser_mode"}  # copied one by one above the loop
+    copied = names(copy) | {"licensing", "browser_mode", "docker_setup"}  # copied one by one above the loop
     need = app_modules() - GENERATED
     assert not need - copied, f"build_onprem.ps1 doesn't copy: {sorted(need - copied)}"
     # Compiled to native code (browser_mode stays Python, like the launcher).
-    assert not (need - {"browser_mode"}) - names(compiled), f"build_onprem.ps1 doesn't compile: {sorted((need - {'browser_mode'}) - names(compiled))}"
-    assert not (need - {"browser_mode", "edition"}) - names(own), f"build_onprem.ps1 leak check misses: {sorted((need - {'browser_mode'}) - names(own))}"
+    py = {"browser_mode", "docker_setup"}  # stay Python, like the launcher
+    assert not (need - py) - names(compiled), f"build_onprem.ps1 doesn't compile: {sorted((need - py) - names(compiled))}"
+    assert not (need - py - {"edition"}) - names(own), f"build_onprem.ps1 leak check misses: {sorted((need - py) - names(own))}"
 
 
 def test_onprem_spec_lists_every_module():

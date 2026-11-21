@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.12.1"
+APP_VERSION = "V11.13.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -9641,6 +9641,66 @@ def _save_customer_settings(data):
     CUSTOMER_SETTINGS_FILE.parent.mkdir(parents=True,exist_ok=True)
     tmp=CUSTOMER_SETTINGS_FILE.with_suffix(".tmp");tmp.write_text(json.dumps(safe,indent=2),encoding="utf-8");_replace_file(tmp,CUSTOMER_SETTINGS_FILE);return safe
 
+# ---------- automatic updates (Settings → Updates) ----------
+import updater as updater_lib  # noqa: E402
+
+
+def _update_busy():
+    """'' when the program may restart for an update now; otherwise why not."""
+    if drone_response.get("active"):
+        return "a drone is answering an alarm."
+    for slot in list(drone_links):
+        if (get_link(slot).get("telemetry") or {}).get("flying"):
+            return f"{drone_label(slot)} is flying."
+    for sn, dk in dock_store.docks().items():
+        m = dock_hub.mission(sn)
+        if m and m.get("active"):
+            return f"{dk['name']}'s drone is flying."
+    return ""
+
+
+def _update_audit(action, detail=None):
+    detail = detail or {}
+    audit_record(action, target="app", detail=detail, user=detail.get("by") or "automatic", source="updates")
+
+
+UPDATER = updater_lib.Updater(DATA_FOLDER, APP_VERSION, edition.EDITION, busy=_update_busy, audit=_update_audit)
+
+
+def _updater_user():
+    return (getattr(g, "user", None) or {}).get("username") or "dashboard"
+
+
+@app.route("/api/updates", methods=["GET", "POST"])
+def api_updates():
+    """GET: update status (?check=1 checks now). POST (admins): {"auto": true/false}; the answer's "ask" means a
+    new version is waiting and the page should offer it."""
+    if request.method == "GET":
+        if request.args.get("check"):
+            UPDATER.check()
+        return jsonify({"ok": True, **UPDATER.status(), "can_install": updater_lib.frozen() and os.name == "nt"})
+    data = request.get_json(silent=True) or {}
+    if "auto" not in data:
+        return jsonify({"ok": False, "error": "Say auto: true or false."}), 400
+    return jsonify({"ok": True, **UPDATER.set_auto(bool(data["auto"]), by=_updater_user())})
+
+
+@app.route("/api/updates/install", methods=["POST"])
+def api_updates_install():
+    """Admins: install the newest version now (the answer to "Install now")."""
+    if not (updater_lib.frozen() and os.name == "nt"):
+        return jsonify({"ok": False, "error": "Only the installed Windows program can update itself."}), 409
+    ok, msg = UPDATER.install(by=_updater_user())
+    return (jsonify({"ok": True, "message": msg}) if ok else jsonify({"ok": False, "error": msg})), (200 if ok else 409)
+
+
+@app.route("/api/updates/skip", methods=["POST"])
+def api_updates_skip():
+    """Admins: "Not now": don't install this version automatically."""
+    UPDATER.skip((request.get_json(silent=True) or {}).get("version") or "", by=_updater_user())
+    return jsonify({"ok": True})
+
+
 SETTINGS_PAGE = hud_page("Settings", r"""
 <main class="hud-main narrow">
 <div class="page-head"><div><div class="page-kicker">Configuration</div><h1 class="page-title">Settings</h1><div class="page-sub">Simple controls for AI, cameras and drones.</div></div></div>
@@ -9666,10 +9726,16 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <div class="hud-row"><div><b>…within this many hours</b></div><input id="casingHours" type="number" min="1" max="336" style="width:120px" onchange="save()"></div>
 <div class="hud-row"><div><b>Unusual activity warnings</b><div class="muted">Far more people or vehicles at a camera than usual for that hour and weekday (learns for two weeks first).</div></div><input class="toggle" type="checkbox" data-key="unusual_alerts" onchange="save()"></div>
 </div></section>
+<section class="panel" id="updPanel"><div class="panel-head"><div class="panel-title">⟳ Updates</div><div class="live" id="updVer"></div></div><div class="panel-body">
+<div class="hud-row"><div><b>Updates</b><div class="muted">On: when a new version is published, this PC downloads it, checks it and installs it by itself (the program restarts in about a minute; it waits while a drone or dock is flying). Off: nothing is installed. Admins only.</div></div><input class="toggle" type="checkbox" id="updAuto" onchange="updToggle(this.checked)"></div>
+<div class="hud-row"><div><b id="updState">Checking for updates…</b><div class="muted" id="updSub"></div></div><span><button class="hud-btn" id="updCheck" onclick="updCheckNow()">Check now</button> <button class="hud-btn primary" id="updInstall" onclick="updInstall()" hidden>Install now</button></span></div>
+<div id="updAsk" class="hud-msg" hidden></div><div id="updMsg" class="hud-msg"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
 <div class="hud-row" id="cloudRow"><div><b>Phone access</b><div class="muted">Off: nothing leaves this PC. On: incidents (unknown faces and plates, drone responses) with one snapshot each go to your portal account, and the portal can ask for live pictures of a camera while you watch on your phone. Cloud edition only.</div><div class="muted" id="cloudState"></div></div><input class="toggle" type="checkbox" data-key="cloud_incidents" onchange="save()"></div>
 <div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
 <div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
+<div class="hud-row"><div><b>Log out and turn off</b><div class="muted">Signs you out and stops everything on this PC, Docker Desktop included, until you sign in to Windows again (or open the program from the desktop icon): then Docker and the system start by themselves. Admins only.</div></div><button class="hud-btn danger" id="logoutBtn" onclick="logoutOff()">Log out and turn off</button></div>
 <div id="offMsg" class="hud-msg"></div>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
@@ -9701,6 +9767,32 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
 fetch('/api/cloud/sync').then(r=>r.json()).then(c=>{if(c.onprem){cloudRow.style.display='none';return}
   cloudState.textContent=!c.paired?'This PC is not paired with the portal yet.':c.synced===false?'Last sync failed: '+c.error:c.synced?`Synced ${new Date(c.last*1000).toLocaleTimeString()} · ${c.incidents_sent} incident updates sent`+(c.watching?` · ${c.watching} watching live`:''):''});
+let upd={};
+async function updLoad(check){try{upd=await fetch('/api/updates'+(check?'?check=1':''),{cache:'no-store'}).then(r=>r.json())}catch(e){return}updShow()}
+function updShow(){updAuto.checked=!!upd.auto;updVer.textContent=(upd.current||'')+' · '+(upd.edition==='onprem'?'ON-PREM':'ONLINE');
+  updInstall.hidden=!upd.available;updInstall.textContent=upd.available?'Install '+upd.available+' now':'Install now';
+  updState.textContent=upd.installing?'Installing '+upd.installing+'…':upd.available?'New version '+upd.available+' is available.':upd.checked_at?'This PC has the newest version ('+upd.current+').':'Not checked yet.';
+  updSub.textContent=[upd.waiting?'Waiting: '+upd.waiting:'',upd.available&&!upd.auto?'Updates are off: it will not install by itself.':'',
+    upd.available&&upd.auto&&upd.skipped===upd.available?'You chose not to install this version automatically.':'',
+    upd.error||'',upd.checked_at?'Last checked '+new Date(upd.checked_at*1000).toLocaleString()+'.':''].filter(Boolean).join(' ')}
+function updAskShow(){updAsk.hidden=false;updAsk.className='hud-msg';
+  updAsk.innerHTML=`Version <b>${upd.available}</b> is ready. Install it now? <button class="hud-btn primary" onclick="updInstall()">Install now</button> <button class="hud-btn" onclick="updSkip()">Not now</button>`}
+async function updPost(path,body){const r=await fetch(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
+  const d=await r.json().catch(()=>({ok:false,error:'No answer.'}));if(r.status===403)d.error='Only an admin can change updates.';return d}
+async function updToggle(on){const d=await updPost('/api/updates',{auto:on});if(!d.ok){updMsg.className='hud-msg bad';updMsg.textContent=d.error;updAuto.checked=!on;return}
+  upd=d;updShow();updMsg.className='hud-msg';updMsg.textContent=on?'Updates on.':'Updates off: new versions will not be installed.';updAsk.hidden=true;if(d.ask)updAskShow()}
+async function updInstall(){if(!confirm('Install '+(upd.available||'the new version')+' now? The program closes and starts again in about a minute.'))return;
+  updAsk.hidden=true;const d=await updPost('/api/updates/install');updMsg.className='hud-msg'+(d.ok?'':' bad');updMsg.textContent=d.ok?d.message:d.error;updLoad()}
+async function updSkip(){const d=await updPost('/api/updates/skip',{version:upd.available});updAsk.hidden=true;
+  updMsg.className='hud-msg';updMsg.textContent=d.ok?'Not installed. Newer versions will install by themselves.':d.error;updLoad()}
+async function updCheckNow(){updState.textContent='Checking…';await updLoad(true)}
+updLoad();setInterval(updLoad,60000);
+async function logoutOff(){const b=logoutBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to log out and turn off';setTimeout(()=>{delete b.dataset.arm;b.textContent='Log out and turn off'},4000);return}
+  b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Turning off…';
+  const r=await fetch('/api/system/logout',{method:'POST'}).catch(()=>null);const d=r?await r.json().catch(()=>({ok:false})):{ok:false,error:'No answer.'};
+  if(r&&r.status===403)d.error='Only an admin can turn the system off.';
+  if(d.ok){document.body.innerHTML='<main class="hud-main narrow"><h1 class="page-title">Logged out</h1><p class="muted">The system and Docker Desktop are turning off. Cameras and drones are no longer guarded. Everything starts again by itself when you sign in to Windows, or from the desktop icon. You can close this window.</p></main>'}
+  else{b.disabled=false;offMsg.className='hud-msg bad';offMsg.textContent=d.error||'Could not turn off.'}}
 async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.textContent='Click again to shut down';setTimeout(()=>{delete b.dataset.arm;b.textContent='Shut down system'},4000);return}
   b.disabled=true;offMsg.className='hud-msg';offMsg.textContent='Shutting down…';
   const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));
@@ -10464,6 +10556,8 @@ def main():
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     start_assistant()
     CLOUD_SYNC.start()
+    if updater_lib.frozen():
+        UPDATER.start()  # checks for new versions (and installs them when Updates is on)
     print()
     print(
         "======================================"

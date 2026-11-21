@@ -9,7 +9,7 @@ import threading
 import time
 
 import requests
-from flask import Blueprint, Response, g, has_request_context, jsonify, request
+from flask import Blueprint, Response, g, has_request_context, jsonify, request, session
 
 import audit
 import edition
@@ -261,6 +261,22 @@ def api_system_shutdown():
     return jsonify({"ok": False, "error": "The program's launcher isn't running, so it can't stop the system from here. "
                                           "Use Stop System in the control window."}), 503
 
+
+
+@bp.route("/api/system/logout", methods=["POST"])
+def api_system_logout():
+    """Admins: sign out and turn everything off, Docker Desktop included. The program (and Docker with it) starts again
+    at the next Windows sign-in, or from the desktop icon."""
+    try:
+        r = requests.post(LAUNCHER_URL + "logout", json={}, timeout=5)
+        if r.ok and r.json().get("app") == "ai-security-launcher":
+            audit_record("system: log out and turn off")
+            session.clear()
+            return jsonify({"ok": True})
+    except Exception:
+        pass
+    return jsonify({"ok": False, "error": "The program's launcher isn't running, so it can't turn the system off from here. "
+                                          "Use Stop System in the control window."}), 503
 
 
 # ---------------- Browser presence ----------------
