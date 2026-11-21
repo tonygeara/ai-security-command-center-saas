@@ -1,7 +1,8 @@
 import Link from "next/link";
 import {notFound} from "next/navigation";
 import {createClient} from "../../../../lib/supabase/server";
-import {buildClients, daysLeft, isOnline, LATEST_APP_VERSION, loadAdminData, versionBehind} from "../../../../lib/admin";
+import {buildClients, daysLeft, edgeReleases, isOnline, LATEST_APP_VERSION, loadAdminData, versionBehind} from "../../../../lib/admin";
+import UpdateChannel from "../../UpdateChannel";
 import SubscriptionControls from "../../SubscriptionControls";
 import FeatureToggle from "../../FeatureToggle";
 import DownloadLicense from "./DownloadLicense";
@@ -38,9 +39,12 @@ export default async function ClientPage({params}: {params: Promise<{key: string
   let saas: React.ReactNode = null;
   if(c.type === "saas" && c.org){
     const o = c.org, sub = data.subs.find(s => s.organization_id === o.id);
-    const [{data: overrides}, {data: defaults}] = await Promise.all([
+    const [{data: overrides}, {data: defaults}, {data: upd}, {data: policy}, versions] = await Promise.all([
       supabase.from("feature_entitlements").select("feature_key,enabled,limit_value").eq("organization_id", o.id),
-      supabase.from("plan_features").select("feature_key,enabled,limit_value").eq("plan_code", c.plan)]);
+      supabase.from("plan_features").select("feature_key,enabled,limit_value").eq("plan_code", c.plan),
+      supabase.from("organizations").select("update_channel,pinned_version").eq("id", o.id).maybeSingle(),
+      supabase.from("edge_release_policy").select("approved_version").eq("id", 1).maybeSingle(),
+      edgeReleases()]);
     const devices = data.devices.filter(d => d.organization_id === o.id), sources = data.sources.filter(s => s.organization_id === o.id);
     const users = data.users.filter(u => u.organization_id === o.id);
     saas = <>
@@ -57,6 +61,9 @@ export default async function ClientPage({params}: {params: Promise<{key: string
           const included = PREMIUM.has(k) && !ov && !def;
           const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : included);
           return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}{k === "drone_dock" && !ov && !def && <span className="muted"> · off until switched on</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial} limit={ov?.limit_value ?? def?.limit_value ?? null}/></p>; })}</article>
+        <article className="card"><h3>Updates</h3>
+          <UpdateChannel orgId={o.id} initialChannel={upd?.update_channel || "normal"} initialPinned={upd?.pinned_version ?? null}
+            versions={versions} approved={policy?.approved_version ?? null}/></article>
       </section>
       <h2>PCs (Edge Agents)</h2>
       <div className="card tableWrap"><table className="adminTable"><thead><tr><th>PC</th><th>Status</th><th>Version</th><th>Cameras & drones</th><th></th></tr></thead><tbody>

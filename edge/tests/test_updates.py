@@ -142,3 +142,59 @@ def test_only_admins_change_updates():
         assert not users.allowed("operator", "POST", path) and not users.allowed("viewer", "POST", path)
         assert users.allowed("admin", "POST", path)
     assert users.allowed("viewer", "GET", "/api/updates")
+
+
+# ---------- per-client channels (admin portal → client → Updates) ----------
+
+def test_channels(up):
+    urls = []
+    up.fetch = lambda url: urls.append(url) or release(url.rsplit("edge-v", 1)[1] if "/tags/" in url else "11.99.0")
+    # Test (and on-prem, no portal): the newest release.
+    up.policy = lambda: {"channel": "test", "version": None}
+    assert up.check()["version"] == "V11.99.0" and urls[-1].endswith("/releases/latest")
+    up.policy = lambda: None
+    assert up.check()["version"] == "V11.99.0" and up.status()["channel"] == "newest"
+    # Normal: the approved version, fetched by its tag.
+    up.policy = lambda: {"channel": "normal", "version": "V11.13.0"}
+    assert up.check()["version"] == "V11.13.0" and urls[-1].endswith("/releases/tags/edge-v11.13.0")
+    st = up.status()
+    assert st["channel"] == "normal" and st["target"] == "V11.13.0" and st["available"] == "V11.13.0"
+    up.policy = lambda: {"channel": "normal", "version": None}
+    n = len(urls)
+    assert up.check() is None and len(urls) == n and "No version approved" in up.status()["error"]
+    # Pinned to a newer version: installs it. Pinned older: never downgrades.
+    up.policy = lambda: {"channel": "pinned", "version": "V11.20.0"}
+    up.set_auto(True)
+    ok, msg = up.tick()
+    assert ok and up.ran[-1].endswith("Setup-11.20.0.exe")
+    up.state["installing"] = None
+    up.policy = lambda: {"channel": "pinned", "version": "V11.10.0"}
+    ran = len(up.ran)
+    assert up.tick() is None and len(up.ran) == ran
+    st = up.status()
+    assert st["target_older"] and st["available"] is None
+    # A paired PC that hasn't heard from the portal yet waits.
+    up.policy = lambda: {"channel": "wait"}
+    n = len(urls)
+    assert up.check() is None and len(urls) == n and "Waiting for the portal" in up.status()["error"]
+
+
+@pytest.fixture
+def saved_cloud_state(d):
+    saved = dict(d.cloud_state)
+    yield
+    d.cloud_state.clear()
+    d.cloud_state.update(saved)
+
+
+def test_dashboard_takes_the_channel_from_the_portal(d, monkeypatch, saved_cloud_state):
+    d.cloud_state["updates"] = None
+    monkeypatch.setattr(d, "onprem_mode", lambda: False)
+    assert d._update_policy() == {"channel": "wait"}
+    d._apply_license({"organization_status": "active", "features": {}, "updates": {"channel": "test", "version": None}},
+                     connected=True, last_success=0)
+    assert d._update_policy() == {"channel": "test", "version": None}
+    d._apply_license({"organization_status": "active", "features": {}}, connected=False, last_success=0)  # a cached lease
+    assert d._update_policy()["channel"] == "test"  # kept
+    monkeypatch.setattr(d, "onprem_mode", lambda: True)
+    assert d._update_policy() is None  # on-prem: newest
