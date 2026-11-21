@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.13.0"
+APP_VERSION = "V11.13.1"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2277,6 +2277,7 @@ def _apply_license(data, connected, last_success):
             "features": features,
             "usage": data.get("usage") if isinstance(data.get("usage"), dict) else {"cameras": 0, "drones": 0},
             "limits": data.get("limits") if isinstance(data.get("limits"), dict) else {"cameras": None, "drones": None},
+            "updates": data.get("updates") if isinstance(data.get("updates"), dict) else cloud_state.get("updates"),
             "last_success": last_success,
             "offline_grace": not connected,
             "grace_expires_at": last_success + LICENSE_GRACE_SECONDS,
@@ -9664,7 +9665,20 @@ def _update_audit(action, detail=None):
     audit_record(action, target="app", detail=detail, user=detail.get("by") or "automatic", source="updates")
 
 
-UPDATER = updater_lib.Updater(DATA_FOLDER, APP_VERSION, edition.EDITION, busy=_update_busy, audit=_update_audit)
+def _update_policy():
+    """The update channel the admin portal set for this client. On-prem PCs (no portal) follow the newest release;
+    a paired online PC waits until the portal has said (so a Normal client never takes an unapproved version)."""
+    if edition.EDITION == "onprem" or onprem_mode():
+        return None
+    with cloud_lock:
+        p = cloud_state.get("updates")
+    if isinstance(p, dict):
+        return p
+    return {"channel": "wait"}
+
+
+UPDATER = updater_lib.Updater(DATA_FOLDER, APP_VERSION, edition.EDITION, busy=_update_busy, audit=_update_audit,
+                              policy=_update_policy)
 
 
 def _updater_user():
@@ -9772,7 +9786,8 @@ async function updLoad(check){try{upd=await fetch('/api/updates'+(check?'?check=
 function updShow(){updAuto.checked=!!upd.auto;updVer.textContent=(upd.current||'')+' · '+(upd.edition==='onprem'?'ON-PREM':'ONLINE');
   updInstall.hidden=!upd.available;updInstall.textContent=upd.available?'Install '+upd.available+' now':'Install now';
   updState.textContent=upd.installing?'Installing '+upd.installing+'…':upd.available?'New version '+upd.available+' is available.':upd.checked_at?'This PC has the newest version ('+upd.current+').':'Not checked yet.';
-  updSub.textContent=[upd.waiting?'Waiting: '+upd.waiting:'',upd.available&&!upd.auto?'Updates are off: it will not install by itself.':'',
+  updSub.textContent=['Channel: '+(upd.channel_name||'')+(upd.channel==='pinned'&&upd.target?' '+upd.target:'')+(upd.channel==='normal'&&upd.target?' ('+upd.target+')':'')+'.',
+    upd.target_older?'That is older than this PC, so it stays on '+upd.current+'.':'',upd.waiting?'Waiting: '+upd.waiting:'',upd.available&&!upd.auto?'Updates are off: it will not install by itself.':'',
     upd.available&&upd.auto&&upd.skipped===upd.available?'You chose not to install this version automatically.':'',
     upd.error||'',upd.checked_at?'Last checked '+new Date(upd.checked_at*1000).toLocaleString()+'.':''].filter(Boolean).join(' ')}
 function updAskShow(){updAsk.hidden=false;updAsk.className='hud-msg';

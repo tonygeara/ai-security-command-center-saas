@@ -1,6 +1,7 @@
 import Link from "next/link";
 import {createClient} from "../../lib/supabase/server";
-import {buildClients, INSTALLERS, isOnline, LATEST_APP_VERSION, loadAdminData, needsAttention, RELEASE_URL} from "../../lib/admin";
+import {buildClients, edgeReleases, INSTALLERS, isOnline, LATEST_APP_VERSION, loadAdminData, needsAttention, RELEASE_URL} from "../../lib/admin";
+import ApproveVersion from "./ApproveVersion";
 
 const ICON: Record<string, string> = {expiry: "⏳", payment: "$", trial: "★", offline: "⚠", version: "⬆", suspended: "⏸"};
 
@@ -9,6 +10,7 @@ export default async function Overview(){
   const data = await loadAdminData(supabase);
   const clients = buildClients(data), alerts = needsAttention(data, clients);
   const online = data.devices.filter(d => isOnline(d)).length;
+  const [{data: policy}, versions] = await Promise.all([supabase.from("edge_release_policy").select("approved_version").eq("id", 1).maybeSingle(), edgeReleases()]);
   const {data: activity} = await supabase.from("audit_logs").select("action,metadata,created_at,organization_id,target_type").order("created_at", {ascending: false}).limit(8);
   return <>
     <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Overview</h1><p className="muted">What needs your attention today</p></div>
@@ -28,6 +30,11 @@ export default async function Overview(){
       <td><b>{i.edition}</b><div className="muted">{i.note}</div></td>
       <td style={{whiteSpace: "nowrap"}}><a className="btn small" href={i.url}>Download</a> <a className="ghost small" href={i.guide} target="_blank">Install guide</a></td></tr>)}
       <tr><td className="muted" colSpan={2}>Always the newest installers published by the “Edge installer” workflow on GitHub (sign in to GitHub to download). A new version (V{LATEST_APP_VERSION} on main now) appears here about 15 minutes after it reaches main, once its build and tests have passed. <a href={RELEASE_URL} target="_blank">Release notes ↗</a></td></tr></tbody></table></div>
+    <h2>Update channels</h2>
+    <div className="card"><ApproveVersion approved={policy?.approved_version ?? null} versions={versions}/>
+      <p className="muted">Each client follows a channel (client page → Updates): <b>Test</b> gets every new version as soon as it is published,
+        <b> Normal</b> gets the version approved here, <b>Pinned</b> stays on the version you chose. Only PCs with Settings → Updates on update
+        by themselves.</p></div>
     <h2>Recent activity</h2>
     <div className="card tableWrap"><table className="adminTable"><tbody>{(activity ?? []).map((e: any, i: number) => <tr key={i}>
       <td className="muted" style={{whiteSpace: "nowrap"}}>{new Date(e.created_at).toLocaleString()}</td>

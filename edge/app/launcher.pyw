@@ -6,7 +6,7 @@ import edition
 import browser_mode as browser_mode_lib
 import docker_setup
 
-APP_VERSION = 'V11.13.0'
+APP_VERSION = 'V11.13.1'
 PRODUCT_NAME = edition.PRODUCT_NAME
 CREATE_NO_WINDOW = 0x08000000 if os.name == 'nt' else 0
 FROZEN = getattr(sys, 'frozen', False)

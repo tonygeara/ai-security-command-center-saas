@@ -5,7 +5,7 @@ import type {SupabaseClient} from "@supabase/supabase-js";
 // The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
 // new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
 // published automatically when that version reaches main (.github/workflows/edge-installer.yml).
-export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.0";
+export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.1";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>, marked
 // "latest", with copies whose names carry no version. The links below go to GitHub's latest release, so they always
 // give the newest installers that were actually published: right after a merge (build still running) or if a build
@@ -20,6 +20,20 @@ export const INSTALLERS = [
    note: "Works offline with a licence file from Licences. For a USB install without internet, add the AI-services file made with build_onprem.ps1."},
 ].map(i => ({...i, url: latest(i.file)}));
 const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
+
+// Published Windows versions (GitHub releases edge-v<version>), newest first, for the update channel pickers.
+export async function edgeReleases(): Promise<string[]> {
+  try {
+    const r = await fetch("https://api.github.com/repos/tonygeara/ai-security-command-center-saas/releases?per_page=50",
+      {headers: {Accept: "application/vnd.github+json"}, next: {revalidate: 600}} as RequestInit);
+    if(!r.ok) return [];
+    const rows = await r.json() as {tag_name?: string; draft?: boolean}[];
+    const vs = rows.filter(x => !x.draft).map(x => /^edge-v(\d+)\.(\d+)\.(\d+)$/.exec(x.tag_name || "")).filter(Boolean)
+      .map(m => [Number(m![1]), Number(m![2]), Number(m![3])]);
+    vs.sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2]);
+    return vs.map(v => `V${v.join(".")}`);
+  } catch { return []; }
+}
 
 export type Row = Record<string, any>;
 

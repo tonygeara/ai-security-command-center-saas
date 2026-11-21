@@ -78,7 +78,8 @@ OPTIONAL
 UPDATES
   - Automatic: dashboard > Settings > Updates ON (admins). New versions then download, are checked
     and install by themselves; the program restarts in about a minute and waits while a drone or
-    dock is flying. Switching it on when a new version is waiting asks you first.
+    dock is flying. Switching it on when a new version is waiting asks you first. Your provider
+    chooses which version your PCs install.
   - By hand (or with Updates off): run the new Setup file over the installed one. Cameras, faces,
     events and settings are kept.
 

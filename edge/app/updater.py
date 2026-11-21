@@ -8,6 +8,11 @@ The PC checks the newest published release (GitHub, the same one the admin porta
 - Switching it ON while a new version is waiting asks first ("Install now" / "Not now"). "Not now" skips that
   version; later versions install by themselves.
 
+Which version: the admin portal sets a channel per client (sent with the licence check, cloud_state["updates"]):
+test = the newest release, normal = the version the owner approved, pinned = one chosen version. A PC never
+downgrades by itself (an older pin just stops updates). PCs without the portal (on-prem, not paired) follow the
+newest release.
+
 Each edition installs its own installer (online or on-prem). Settings live in updates.json in the data folder.
 """
 import hashlib
@@ -22,6 +27,9 @@ import urllib.request
 
 REPO = "tonygeara/ai-security-command-center-saas"
 LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
+TAG_URL = f"https://api.github.com/repos/{REPO}/releases/tags/edge-v{{}}"
+CHANNEL_NAMES = {"test": "Test (newest version)", "normal": "Normal (approved version)", "pinned": "Pinned",
+                 "newest": "Newest version (no portal channel)", "wait": "Waiting for the portal"}
 CHECK_EVERY = 6 * 3600          # seconds between checks
 FIRST_CHECK_AFTER = 120         # seconds after start
 INSTALLER_PREFIX = {"saas": "AI-Security-Command-Center-Setup-", "onprem": "On-prem-AI-Command-Centre-Setup-"}
@@ -64,12 +72,13 @@ def _run_installer(path):
 
 
 class Updater:
-    def __init__(self, folder, current, edition, busy=lambda: "", log=print, audit=None, now=time.time):
+    def __init__(self, folder, current, edition, busy=lambda: "", log=print, audit=None, now=time.time, policy=lambda: None):
         self.folder = folder
         self.path = os.path.join(folder, "updates.json")
         self.current = current                    # e.g. "V11.12.1"
         self.edition = edition if edition in INSTALLER_PREFIX else "saas"
         self.busy = busy                          # '' when it's safe to restart, else why not (a drone is flying…)
+        self.policy = policy                      # {"channel", "version"} from the admin portal, or None
         self.log = log
         self.audit = audit or (lambda *a, **k: None)
         self.now = now
@@ -119,10 +128,28 @@ class Updater:
         self.audit("updates: skipped", detail={"by": by, "version": version})
 
     # --- checking ---
+    def target(self):
+        """(channel, version or None): which release this PC should run. None version with "test"/"newest": the newest."""
+        p = self.policy() or {}
+        ch = p.get("channel") if p.get("channel") in ("test", "normal", "pinned", "wait") else "newest"
+        v = p.get("version") if ch in ("normal", "pinned") else None
+        return ch, ("V%d.%d.%d" % parse_version(v)) if v and parse_version(v) else None
+
     def check(self):
-        """Ask GitHub for the newest release. Returns its info or None (the error is kept in the status)."""
+        """Ask GitHub for the release this PC's channel points at. Returns its info or None (the reason is kept)."""
+        ch, want = self.target()
+        if ch == "wait":
+            with self.lock:
+                self.state.update(latest=None, checked_at=self.now(),
+                                  error="Waiting for the portal to say which version this PC should run.")
+            return None
+        if ch in ("normal", "pinned") and not want:
+            with self.lock:
+                self.state.update(latest=None, checked_at=self.now(),
+                                  error="No version approved for Normal clients yet." if ch == "normal" else "No version pinned.")
+            return None
         try:
-            r = self.fetch(LATEST_URL)
+            r = self.fetch(TAG_URL.format(want.lstrip("V")) if want else LATEST_URL)
             tag = str(r.get("tag_name") or "")
             ver = parse_version(tag)
             prefix = INSTALLER_PREFIX[self.edition]
@@ -153,7 +180,10 @@ class Updater:
         with self.lock:
             s = dict(self.state)
         avail = self.newer(s["latest"])
+        ch, want = self.target()
+        older = bool(want and parse_version(want) and parse_version(self.current) and parse_version(want) < parse_version(self.current))
         return {"auto": s["auto"], "current": self.current, "edition": self.edition,
+                "channel": ch, "channel_name": CHANNEL_NAMES[ch], "target": want, "target_older": older,
                 "available": s["latest"]["version"] if avail else None, "latest": s["latest"],
                 "skipped": s["skipped"], "checked_at": s["checked_at"], "error": s["error"],
                 "installing": s["installing"], "waiting": s["waiting"]}
