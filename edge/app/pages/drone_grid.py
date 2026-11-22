@@ -107,7 +107,7 @@ async function setPatrol(on){patrolBusy=true;const box=$('patrolOn');
         +set.map(x=>'• '+x.label+': “'+x.route+'” ('+x.stops+' stop'+(x.stops>1?'s':'')+')').join('\n')
         +(none.length?'\n\nNo route yet (stays on the ground): '+none.map(x=>x.label).join(', '):'')
         +'\n\nEach drone runs its own route\'s battery settings. STOP or the pilot leaves that drone alone. Keep the drones in sight.')){box.checked=false;return}}
-    else if(!await uiConfirm('Switch Run patrol off? Drones on a patrol stop and hover where they are.')){box.checked=true;return}
+    else if(!await uiConfirm('Switch Run patrol off? Drones on a patrol stop their route and fly home.')){box.checked=true;return}
     const d=await fetch('/api/routes/patrol',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({on})}).then(r=>r.json());
     if(!d.ok){box.checked=!on;uiAlert(d.error||'Not allowed.')}}
   catch(e){box.checked=!on}finally{patrolBusy=false;loadPatrol()}}

@@ -38,7 +38,8 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (22 November 2026)
 
-- In pull request: Edge **V11.14.0**: **Run patrol** switch beside the Drone Control live view and on the Drone Grid
+- In pull request: Edge **V11.14.1**: switching Run patrol off sends those drones home (was: hover).
+- Merged 22 Nov (PR #35): Edge **V11.14.0**: **Run patrol** switch beside the Drone Control live view and on the Drone Grid
   (`/api/routes/patrol`, `patrol_mode.json`): every connected/virtual drone flies its own last route (last flown or
   saved on its page) on repeat; STOP / pilot / Stop route leaves that drone alone until the switch is turned on again.
   **Themed dialogs**: every `alert/confirm/prompt` replaced by `uiAlert/uiConfirm/uiPrompt` (edge: `pages/dialogs.py`,
@@ -102,7 +103,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 22 Nov (V11.14.0 marked "in pull request"; 82 features; 31 capabilities, 19
+- Features and Capabilities docs current on 22 Nov (V11.14.0 merged, V11.14.1 marked "in pull request"; 82 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
