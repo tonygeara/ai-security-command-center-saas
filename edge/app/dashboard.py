@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.14.0"
+APP_VERSION = "V11.14.1"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -7830,11 +7830,18 @@ def _run_route(name, route, by, slot, run):
         _drone_event(f"Route {name} ended: {e}", slot)
         how = f"🔋 Ended: {e}."
     except Exception as e:
-        drone_command("hover", timeout=5.0, slot=slot)
-        run.update(phase="stopped", message=f"Route stopped at stop {run['index']}: {e}")
-        _drone_event(f"Route {name} stopped: {e}", slot)
-        how = f"⚠️ Stopped at stop {run['index']}: {e}. The drone is hovering." if "stopped from the PC" not in str(e) else \
-            f"⏹ Stopped from the PC at stop {run['index']}; the drone is hovering."
+        if run.get("stop_home") and "stopped from the PC" in str(e):
+            # Run patrol switched off: the drone flies home (round no-fly zones) instead of hovering.
+            _go_home_safe(slot, "Run patrol switched off")
+            run.update(phase="done", message=f"Run patrol switched off at stop {run['index']}: returning home")
+            _drone_event(f"Route {name} ended: Run patrol switched off, returning home", slot)
+            how = f"⏹ Run patrol switched off at stop {run['index']}; the drone is returning home."
+        else:
+            drone_command("hover", timeout=5.0, slot=slot)
+            run.update(phase="stopped", message=f"Route stopped at stop {run['index']}: {e}")
+            _drone_event(f"Route {name} stopped: {e}", slot)
+            how = f"⚠️ Stopped at stop {run['index']}: {e}. The drone is hovering." if "stopped from the PC" not in str(e) else \
+                f"⏹ Stopped from the PC at stop {run['index']}; the drone is hovering."
     finally:
         run.update(active=False, swap_at=0, backup=None, ended_at=time.time())
     run.setdefault("battery_end", {})[slot] = get_link(slot)["telemetry"].get("battery")
@@ -8027,7 +8034,7 @@ def last_route_of(slot):
 
 
 def set_patrol_mode(on, by="dashboard"):
-    """Switch Run patrol on (each drone flies its last route on repeat) or off (those patrols stop, drones hover)."""
+    """Switch Run patrol on (each drone flies its last route on repeat) or off (those patrols stop, drones fly home)."""
     with _patrol_mode_lock:
         data = _load_patrol_mode()
         data["on"] = bool(on)
@@ -8040,8 +8047,8 @@ def set_patrol_mode(on, by="dashboard"):
             for slot, rid in list(_patrol_mode["runs"].items()):
                 run = route_runs.get(rid)
                 if run and run["active"]:
+                    run["stop_home"] = True  # the route thread sends it home as it stops (no hover in between)
                     run["stop"] = True
-                    drone_command("hover", timeout=5.0, slot=run["drone"])
                     stopped.append(run["drone"])
             _patrol_mode["runs"].clear()
     _drone_event("Run patrol switched " + ("on: every drone flies its last route" if on else "off"))

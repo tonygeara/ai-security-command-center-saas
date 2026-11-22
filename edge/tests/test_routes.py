@@ -83,10 +83,14 @@ def test_run_patrol_flies_each_drones_last_route(d, client, fleet):
         d._patrol_mode["ended"].clear()
         d.patrol_mode_tick()
         assert d.run_of(v2) is None and d.run_of(v1) is not None
-        # Off: every patrol stops.
+        off_run = d.run_of(v1)["id"]
+        # Off: every patrol stops and its drone flies home.
+        assert wait_until(lambda: d.virtual_drones[v1].flying, 30)
         off = patrol(client, False)
         assert not off["on"] and "Virtual 1" in off["stopped"]
         assert wait_until(lambda: d.run_of(v1) is None, 10)
+        assert wait_until(lambda: d.virtual_drones[v1].mode in ("GO_HOME", "AUTO_LANDING") or not d.virtual_drones[v1].flying, 10)
+        assert "returning home" in d.route_runs[off_run]["message"]
         d.patrol_mode_tick()
         assert d.run_of(v1) is None
     finally:
