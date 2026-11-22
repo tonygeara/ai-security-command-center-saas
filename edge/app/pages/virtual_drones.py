@@ -74,7 +74,7 @@ async function addVd(){if(!pick){msg('Click the map first to choose where it sta
 async function act(slot,action,extra){const d=await fetch('/api/virtual-drones/'+encodeURIComponent(slot),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action,...(extra||{})})}).then(r=>r.json());
   if(!d.ok)msg(d.error,false);load()}
 function moveHome(slot){if(!pick){msg('Click the map first to choose the new home point.',false);return}act(slot,'home',{lat:pick[0],lon:pick[1]})}
-async function removeVd(slot){if(!confirm('Remove this virtual drone?'))return;await fetch('/api/virtual-drones/'+encodeURIComponent(slot),{method:'DELETE'});load()}
+async function removeVd(slot){if(!await uiConfirm('Remove this virtual drone?'))return;await fetch('/api/virtual-drones/'+encodeURIComponent(slot),{method:'DELETE'});load()}
 async function setAuto(on){await fetch('/api/virtual-drones',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({demo_auto:on})});
   msg(on?'Demo mode on: automatic missions may use virtual drones.':'Demo mode off: automatic missions use real drones only.',true)}
 load();setInterval(load,1000);

@@ -1,4 +1,5 @@
 "use client";
+import {uiConfirm} from "../../lib/dialog";
 import {useState} from "react";
 import {useRouter} from "next/navigation";
 import {createClient} from "../../lib/supabase/client";
@@ -8,7 +9,7 @@ export default function ApproveVersion({approved, versions}: {approved: string |
   const router = useRouter();
   const [v, setV] = useState(versions[0] || ""), [busy, setBusy] = useState(false), [message, setMessage] = useState("");
   async function approve(){
-    if(!confirm(`Approve ${v}? Every client on the Normal channel installs it (their PCs with Updates on).`)) return;
+    if(!await uiConfirm(`Approve ${v}? Every client on the Normal channel installs it (their PCs with Updates on).`)) return;
     setBusy(true); setMessage("");
     const {error} = await createClient().rpc("approve_edge_version", {target_version: v});
     setMessage(error ? error.message : `${v} approved for Normal clients.`);

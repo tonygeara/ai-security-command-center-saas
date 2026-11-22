@@ -60,7 +60,7 @@ function initMap(){map=L.map('cvMap',{maxZoom:22}).setView([20,0],2);
 async function load(){
   const r=await fetch('/api/response/settings').then(r=>r.json());settings=r.settings;
   data=await fetch('/api/coverage').then(r=>r.json());$('handoff').checked=!!settings.handoff;draw();cams(r.cameras||[])}
-async function setHandoff(el){if(el.checked&&!confirm('Handoff flies a drone with no confirmation when someone leaves a camera\'s view. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?')){el.checked=false;return}
+async function setHandoff(el){if(el.checked&&!await uiConfirm('Handoff flies a drone with no confirmation when someone leaves a camera\'s view. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?')){el.checked=false;return}
   const d=await post('/api/response/settings',{handoff:el.checked});msg('cvMsg',d.ok?(el.checked?'Handoff is on.':'Handoff is off.'):d.error,d.ok);if(!d.ok)el.checked=!el.checked}
 function draw(){heat.clearLayers();cones.clearLayers();outlineLayer.clearLayers();sugLayer.clearLayers();marks.clearLayers();
   const out=settings.site_outline||[];
@@ -116,7 +116,7 @@ function spShow(d){const c=d.settings,i=d.info||{};$('spState').textContent=c.sm
 async function spLoad(){spShow(await fetch('/api/smart-patrol').then(r=>r.json()))}
 async function spSave(){const body={smart_patrol:$('smart_patrol').checked,smart_patrol_auto_start:$('smart_patrol_auto_start').checked,
   smart_patrol_stops:Number($('smart_patrol_stops').value||6),smart_patrol_alt:Number($('smart_patrol_alt').value||30)};
-  if(body.smart_patrol_auto_start&&!confirm('Start the Smart patrol without asking flies the drone with no confirmation at patrol time. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?')){$('smart_patrol_auto_start').checked=false;body.smart_patrol_auto_start=false}
+  if(body.smart_patrol_auto_start&&!await uiConfirm('Start the Smart patrol without asking flies the drone with no confirmation at patrol time. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?')){$('smart_patrol_auto_start').checked=false;body.smart_patrol_auto_start=false}
   msg('spInfo','Planning…');const d=await post('/api/smart-patrol',body);if(!d.ok){msg('spInfo',d.error,false);return spLoad()}spShow(d)}
 async function spRebuild(){msg('spInfo','Planning…');const d=await post('/api/smart-patrol/rebuild');if(!d.ok){msg('spInfo',d.error,false);return}spLoad()}
 initMap();load();spLoad();

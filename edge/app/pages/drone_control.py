@@ -106,9 +106,11 @@ BODY = r"""
 
 <div class="dc-grid">
 <div>
-<section class="panel"><div class="panel-head"><div class="panel-title">✈ Live view</div><div class="live" id="flyState">ON GROUND</div></div>
+<section class="panel"><div class="panel-head"><div class="panel-title">✈ Live view</div><div class="actions" style="align-items:center;gap:10px"><div class="live" id="flyState">ON GROUND</div>
+<label class="l4d-switch" title="Every connected and virtual drone flies the last route set for it, again and again, until switched off"><input type="checkbox" class="toggle" id="patrolOn" onchange="setPatrol(this.checked)"> RUN PATROL</label></div></div>
 <div class="dc-video"><div class="live-slot" data-live-camera="drone"></div>
-<div class="dc-hud"><span>ALT <b id="hAlt">–</b> m</span><span>DIST <b id="hDist">–</b> m</span><span>SPD <b id="hSpd">–</b> m/s</span><span>BAT <b id="hBat">–</b>%</span><span>GPS <b id="hGps">–</b></span><span>SIGNAL <b id="hSig">–</b></span></div></div></section>
+<div class="dc-hud"><span>ALT <b id="hAlt">–</b> m</span><span>DIST <b id="hDist">–</b> m</span><span>SPD <b id="hSpd">–</b> m/s</span><span>BAT <b id="hBat">–</b>%</span><span>GPS <b id="hGps">–</b></span><span>SIGNAL <b id="hSig">–</b></span></div></div>
+<div class="muted" id="patrolInfo" style="display:none;padding:8px 12px;font-size:12px"></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="actions" style="align-items:center;gap:10px"><div class="live" id="mapState"></div>
 <label class="l4d-switch" title="Plan, fly and view 3D site maps"><input type="checkbox" class="toggle" id="m3dOn" onchange="toggle3d(this.checked)"> 3D MAP</label>
 <label class="l4d-switch" title="Watch every drone fly in 3D, live"><input type="checkbox" class="toggle" id="l4dOn" onchange="toggle4d(this.checked)"> 4D LIVE</label></div></div>
@@ -285,9 +287,9 @@ async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no
   $('fleet').querySelector('a[href="/drone-grid"]').style.display=many?'':'none';
   others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers();
   if(typeof drawDockFleet==='function')drawDockFleet()}catch(e){}}
-async function addDroneSlot(){if(!confirm('Add another drone? It gets its own pairing QR code and video. Frigate restarts (about 20 s).'))return;
+async function addDroneSlot(){if(!await uiConfirm('Add another drone? It gets its own pairing QR code and video. Frigate restarts (about 20 s).'))return;
   const d=await fetch('/api/drone/add',{method:'POST'}).then(r=>r.json());
-  if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else alert(d.error||'Could not add a drone.')}
+  if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else uiAlert(d.error||'Could not add a drone.')}
 let others=[],oMarks=[],droneNames={};
 let vcam=null;
 function vcamUpdate(t){if(!$('vcam')||typeof L==='undefined'||!t.lat)return;
@@ -299,9 +301,9 @@ function drawOthers(){if(!map||!window.L)return;oMarks.forEach(m=>m.remove());
   oMarks=others.map(x=>L.circleMarker([x.lat,x.lon],{radius:7,color:'#ffb23c',fillColor:'#ffb23c',fillOpacity:.8}).bindTooltip(x.label,{permanent:true,direction:'right',className:''}).addTo(map))}
 let st={},control=false,map=null,dMark=null,hMark=null,trail=null,keys=new Set(),lastStickZero=true;
 function msg(t,ok){const e=$('cmdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
-async function cmd(c,args,confirmText){if(confirmText&&!confirm(confirmText))return;msg(c.replace('_',' ')+'…');
+async function cmd(c,args,confirmText){if(confirmText&&!await uiConfirm(confirmText))return;msg(c.replace('_',' ')+'…');
   try{const r=await fetch('/api/drone/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd:c,args:args||{}})});const d=await r.json();
-    if(!d.ok&&d.can_force&&confirm('⚠ '+d.error+'\n\nTake off anyway? You are responsible for the flight.'))return cmd(c,{...(args||{}),force:true});
+    if(!d.ok&&d.can_force&&await uiConfirm('⚠ '+d.error+'\n\nTake off anyway? You are responsible for the flight.'))return cmd(c,{...(args||{}),force:true});
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
 function takeoff(){const sim=(st.telemetry||{}).simulator;
   cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF: the simulator is OFF and the motors WILL start. Propellers on, people clear, drone in sight, pilot holding the controller?')}
@@ -364,12 +366,12 @@ function renderScheds(){const names=Object.keys(routes);$('scRoute').innerHTML=n
     <div class="actions"><button class="hud-btn" onclick="toggleSched(${i})">${s.enabled?'Pause':'Resume'}</button><button class="hud-btn danger" onclick="delSched(${i})">Delete</button></div></div>`).join('')||'<p class="muted">No scheduled patrols.</p>'}
 async function saveScheds(note){const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({patrol_schedules:scheds})}).then(r=>r.json());
   if(d.ok){scheds=d.settings.patrol_schedules;scmsg(note,true)}else scmsg(d.error,false);renderScheds()}
-function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySelectorAll('input:checked')].map(x=>+x.dataset.day);
+async function addSched(){const route=$('scRoute').value,days=[...$('scDays').querySelectorAll('input:checked')].map(x=>+x.dataset.day);
   if(!route){scmsg('Save a route first.',false);return}if(!days.length){scmsg('Choose at least one day.',false);return}
-  const auto=$('scAuto').checked;if(auto&&!confirm('Auto-start flies the drone with no confirmation at '+$('scTime').value+'. Only use it when the drone and controller are on, the area is clear, and a pilot can take over. Continue?'))return;
+  const auto=$('scAuto').checked;if(auto&&!await uiConfirm('Auto-start flies the drone with no confirmation at '+$('scTime').value+'. Only use it when the drone and controller are on, the area is clear, and a pilot can take over. Continue?'))return;
   scheds=[...scheds,{route,time:$('scTime').value,days,enabled:true,auto_start:auto,drone:$('scDrone').value}];saveScheds('Schedule added.')}
 function toggleSched(i){scheds=scheds.map((s,j)=>j===i?{...s,enabled:!s.enabled}:s);saveScheds('Updated.')}
-function delSched(i){if(!confirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
+async function delSched(i){if(!await uiConfirm('Delete this schedule?'))return;scheds=scheds.filter((s,j)=>j!==i);saveScheds('Deleted.')}
 async function loadScheds(){try{const d=await fetch('/api/response/settings').then(r=>r.json());scheds=d.settings.patrol_schedules||[];renderScheds()}catch(e){}}
 let route=[],routes={},rLine=null,rMarks=[],rMax=500,filledRun='',rCircle=null;
 let nfZones=[],nfPts=null,nfLayers=[],nfTmp=null,nfArm='';
@@ -452,11 +454,11 @@ if(typeof IS_ADMIN!=='undefined'&&IS_ADMIN){const b=$('rmDrone');b.style.display
   b.textContent=DRONE==='drone'?'🗑 Unpair this drone':'🗑 Remove this drone'}
 async function removeDrone(){const name=document.title.split(' · ')[0];
   const first=DRONE==='drone';
-  if(!confirm(first?`Unpair ${name}? Its phone is disconnected and gets a new pairing code (the first drone slot always stays).`
+  if(!await uiConfirm(first?`Unpair ${name}? Its phone is disconnected and gets a new pairing code (the first drone slot always stays).`
     :`Remove ${name}? ${DRONE.startsWith('drone-v')?'The virtual drone is deleted.':'It is removed from this PC and its plan slot is freed; pairing it again needs a new QR scan.'}`))return;
   const d=await fetch('/api/drone/remove',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({drone:DRONE})}).then(async r=>{try{return await r.json()}catch(e){return {ok:false,error:'HTTP '+r.status}}});
-  if(!d.ok){alert(d.error||'Could not remove it.');return}
-  alert(d.message);location.href=d.removed?'/drone-control':location.href}
+  if(!d.ok){uiAlert(d.error||'Could not remove it.');return}
+  await uiAlert(d.message);location.href=d.removed?'/drone-control':location.href}
 let acMarks=[];
 // The one-row flight-safety strip: verdict, weather, aircraft, airspace (full settings on Flight safety).
 function renderStrip(d){const c=d.conditions,v=$('fsVerdict'),w=d.weather||{},r=w.reading,t=d.traffic||{},s=d.settings||{};
@@ -494,14 +496,33 @@ function noBatUi(){const on=$('rtNoBat').checked;['rtRelay','rtSwap','rtBackup']
   if(on)$('rtLoop').checked=true;$('rtLoop').disabled=on;routeInfo()}
 async function saveRoute(){if(!route.length){rtmsg('Draw at least one stop.',false);return}const d=await fetch('/api/routes',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value})}).then(r=>r.json());
   rtmsg(d.ok?'Route “'+d.name+'” saved.':d.error,d.ok);await loadRoutes();if(d.ok)$('routeSel').value=d.name}
-async function deleteRoute(){const n=$('routeSel').value;if(!n||!confirm('Delete route “'+n+'”?'))return;await fetch('/api/routes',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})});rtmsg('Deleted.',true);loadRoutes()}
+async function deleteRoute(){const n=$('routeSel').value;if(!n||!await uiConfirm('Delete route “'+n+'”?'))return;await fetch('/api/routes',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({name:n})});rtmsg('Deleted.',true);loadRoutes()}
 async function flyRoute(){if(!route.length){rtmsg('Click the map to add stops, or choose a saved route.',false);return}const sim=(st.telemetry||{}).simulator;
-  if(!confirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Fly '+route.length+' stop'+(route.length>1?'s':'')+' at '+$('rtAlt').value+' m'
+  if(!await uiConfirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Fly '+route.length+' stop'+(route.length>1?'s':'')+' at '+$('rtAlt').value+' m'
     +($('rtLoop').checked?', repeating the route until you press Stop route':'')+'? Keep the drone in sight.'))return;
   const d=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value||$('routeSel').value||'route'})}).then(r=>r.json());
   rtmsg(d.message||d.error,d.ok);loadRoutes()}
 async function stopRoute(){const d=await fetch('/api/routes/stop',{method:'POST'}).then(r=>r.json());rtmsg(d.ok?'Route stopped, drone hovering.':d.error,d.ok);loadRoutes()}
 setInterval(loadRoutes,3000);
+// Run patrol: every connected / virtual drone flies the last route set for it (saved or flown on its page), on repeat.
+let patrolBusy=false;
+async function loadPatrol(){if(patrolBusy)return;try{const d=await fetch('/api/routes/patrol',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  $('patrolOn').checked=d.on;const e=$('patrolInfo');e.style.display=d.on?'':'none';
+  if(d.on)e.innerHTML='<b style="color:#26ee89">RUN PATROL ON</b> · '+d.drones.map(x=>`<b>${esc(x.label)}</b>: ${x.route?'“'+esc(x.route)+'” · ':''}${esc(x.status)}`).join(' &nbsp;|&nbsp; ')}catch(e){}}
+async function setPatrol(on){patrolBusy=true;const box=$('patrolOn');
+  try{if(on){const s=await fetch('/api/routes/patrol',{cache:'no-store'}).then(r=>r.json());
+      const set=s.drones.filter(x=>x.route),none=s.drones.filter(x=>!x.route);
+      if(!set.length){box.checked=false;rtmsg('No drone has a route yet: fly or save a route on a drone\'s page first.',false);return}
+      if(!await uiConfirm('RUN PATROL: these drones take off by themselves and fly their last route again and again:\n'
+        +set.map(x=>'• '+x.label+': “'+x.route+'” ('+x.stops+' stop'+(x.stops>1?'s':'')+')').join('\n')
+        +(none.length?'\n\nNo route yet (stays on the ground): '+none.map(x=>x.label).join(', '):'')
+        +'\n\nEach drone runs its own route\'s battery settings. STOP or the pilot leaves that drone alone. Keep the drones in sight.')){box.checked=false;return}}
+    else if(!await uiConfirm('Switch Run patrol off? Drones on a patrol stop and hover where they are.')){box.checked=true;return}
+    const d=await fetch('/api/routes/patrol',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({on})}).then(r=>r.json());
+    if(!d.ok){box.checked=!on;rtmsg(d.error||'Not allowed.',false);return}
+    rtmsg(on?'Run patrol on.':'Run patrol off.'+(d.stopped&&d.stopped.length?' Hovering: '+d.stopped.join(', ')+'.':''),true)}
+  catch(e){box.checked=!on}finally{patrolBusy=false;loadPatrol();loadRoutes()}}
+loadPatrol();setInterval(loadPatrol,3000);
 let resp=null,locFor='',camMarks={};
 function rmsg(t,ok){const e=$('respMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function loadResp(){try{const d=await fetch('/api/response/settings').then(r=>r.json());resp=d;const c=d.settings;
@@ -509,8 +530,8 @@ async function loadResp(){try{const d=await fetch('/api/response/settings').then
   $('rReturn').checked=!!c.auto_return;$('rBriefOn').checked=!!c.briefing_enabled;
   if(document.activeElement?.closest?.('#respAutoBox')==null){$('rAuto').checked=!!c.auto_dispatch;$('rAutoP').checked=!!c.auto_person;$('rAutoV').checked=!!c.auto_vehicle;
     $('rFrom').value=c.auto_from;$('rTo').value=c.auto_to;$('rCool').value=c.auto_cooldown_min;$('rHandoff').checked=!!c.handoff}renderResp()}catch(e){}}
-function handoffWarn(el){if(el.checked&&!confirm('Handoff flies a drone with no confirmation when someone leaves a camera\'s view in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
-function autoWarn(el){if(el.checked&&!confirm('Auto-send flies a drone with no confirmation when a camera sees someone in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
+async function handoffWarn(el){if(el.checked&&!await uiConfirm('Handoff flies a drone with no confirmation when someone leaves a camera\'s view in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
+async function autoWarn(el){if(el.checked&&!await uiConfirm('Auto-send flies a drone with no confirmation when a camera sees someone in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
 function renderResp(){if(!resp)return;const locs=resp.settings.camera_locations||{},r=resp.response||{};
   $('respState').textContent=r.active?('RESPONDING: '+r.camera+' · '+r.phase):(resp.telegram?'TELEGRAM READY':'TELEGRAM NOT SET UP');
   $('respCams').innerHTML=(resp.cameras||[]).filter(n=>!/^drone/i.test(n)).map(n=>{const l=locs[n];return `<div class="hud-row"><div><b>${esc(n)}</b><div class="muted">${l?('📍 '+l.lat.toFixed(5)+', '+l.lon.toFixed(5)):'No location yet'}</div></div>
@@ -526,7 +547,7 @@ async function saveResp(){const body={altitude_m:+$('rAlt').value,speed_ms:+$('r
   const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(d.ok){resp.settings=d.settings;rmsg('Saved.',true);loadResp()}else rmsg(d.error,false)}
 async function sendTo(n){const sim=(st.telemetry||{}).simulator;
-  if(!confirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Send the drone to '+n+'? Keep it in sight.'))return;
+  if(!await uiConfirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Send the drone to '+n+'? Keep it in sight.'))return;
   const d=await fetch('/api/response/dispatch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({camera:n})}).then(r=>r.json());rmsg(d.message||d.error,d.ok);loadResp()}
 async function recallResp(){const d=await fetch('/api/response/recall',{method:'POST'}).then(r=>r.json());rmsg(d.ok?'Drone returning home.':d.error,d.ok);loadResp()}
 async function briefNow(){const d=await fetch('/api/assistant/briefing',{method:'POST'}).then(r=>r.json());rmsg(d.ok?'Briefing sent to Telegram.':d.error,d.ok)}
@@ -534,8 +555,8 @@ setInterval(()=>{if(!locFor)loadResp()},5000);
 async function poll(){try{st=await fetch('/api/drone/link',{cache:'no-store'}).then(r=>r.json());render()}catch(e){}}
 async function loadPair(){try{const d=await fetch('/api/drone/link/pair').then(r=>r.json());if(!d.ok){$('pairMsg').className='hud-msg bad';$('pairMsg').textContent=d.error;return}
   $('pairQr').innerHTML=d.qr;$('pairAddr').textContent=d.host+':'+d.port}catch(e){}}
-async function resetPair(){if(!confirm('Make a new pairing code? The phone will have to scan again.'))return;await fetch('/api/drone/link/pair/reset',{method:'POST'});loadPair()}
-function simOn(){if(!confirm('Start the simulator? Remove the propellers first.'))return;
+async function resetPair(){if(!await uiConfirm('Make a new pairing code? The phone will have to scan again.'))return;await fetch('/api/drone/link/pair/reset',{method:'POST'});loadPair()}
+async function simOn(){if(!await uiConfirm('Start the simulator? Remove the propellers first.'))return;
   const go=(lat,lon)=>cmd('sim_on',{lat,lon});const t=st.telemetry||{};
   if(t.lat&&t.lon)return go(t.lat,t.lon);navigator.geolocation?navigator.geolocation.getCurrentPosition(p=>go(p.coords.latitude,p.coords.longitude),()=>go(33.8938,35.5018)):go(33.8938,35.5018)}
 // ---- DJI Docks ----
@@ -621,8 +642,8 @@ let dkRoutes=[],dkRouteSel={},dkMissionLines={},dkGoto=null,dkCtl=null,dkMapAct=
 const DK_MAP_HINT={goto:'Click the map where the drone should go (it flies there at the response height and holds).',
   look_at:'Click the map: the camera turns to that spot.',orbit:'Click the map on the spot to circle (the drone keeps its current distance and height).'};
 function dockMapMode(sn,act){const on=!(dkGoto===sn&&dkMapAct===act);dkGoto=on?sn:null;dkMapAct=act;dkMsg(on?DK_MAP_HINT[act]:'');loadDocks()}
-function dockMapClick(lat,lon){if(dkMapAct==='goto')return dockGoto(lat,lon);const sn=dkGoto,act=dkMapAct;dkGoto=null;dkMapAct='goto';
-  if(act==='orbit'){const x=dockData.find(d=>d.sn===sn)||{};if(!confirm(`Circle ${lat.toFixed(5)}, ${lon.toFixed(5)} with ${x.name||'the dock'}'s drone?`)){loadDocks();return}}
+async function dockMapClick(lat,lon){if(dkMapAct==='goto')return dockGoto(lat,lon);const sn=dkGoto,act=dkMapAct;dkGoto=null;dkMapAct='goto';
+  if(act==='orbit'){const x=dockData.find(d=>d.sn===sn)||{};if(!await uiConfirm(`Circle ${lat.toFixed(5)}, ${lon.toFixed(5)} with ${x.name||'the dock'}'s drone?`)){loadDocks();return}}
   dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:act,lat,lon}).then(d=>{dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()})}
 function dockVidMode(sn,act){const on=!(dkVid&&dkVid.sn===sn&&dkVid.act===act);dkVid=on?{sn,act}:null;
   dkMsg(on?(act==='aim'?'Click the drone video where the camera should point.':'Click the drone video where to measure the temperature (thermal lens).'):'');
@@ -630,13 +651,13 @@ function dockVidMode(sn,act){const on=!(dkVid&&dkVid.sn===sn&&dkVid.act===act);d
 async function dockVidClick(sn,ev){if(!dkVid||dkVid.sn!==sn)return;const r=ev.currentTarget.getBoundingClientRect();
   const act=dkVid.act;dkVid=null;const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:act,x:(ev.clientX-r.left)/r.width,y:(ev.clientY-r.top)/r.height});
   dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
-async function dockStop(sn,name){if(!confirm(`Emergency stop ${name}'s drone? It stops and holds where it is.`))return;
+async function dockStop(sn,name){if(!await uiConfirm(`Emergency stop ${name}'s drone? It stops and holds where it is.`))return;
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:'stop'});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
 async function dockDeter(sn,what,on){const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/deterrent',{[what]:on});dkMsg(d.ok?d.message:d.error,d.ok);setTimeout(loadDocks,800)}
 // Phase 4: live control of a dock's drone
 function dockGotoMode(sn){dockMapMode(sn,'goto')}
 async function dockGoto(lat,lon){const sn=dkGoto;dkGoto=null;const x=dockData.find(d=>d.sn===sn)||{};
-  if(!confirm(`Send ${x.name||'the dock'}'s drone to ${lat.toFixed(5)}, ${lon.toFixed(5)}?`)){loadDocks();return}
+  if(!await uiConfirm(`Send ${x.name||'the dock'}'s drone to ${lat.toFixed(5)}, ${lon.toFixed(5)}?`)){loadDocks();return}
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:'goto',lat,lon});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
 async function dockSticks(sn,on){if(on&&control){dkMsg('Turn the Drone Link keyboard control off first.',false);return}
   const sp=+(($('speed')||{}).value||30)/100;const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/control',{action:on?'sticks_on':'sticks_off',speed:sp});
@@ -650,16 +671,16 @@ async function dockCam(sn,action){const d=await dkPost('/api/docks/'+encodeURICo
 async function loadDockRoutes(){try{const d=await fetch('/api/routes',{cache:'no-store'}).then(r=>r.json());if(d.ok)dkRoutes=Object.keys(d.routes||{}).sort()}catch(e){}}
 async function dockMission(sn,action){const name=action==='fly'?(dkRouteSel[sn]||($('dkRoute_'+sn)||{}).value||''):'';
   if(action==='fly'){const x=dockData.find(d=>d.sn===sn)||{};
-    if(!confirm(`${x.name||'The dock'} will take off by itself and fly route “${name}”, then return to the dock.\n\nThe area must be clear and the flight permitted. Continue?`))return}
+    if(!await uiConfirm(`${x.name||'The dock'} will take off by itself and fly route “${name}”, then return to the dock.\n\nThe area must be clear and the flight permitted. Continue?`))return}
   dkMsg(action==='fly'?'Checking and sending the flight plan to the dock…':'Calling the drone back…');
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/mission',{action,route:name});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
 async function dockLaunch(id,yes){const d=await dkPost('/api/docks/launches/'+encodeURIComponent(id),{launch:yes});dkMsg(d.ok?d.message:d.error,d.ok);loadDocks()}
-async function dockNoAsk(el){if(el.checked&&!confirm('Launch docks without asking?\n\nWhen an alarm needs a drone, a ready dock\'s drone will take off by itself with nobody confirming. Only for sites with permission for automated flights and a safe area.')){el.checked=false;return}
+async function dockNoAsk(el){if(el.checked&&!await uiConfirm('Launch docks without asking?\n\nWhen an alarm needs a drone, a ready dock\'s drone will take off by itself with nobody confirming. Only for sites with permission for automated flights and a safe area.')){el.checked=false;return}
   const d=await dkPost('/api/docks/setup',{launch_without_asking:el.checked});dkMsg(d.ok?(el.checked?'Docks launch without asking.':'Docks ask before launching.'):d.error,d.ok)}
 async function dockAuto(sn,on){const x=dockData.find(d=>d.sn===sn)||{};let body={auto_flights:!on};
-  if(!on){if(!confirm(`Allow ${x.name||'this dock'}'s drone to take off by itself (routes now; patrols and alarm launches later)?\n\nOnly switch this on when the site has permission for automated flights (Lebanon: DGCA) and the area is safe. Your name and the time are recorded.`))return;body.confirm=true}
+  if(!on){if(!await uiConfirm(`Allow ${x.name||'this dock'}'s drone to take off by itself (routes now; patrols and alarm launches later)?\n\nOnly switch this on when the site has permission for automated flights (Lebanon: DGCA) and the area is safe. Your name and the time are recorded.`))return;body.confirm=true}
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/settings',body);dkMsg(d.ok?`Automatic flights ${d.auto_flights?'on':'off'}.`:d.error,d.ok);loadDocks()}
-async function dockRange(sn,r){const v=prompt('How far from the dock may its drone fly (metres, up to 2000)?',r);if(!v)return;
+async function dockRange(sn,r){const v=await uiPrompt('How far from the dock may its drone fly (metres, up to 2000)?',r);if(!v)return;
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn)+'/settings',{range_m:v});dkMsg(d.ok?`Range ${d.range_m} m.`:d.error,d.ok);loadDocks()}
 function drawDockMissions(){if(!map||!window.L)return;const seen=new Set();
   dockData.forEach(x=>{const m=x.mission;if(!m||!m.active||!(m.points||[]).length)return;seen.add(x.sn);
@@ -731,11 +752,11 @@ async function loadDockSetup(){if(!DK_ADMIN)return;$('dockSetup').style.display=
 async function dockSaveKeys(){const b={app_id:$('dkAppId').value.trim()};if($('dkAppKey').value.trim())b.app_key=$('dkAppKey').value.trim();
   if($('dkAppLic').value.trim())b.app_license=$('dkAppLic').value.trim();const d=await dkPost('/api/docks/setup',b);
   dkMsg(d.ok?'Cloud API keys saved.':d.error,d.ok);if(d.ok){$('dkAppKey').value='';$('dkAppLic').value='';loadDockSetup()}}
-async function dockNewLink(){if(!confirm('Make a new Pilot 2 link? The old link stops working.'))return;await dkPost('/api/docks/setup',{new_link:true});loadDockSetup()}
+async function dockNewLink(){if(!await uiConfirm('Make a new Pilot 2 link? The old link stops working.'))return;await dkPost('/api/docks/setup',{new_link:true});loadDockSetup()}
 async function dockRegister(sn){const n=$('dkName_'+sn);const d=await dkPost('/api/docks/register',{sn,name:n?n.value:''});
   if(n)n.blur();dkMsg(d.ok?`Registered as ${d.dock.name}.`:d.error,d.ok);loadDocks()}
-async function dockRename(sn,old){const name=prompt('New name for this dock:',old);if(!name)return;const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{name});dkMsg(d.ok?'Renamed.':d.error,d.ok);loadDocks()}
-async function dockRemove(sn,name){if(!confirm(`Remove ${name}? It stops being part of this system${sn.startsWith('SIMDOCK')?' and the simulated dock is deleted':''}. A real dock can be registered again when it connects.`))return;
+async function dockRename(sn,old){const name=await uiPrompt('New name for this dock:',old);if(!name)return;const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{name});dkMsg(d.ok?'Renamed.':d.error,d.ok);loadDocks()}
+async function dockRemove(sn,name){if(!await uiConfirm(`Remove ${name}? It stops being part of this system${sn.startsWith('SIMDOCK')?' and the simulated dock is deleted':''}. A real dock can be registered again when it connects.`))return;
   const d=await dkPost('/api/docks/'+encodeURIComponent(sn),{},'DELETE');dkMsg(d.ok?'Removed.':d.error,d.ok);loadDocks()}
 async function dockFault(sel){const d=await dkPost('/api/docks/'+encodeURIComponent(sel.dataset.sn)+'/fault',{fault:sel.value});sel.blur();
   dkMsg(d.ok?(d.fault?'Test problem set. The alert shows here and on Telegram within a few seconds'+(d.fault==='offline'?' (offline: after 1 minute).':'.'):'All clear set.'):d.error,d.ok);setTimeout(loadDocks,800)}

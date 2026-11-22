@@ -24,3 +24,20 @@ body{background:var(--theme-background);color:var(--theme-text)}.card{background
 
 /* A signed-in role (portal header, admin menu): a link to that role's dashboard. */
 .roleLink{color:var(--theme-accent,#66e3ff);font-weight:bold;text-decoration:none;border-bottom:1px dotted currentColor}.roleLink:hover{border-bottom-style:solid}
+
+/* Themed dialogs (lib/dialog.ts): in the middle of the page, in place of the browser's alert / confirm / prompt. */
+.uiDlgBack{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(2,8,14,.72);backdrop-filter:blur(3px);animation:uiDlgFade .12s ease-out}
+@keyframes uiDlgFade{from{opacity:0}to{opacity:1}}
+.uiDlg{width:min(480px,100%);max-height:calc(100vh - 32px);overflow:auto;background:var(--theme-surface);border:1px solid var(--theme-border);border-radius:14px;box-shadow:0 30px 90px #0008,0 0 0 1px #63d7ff22;color:var(--theme-text);animation:uiDlgPop .14s ease-out}
+@keyframes uiDlgPop{from{transform:scale(.96);opacity:0}to{transform:none;opacity:1}}
+.uiDlg.danger{border-color:#7a2935}
+.uiDlgHead{padding:18px 20px 0;font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;color:var(--theme-accent)}
+.uiDlg.danger .uiDlgHead{color:#ff9ea8}
+.uiDlgBody{padding:10px 20px 4px;line-height:1.6;white-space:pre-line;overflow-wrap:anywhere}
+.uiDlgBody input{display:block;width:100%;margin-top:12px;padding:11px 13px;border-radius:8px;border:1px solid #285873;background:#071624;color:#eaf6ff;font:inherit}
+.uiDlgBtns{display:flex;justify-content:flex-end;gap:8px;padding:16px 20px 18px;flex-wrap:wrap}.uiDlgBtns button{cursor:pointer;min-width:90px}
+
+/* Free-trial counter (top right) */
+.trialPill{position:fixed;top:14px;right:16px;z-index:9000;display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;background:var(--theme-surface);border:1px solid var(--theme-border);color:var(--theme-muted);font-size:13px;font-weight:700;text-decoration:none;box-shadow:0 10px 30px #0006}
+.trialPill b{color:var(--theme-text);font-variant-numeric:tabular-nums}.trialPill.soon{border-color:#7a5a12;color:#ffcf7a}.trialPill.over{border-color:#7a2935;color:#ff9ea8}
+@media(max-width:700px){.trialPill{top:auto;bottom:14px;right:12px}}
