@@ -30,7 +30,7 @@ LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 TAG_URL = f"https://api.github.com/repos/{REPO}/releases/tags/edge-v{{}}"
 CHANNEL_NAMES = {"test": "Test (newest version)", "normal": "Normal (approved version)", "pinned": "Pinned",
                  "newest": "Newest version (no portal channel)", "wait": "Waiting for the portal"}
-CHECK_EVERY = 6 * 3600          # seconds between checks
+CHECK_EVERY = 3600              # seconds between checks (and right away when the portal changes the version: poke())
 FIRST_CHECK_AFTER = 120         # seconds after start
 INSTALLER_PREFIX = {"saas": "AI-Security-Command-Center-Setup-", "onprem": "On-prem-AI-Command-Centre-Setup-"}
 SILENT_ARGS = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"]
@@ -86,6 +86,7 @@ class Updater:
         self.download = _download
         self.run_installer = _run_installer
         self.lock = threading.Lock()
+        self.wake = threading.Event()             # poke(): check now instead of at the next hour
         self.state = {"auto": False, "skipped": "", "checked_at": None, "error": "", "latest": None,
                       "installing": None, "waiting": ""}
         self._load()
@@ -235,16 +236,21 @@ class Updater:
             return None
         return self.install(by="automatic")
 
+    def poke(self):
+        """Check (and, with Updates on, install) now: the portal changed this client's version, or Updates was switched on."""
+        self.wake.set()
+
     def start(self):
         def run():
-            time.sleep(FIRST_CHECK_AFTER)
+            self.wake.wait(FIRST_CHECK_AFTER)
             while True:
+                self.wake.clear()
                 try:
                     self.tick()
                 except Exception as e:  # noqa: BLE001
                     self.log(f"Update check error: {e}")
                 # Waiting for a flight to end: try again sooner.
-                time.sleep(600 if self.state["waiting"] else CHECK_EVERY)
+                self.wake.wait(600 if self.state["waiting"] else CHECK_EVERY)
         threading.Thread(target=run, name="updater", daemon=True).start()
 
 

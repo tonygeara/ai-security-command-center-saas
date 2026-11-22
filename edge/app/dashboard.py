@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.13.3"
+APP_VERSION = "V11.13.4"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2268,6 +2268,11 @@ def load_license_cache(token, now=None):
 def _apply_license(data, connected, last_success):
     org_active = str(data.get("organization_status") or "").lower() in {"active", "trial"}
     features = data.get("features") if isinstance(data.get("features"), dict) else {}
+    new_updates = data.get("updates") if isinstance(data.get("updates"), dict) else None
+    with cloud_lock:
+        changed = new_updates is not None and new_updates != cloud_state.get("updates")
+    if changed and "UPDATER" in globals():
+        UPDATER.poke()  # the portal set another version for this client: check (and install) now, not at the next hour
     with cloud_lock:
         cloud_state.update({
             "connected": connected,
@@ -9742,7 +9747,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 </div></section>
 <section class="panel" id="updPanel"><div class="panel-head"><div class="panel-title">⟳ Updates</div><div class="live" id="updVer"></div></div><div class="panel-body">
 <div class="hud-row"><div><b>Updates</b><div class="muted">On: when a new version is published, this PC downloads it, checks it and installs it by itself (the program restarts in about a minute; it waits while a drone or dock is flying). Off: nothing is installed. Admins only.</div></div><input class="toggle" type="checkbox" id="updAuto" onchange="updToggle(this.checked)"></div>
-<div class="hud-row"><div><b id="updState">Checking for updates…</b><div class="muted" id="updSub"></div></div><span><button class="hud-btn" id="updCheck" onclick="updCheckNow()">Check now</button> <button class="hud-btn primary" id="updInstall" onclick="updInstall()" hidden>Install now</button></span></div>
+<div class="hud-row"><div><b id="updState">Checking for updates…</b><div class="muted" id="updSub"></div></div><span><button class="hud-btn" id="updCheck" onclick="updCheckNow()">Check now</button> <button class="hud-btn primary" id="updInstallBtn" onclick="updInstall()" hidden>Install now</button></span></div>
 <div id="updAsk" class="hud-msg" hidden></div><div id="updMsg" class="hud-msg"></div>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
@@ -9784,7 +9789,7 @@ fetch('/api/cloud/sync').then(r=>r.json()).then(c=>{if(c.onprem){cloudRow.style.
 let upd={};
 async function updLoad(check){try{upd=await fetch('/api/updates'+(check?'?check=1':''),{cache:'no-store'}).then(r=>r.json())}catch(e){return}updShow()}
 function updShow(){updAuto.checked=!!upd.auto;updVer.textContent=(upd.current||'')+' · '+(upd.edition==='onprem'?'ON-PREM':'ONLINE');
-  updInstall.hidden=!upd.available;updInstall.textContent=upd.available?'Install '+upd.available+' now':'Install now';
+  const ib=document.getElementById('updInstallBtn');ib.hidden=!upd.available||!!upd.installing;ib.textContent=upd.available?'Install '+upd.available+' now':'Install now';
   updState.textContent=upd.installing?'Installing '+upd.installing+'…':upd.available?'New version '+upd.available+' is available.':upd.checked_at?'This PC has the newest version ('+upd.current+').':'Not checked yet.';
   updSub.textContent=['Channel: '+(upd.channel_name||'')+(upd.channel==='pinned'&&upd.target?' '+upd.target:'')+(upd.channel==='normal'&&upd.target?' ('+upd.target+')':'')+'.',
     upd.target_older?'That is older than this PC, so it stays on '+upd.current+'.':'',upd.waiting?'Waiting: '+upd.waiting:'',upd.available&&!upd.auto?'Updates are off: it will not install by itself.':'',
