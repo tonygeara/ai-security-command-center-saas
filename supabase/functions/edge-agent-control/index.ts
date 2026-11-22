@@ -9,15 +9,17 @@ const admin=createClient(Deno.env.get("SUPABASE_URL")!,Deno.env.get("SUPABASE_SE
 const {data:d,error}=await admin.from("edge_devices").select("id,organization_id,device_name,status").eq("device_token_hash",hash).maybeSingle();if(error||!d||d.status==="disabled")return json({error:"unauthorized"},401);
 const ip=(req.headers.get("x-forwarded-for")||"").split(",")[0].trim()||null;const sent=await req.json().catch(()=>({}));const version=typeof sent?.app_version==="string"?sent.app_version.slice(0,40):undefined;
 await admin.from("edge_devices").update({status:"online",last_seen_at:new Date().toISOString(),last_ip:ip,updated_at:new Date().toISOString(),...(version?{app_version:version}:{})}).eq("id",d.id);
-const {data:o}=await admin.from("organizations").select("plan_code,status,update_channel,pinned_version").eq("id",d.organization_id).single();const {data:pf}=await admin.from("plan_features").select("feature_key,enabled,limit_value").eq("plan_code",o?.plan_code||"");const {data:ov}=await admin.from("feature_entitlements").select("feature_key,enabled,limit_value").eq("organization_id",d.organization_id);
+const {data:o}=await admin.from("organizations").select("plan_code,status,update_channel,pinned_version,trial_ends_at").eq("id",d.organization_id).single();const {data:pf}=await admin.from("plan_features").select("feature_key,enabled,limit_value").eq("plan_code",o?.plan_code||"");const {data:ov}=await admin.from("feature_entitlements").select("feature_key,enabled,limit_value").eq("organization_id",d.organization_id);
 const features:Record<string,{enabled:boolean,limit_value:number|null}>={};for(const x of pf||[])features[x.feature_key]={enabled:x.enabled,limit_value:x.limit_value};for(const x of ov||[])features[x.feature_key]={enabled:x.enabled,limit_value:x.limit_value};
 const {data:sources}=await admin.from("video_sources").select("source_type").eq("organization_id",d.organization_id);const usage={cameras:(sources||[]).filter(x=>x.source_type==="camera").length,drones:(sources||[]).filter(x=>x.source_type==="drone").length};
 // A SaaS licence record from the admin portal can end the service: revoked, or past its contract end date.
 const {data:lic}=await admin.from("client_licenses").select("status,expires_on").eq("organization_id",d.organization_id).eq("edition","saas").order("issued_on",{ascending:false}).limit(1).maybeSingle();
 const today=new Date().toISOString().slice(0,10);let status=o?.status||"unknown";
 if(lic?.status==="revoked")status="licence_revoked";else if(lic?.expires_on&&lic.expires_on<today)status="licence_expired";
+// A 14-day trial that has ended switches everything off until the client chooses a plan in the portal.
+else if(status==="trial"&&o?.trial_ends_at&&Date.parse(o.trial_ends_at)<Date.now())status="trial_expired";
 const active=["active","trial"].includes(status);if(!active)for(const k of Object.keys(features))features[k].enabled=false;
-const body:Record<string,unknown>={device_id:d.id,organization_status:status,plan_code:o?.plan_code||"unknown",features,usage,limits:{cameras:features.camera_ai?.limit_value??null,drones:features.drone_live?.limit_value??null},server_time:new Date().toISOString()};
+const body:Record<string,unknown>={device_id:d.id,organization_status:status,plan_code:o?.plan_code||"unknown",features,usage,limits:{cameras:features.camera_ai?.limit_value??null,drones:features.drone_live?.limit_value??null},server_time:new Date().toISOString(),trial_ends_at:o?.trial_ends_at??null};
 // Which version this client's PCs install when their Settings → Updates is on: test = the newest release (version null),
 // normal = the version approved in the admin portal, pinned = the client's pinned version. A PC never downgrades by itself.
 const channel=["normal","test","pinned"].includes(o?.update_channel)?o!.update_channel:"normal";let target:string|null=null;
@@ -25,5 +27,5 @@ if(channel==="pinned")target=o?.pinned_version||null;else if(channel==="normal")
 body.updates={channel,version:target};
 // Signed lease: lets the PC keep this plan offline for a few days. Only our key can make one and it is
 // bound to this device (hash of its token), so the customer can't edit or copy it.
-const pem=Deno.env.get("LICENSE_SIGNING_KEY");if(pem){try{const now=new Date();body.lease=await signLicense({product:"AI Security Command Center",kind:"saas-lease",device:hash,device_id:d.id,organization_status:body.organization_status,plan_code:body.plan_code,features,usage,limits:body.limits,issued_at:now.toISOString(),expires_at:new Date(Math.min(now.getTime()+LEASE_DAYS*86400000,lic?.expires_on?Date.parse(lic.expires_on+"T23:59:59Z"):Infinity)).toISOString()},pem);}catch(e){console.error("lease signing failed",e);}}
+const pem=Deno.env.get("LICENSE_SIGNING_KEY");if(pem){try{const now=new Date();body.lease=await signLicense({product:"AI Security Command Center",kind:"saas-lease",device:hash,device_id:d.id,organization_status:body.organization_status,plan_code:body.plan_code,features,usage,limits:body.limits,issued_at:now.toISOString(),expires_at:new Date(Math.min(now.getTime()+LEASE_DAYS*86400000,lic?.expires_on?Date.parse(lic.expires_on+"T23:59:59Z"):Infinity,status==="trial"&&o?.trial_ends_at?Date.parse(o.trial_ends_at):Infinity)).toISOString()},pem);}catch(e){console.error("lease signing failed",e);}}
 return json(body);});

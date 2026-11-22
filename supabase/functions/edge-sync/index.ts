@@ -7,7 +7,7 @@
 //   {action:"signin", email, password}                      one sign-in: is this portal account allowed on this PC?
 //        -> {ok, email, name, role: admin|operator|viewer}  (super admin and company Admin -> admin,
 //           Editor -> operator, Viewer -> viewer) or {ok:false, error: bad_credentials|blocked|
-//           must_change_password|not_member}
+//           must_change_password|not_member|trial_expired}
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import {createClient} from "npm:@supabase/supabase-js@2";
 
@@ -52,6 +52,8 @@ Deno.serve(async req => {
       role = m ? ({owner: "admin", admin: "admin", member: "operator", viewer: "viewer"} as Record<string, string>)[m.role] ?? null : null;
     }
     if (!role) return json({ok: false, error: "not_member"});
+    // The company's 14-day trial has ended: nobody of theirs signs in on its PCs until a plan is chosen in the portal.
+    if (!sa) { const {data: ended} = await admin.rpc("org_trial_expired", {target_org: org}); if (ended) return json({ok: false, error: "trial_expired"}); }
     const {data: p} = await admin.from("profiles").select("full_name").eq("id", uid).maybeSingle();
     await admin.from("audit_logs").insert({organization_id: org, actor_user_id: uid, action: "pc_signin", target_type: "edge_device",
       target_id: dev, metadata: {email, role, super_admin: !!sa}});

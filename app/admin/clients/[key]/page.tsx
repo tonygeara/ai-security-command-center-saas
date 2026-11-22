@@ -51,6 +51,9 @@ export default async function ClientPage({params}: {params: Promise<{key: string
       <section className="detailGrid">
         <article className="card"><h3>Account</h3>
           <SubscriptionControls orgId={o.id} initialPlan={c.plan} initialStatus={o.status} paid={!!sub?.provider_subscription_id}/>
+          {o.status === "trial" && o.trial_ends_at && <p className={Date.parse(o.trial_ends_at) < Date.now() ? "locked" : "muted"}>
+            {Date.parse(o.trial_ends_at) < Date.now() ? "Free trial ended on " : "Free trial (Business plan) ends on "}{new Date(o.trial_ends_at).toLocaleDateString()}
+            {Date.parse(o.trial_ends_at) < Date.now() ? ": their PCs are paused and the portal only shows Choose a plan. Set the account active to give them more time." : ""}</p>}
           <p className="muted">{sub?.provider_subscription_id ? "Paid via Stripe" : "No Stripe subscription"}{sub?.current_period_end ? ` · period ends ${String(sub.current_period_end).slice(0, 10)}` : ""}{sub?.cancel_at_period_end ? " · cancels at period end" : ""}</p>
           <p><a className="btn small" href={"/portal?organization=" + encodeURIComponent(o.id)}>Open their dashboard</a></p></article>
         <article className="card"><h3>Feature access</h3>{FEATURES.map(([k, label]) => {

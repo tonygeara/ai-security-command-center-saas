@@ -18,6 +18,8 @@ export default async function Users({searchParams}: {searchParams: Promise<{orga
     const {data: m} = await supabase.from("organization_members").select("organization_id,role").eq("user_id", user.id).limit(1).maybeSingle();
     if (!m) redirect("/onboarding");
     org = m.organization_id; role = m.role;
+    const {data: ended} = await supabase.rpc("org_trial_expired", {target_org: org});
+    if (ended) redirect("/choose-plan");
   }
   const {data: o} = await supabase.from("organizations").select("name").eq("id", org).maybeSingle();
   const manager = role === "super" || role === "owner" || role === "admin";

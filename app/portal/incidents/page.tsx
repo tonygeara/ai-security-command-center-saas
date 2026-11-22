@@ -14,6 +14,8 @@ export default async function Incidents() {
   const {data: member} = await supabase.from("organization_members").select("organization_id").eq("user_id", user.id).limit(1).maybeSingle();
   if (!member) redirect("/onboarding");
   const org = member.organization_id as string;
+  const {data: ended} = await supabase.rpc("org_trial_expired", {target_org: org});
+  if (ended) redirect("/choose-plan");  // the trial is over: only the plan page opens
   const [{data: incidents}, {data: cams}, {data: devices}] = await Promise.all([
     supabase.from("remote_incidents").select("id,device_id,camera,title,level,severity,status,started_at,updated_at,items,photo_path")
       .eq("organization_id", org).order("updated_at", {ascending: false}).limit(50),

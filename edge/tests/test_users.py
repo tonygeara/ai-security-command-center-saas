@@ -255,3 +255,10 @@ def test_role_is_a_link_to_the_dashboard(d, monkeypatch):
     monkeypatch.setattr(web_access.edition, "EDITION", "onprem")
     assert 'href="/"' in web_access.role_link({"role": "admin"})  # no portal on-prem: this PC's dashboard
     assert "<script>" not in web_access.role_link({"role": "<script>"})
+
+
+def test_trial_ended_sign_in_message(d, monkeypatch):
+    import web_access
+    monkeypatch.setattr(web_access, "_portal_ask", lambda email, password: {"ok": False, "error": "trial_expired"})
+    user, err = web_access.portal_signin("boss@example.com", "pw")
+    assert user is None and "free trial has ended" in err and "choose a plan" in err

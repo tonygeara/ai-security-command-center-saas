@@ -128,6 +128,14 @@ Deno.serve(async (req: Request) => {
         const {data: p} = await admin.from("plans").select("code").eq("code", plan).eq("active", true).maybeSingle();
         if (!p) throw new Refused("Unknown plan.");
       }
+      // A trial (14 days, the Business plan) is given once per email: never to an email that already had one, nor to an
+      // existing account (a former client signing up again). They can still be created on a paid plan.
+      const trial = plan === "trial" || status === "trial";
+      if (trial) {
+        const {data: used} = await admin.from("trial_emails").select("email").eq("email", email).maybeSingle();
+        if (used) throw new Refused("This email has already had a free trial. Create the client on a paid plan (status active) instead.");
+        if (await findUserByEmail(admin, email)) throw new Refused("This email already has an account, so it can't start a free trial. Create the client on a paid plan instead.");
+      }
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-" + crypto.randomUUID().slice(0, 6);
       const {data: o, error: oe} = await admin.from("organizations").insert({name, slug, plan_code: plan, status}).select("id").single();
       if (oe || !o) throw new Refused(oe?.message || "Could not create the client.", 500);
@@ -135,6 +143,7 @@ Deno.serve(async (req: Request) => {
         await admin.from("subscriptions").insert({organization_id: o.id, plan_code: plan, status, provider: "manual"});
         await admin.from("sites").insert({organization_id: o.id, name: "Main Site"});
         const r = await addUser(admin, o.id, email, adminName, "admin");
+        if (trial) await admin.from("trial_emails").insert({email, organization_id: o.id});
         await audit(admin, o.id, user.id, "client_created", o.id, {client: name, admin: email, plan, status});
         return reply({ok: true, org: o.id, user_id: r.userId, temp_password: r.temp});
       } catch (e) {
