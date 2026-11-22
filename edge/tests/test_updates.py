@@ -198,3 +198,38 @@ def test_dashboard_takes_the_channel_from_the_portal(d, monkeypatch, saved_cloud
     assert d._update_policy()["channel"] == "test"  # kept
     monkeypatch.setattr(d, "onprem_mode", lambda: True)
     assert d._update_policy() is None  # on-prem: newest
+
+
+def test_portal_change_checks_right_away(d, monkeypatch, saved_cloud_state):
+    pokes = []
+    monkeypatch.setattr(d.UPDATER, "poke", lambda: pokes.append(1))
+    d.cloud_state["updates"] = {"channel": "normal", "version": "V11.13.1"}
+    d._apply_license({"organization_status": "active", "features": {}, "updates": {"channel": "normal", "version": "V11.13.1"}},
+                     connected=True, last_success=0)
+    assert pokes == []  # same version: nothing to do
+    d._apply_license({"organization_status": "active", "features": {}, "updates": {"channel": "normal", "version": "V11.13.2"}},
+                     connected=True, last_success=0)
+    assert pokes == [1]  # you approved another version: the PC checks (and installs, with Updates on) now
+
+
+def test_poke_wakes_the_updater(up, monkeypatch):
+    import updater
+    monkeypatch.setattr(updater, "FIRST_CHECK_AFTER", 30)
+    monkeypatch.setattr(updater, "CHECK_EVERY", 30)
+    ticks = []
+    up.tick = lambda: ticks.append(1)
+    up.start()
+    up.poke()
+    import time
+    t = time.time()
+    while len(ticks) < 1 and time.time() - t < 5:
+        time.sleep(0.05)
+    up.poke()
+    while len(ticks) < 2 and time.time() - t < 5:
+        time.sleep(0.05)
+    assert len(ticks) == 2  # each poke checks at once instead of waiting 30 s
+
+
+def test_install_button_is_not_shadowed(d, client):
+    page = client.get("/settings").get_data(as_text=True)
+    assert 'id="updInstallBtn"' in page and 'id="updInstall"' not in page  # the id must not equal the function's name
