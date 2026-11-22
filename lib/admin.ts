@@ -5,7 +5,7 @@ import type {SupabaseClient} from "@supabase/supabase-js";
 // The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
 // new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
 // published automatically when that version reaches main (.github/workflows/edge-installer.yml).
-export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.2";
+export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.3";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>, marked
 // "latest", with copies whose names carry no version. The links below go to GitHub's latest release, so they always
 // give the newest installers that were actually published: right after a merge (build still running) or if a build
@@ -40,7 +40,7 @@ export type Row = Record<string, any>;
 export async function loadAdminData(supabase: SupabaseClient) {
   const [users, orgs, subs, devices, sources, licenses] = await Promise.all([
     supabase.rpc("super_admin_user_directory"),
-    supabase.from("organizations").select("id,name,slug,plan_code,status,created_at").order("name"),
+    supabase.from("organizations").select("id,name,slug,plan_code,status,created_at,trial_ends_at").order("name"),
     supabase.from("subscriptions").select("organization_id,plan_code,status,current_period_end,provider_subscription_id,cancel_at_period_end"),
     supabase.from("edge_devices").select("id,organization_id,device_name,status,last_seen_at,app_version,platform,last_ip,created_at"),
     supabase.from("video_sources").select("id,organization_id,edge_device_id,name,source_type,enabled"),

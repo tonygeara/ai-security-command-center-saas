@@ -40,7 +40,8 @@ _portal = {"url": "", "token": lambda: "", "enabled": lambda: False, "post": Non
 PORTAL_ERRORS = {"bad_credentials": "Wrong user name or password.",
                  "blocked": "This portal account is blocked. Ask your provider.",
                  "must_change_password": "Choose your own password in the portal first (sign in there once), then sign in here.",
-                 "not_member": "This portal account doesn't belong to the company this PC is paired with."}
+                 "not_member": "This portal account doesn't belong to the company this PC is paired with.",
+                 "trial_expired": "Your company's free trial has ended. Your admin can choose a plan in the portal, then sign in again."}
 
 
 def portal_link(url, token_fn, enabled_fn, post=None):
