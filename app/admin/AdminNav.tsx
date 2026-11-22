@@ -14,6 +14,6 @@ export default function AdminNav({email, alerts}: {email: string; alerts: number
     {ITEMS.map(([href, icon, label]) => <Link key={href} href={href} className={active(href) ? "active" : ""}>
       <i>{icon}</i>{label}{href === "/admin" && alerts > 0 && <b className="navCount">{alerts}</b>}</Link>)}
     <div className="adminNavFoot"><a href="https://downloads.aisecuritycommandcenter.com/" target="_blank">Downloads ↗</a>
-      <span className="muted" title={email}>{email}</span><SignOut/></div>
+      <span className="muted" title={email}>{email}</span><Link className="roleLink" href="/admin" title="The admin portal">Super admin</Link><SignOut/></div>
   </nav>;
 }

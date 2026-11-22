@@ -5,7 +5,7 @@ import type {SupabaseClient} from "@supabase/supabase-js";
 // The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
 // new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
 // published automatically when that version reaches main (.github/workflows/edge-installer.yml).
-export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.1";
+export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.2";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>, marked
 // "latest", with copies whose names carry no version. The links below go to GitHub's latest release, so they always
 // give the newest installers that were actually published: right after a merge (build still running) or if a build
