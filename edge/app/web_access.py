@@ -13,6 +13,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from flask import Blueprint, Response, g, jsonify, redirect, request, session
 
+import edition
 import users as user_accounts
 
 try:
@@ -206,6 +207,19 @@ def _require_sign_in():
     return None
 
 
+PORTAL_HOME = "https://www.aisecuritycommandcenter.com/go"  # the website sends super admins to /admin, others to /portal
+
+
+def role_link(u):
+    """The signed-in role as a link to that role's dashboard: an admin on an online PC opens the portal (the admin
+    portal for super admins); everyone else, and on-prem PCs (no portal), the dashboard on this PC."""
+    role = html_escape(u.get("role") or "")
+    if u.get("role") == "admin" and edition.EDITION != "onprem":
+        return (f'<a id="roleLink" href="{PORTAL_HOME}" target="_blank" rel="noopener" title="Open your portal (super admins: the admin '
+                f'portal)" style="color:#5bd9ff;font-weight:bold">{role} ↗</a>')
+    return f'<a id="roleLink" href="/" title="Your dashboard" style="color:#5bd9ff;font-weight:bold">{role}</a>'
+
+
 @bp.after_app_request
 def _user_badge(resp):
     """Who is signed in, with Sign out, on every page."""
@@ -217,7 +231,7 @@ def _user_badge(resp):
             if i != -1:
                 badge = ('<div id="userBadge" style="position:fixed;left:10px;bottom:10px;z-index:9999;background:rgba(3,16,26,.92);'
                          'border:1px solid #155879;border-radius:4px;padding:5px 9px;font:12px Arial;color:#9edfff">👤 '
-                         f'{html_escape(u["username"])} · {u["role"]} · <a href="/logout" style="color:#5bd9ff">Sign out</a></div>')
+                         f'{html_escape(u["username"])} · {role_link(u)} · <a href="/logout" style="color:#5bd9ff">Sign out</a></div>')
                 resp.set_data(html[:i] + badge + html[i:])
         except Exception:
             pass

@@ -70,7 +70,7 @@ def test_login_and_roles(d, signin):
     viewer, r = login(d, "VIC", "viewer pass")  # user names are not case sensitive
     assert r.status_code == 302 and r.headers["Location"] == "/drone-control"
     page = viewer.get("/drone-control")
-    assert page.status_code == 200 and "vic · viewer" in page.get_data(as_text=True)
+    assert page.status_code == 200 and "vic · <a id=\"roleLink\" href=\"/\"" in page.get_data(as_text=True)
     assert viewer.post("/api/drone/command?drone=drone", json={"cmd": "hover"}).status_code == 403
     assert viewer.post("/api/routes/stop").status_code == 403
     assert viewer.get("/users").status_code == 403
@@ -245,3 +245,13 @@ def test_portal_signin_off_when_not_paired(d, signin, portal):
     assert "isn't paired with the portal" in c.get("/login").get_data(as_text=True)
     _, r = login(d, "tony@x.com", "portal pass 1")
     assert r.status_code == 200 and "Wrong user name or password" in r.get_data(as_text=True)
+
+
+def test_role_is_a_link_to_the_dashboard(d, monkeypatch):
+    import web_access
+    admin = web_access.role_link({"role": "admin"})
+    assert 'href="https://www.aisecuritycommandcenter.com/go"' in admin and 'target="_blank"' in admin and ">admin ↗<" in admin
+    assert 'href="/"' in web_access.role_link({"role": "operator"}) and ">operator<" in web_access.role_link({"role": "operator"})
+    monkeypatch.setattr(web_access.edition, "EDITION", "onprem")
+    assert 'href="/"' in web_access.role_link({"role": "admin"})  # no portal on-prem: this PC's dashboard
+    assert "<script>" not in web_access.role_link({"role": "<script>"})
