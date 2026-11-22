@@ -63,3 +63,11 @@ def test_onprem_spec_lists_every_module():
     listed = set(re.findall(r"'(\w+)'", _read("onprem.spec")))
     missing = app_modules() - listed
     assert not missing, f"onprem.spec hiddenimports miss: {sorted(missing)}"
+
+
+def test_installer_never_kills_its_own_process_tree():
+    """A self-update starts Setup from the running program, so Setup is that program's child: stopping the program
+    with taskkill /T (the whole tree) made Setup kill itself and the PC was left stopped and not updated."""
+    iss = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "installer", "installer.iss"), encoding="utf-8").read()
+    kills = [line for line in iss.splitlines() if "taskkill" in line.lower() and not line.strip().startswith("{")]
+    assert kills and all("/T" not in line.upper().split("'")[3] for line in kills if "Exec(" in line), kills

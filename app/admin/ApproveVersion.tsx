@@ -18,7 +18,9 @@ export default function ApproveVersion({approved, versions}: {approved: string |
   return <div className="rowActions">
     <span>Approved for Normal clients: <b>{approved || "none yet"}</b></span>
     <select value={v} disabled={busy} onChange={e => setV(e.target.value)}>{versions.map(x => <option key={x}>{x}</option>)}</select>
-    <button className="btn small" disabled={busy || !v || v === approved} onClick={approve}>{busy ? "Saving..." : "Approve"}</button>
-    <span role="status" className="muted">{message}</span>
+    <button className="btn small" disabled={busy || !v || v === approved} onClick={approve}
+      title={v === approved ? `${v} is already the approved version` : !v ? "No published versions found" : undefined}>
+      {busy ? "Saving..." : v && v === approved ? "Approved ✓" : "Approve"}</button>
+    <span role="status" className="muted">{message || (!versions.length ? "Couldn't load the published versions from GitHub; reload the page in a minute." : "")}</span>
   </div>;
 }
