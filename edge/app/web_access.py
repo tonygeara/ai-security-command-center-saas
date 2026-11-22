@@ -421,7 +421,7 @@ async function addUser(){const first=!$('userList').querySelector('.hud-row');
   const d=await call('/api/users','POST',{username:$('nu').value,password:$('np').value,role:$('nr').value});
   if(!d.ok){umsg(d.error,false);return}$('nu').value=$('np').value='';umsg('User '+d.username+' added.'+(first?' Sign-in is now on.':''),true);if(first)location.reload();else load()}
 async function setRole(n,r){const d=await call('/api/users/'+encodeURIComponent(n),'POST',{role:r});umsg(d.ok?n+' is now '+r+'.':d.error,d.ok);load()}
-async function resetPw(n){const pw=prompt('New password for '+n+' (8+ characters):');if(!pw)return;const d=await call('/api/users/'+encodeURIComponent(n),'POST',{password:pw});
+async function resetPw(n){const pw=await uiPrompt('New password for '+n+' (8+ characters):');if(!pw)return;const d=await call('/api/users/'+encodeURIComponent(n),'POST',{password:pw});
   umsg(d.ok?'Password changed. '+n+' is signed out on other devices.':d.error,d.ok);if(d.ok&&n===me)location.href='/login'}
 async function delUser(n){if(arm!==n){arm=n;load();setTimeout(()=>{if(arm===n){arm='';load()}},4000);return}arm='';
   const d=await call('/api/users/'+encodeURIComponent(n),'DELETE');umsg(d.ok?n+' deleted.':d.error,d.ok);if(d.ok&&n===me)location.href='/login';else load()}

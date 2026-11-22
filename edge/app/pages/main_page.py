@@ -3265,7 +3265,7 @@ FRONT CAMERA • FACE AI • LPR AI
                 const d = await r.json();
                 if (!r.ok || !d.ok) throw new Error(d.error || "Could not remove");
                 drop(x.drone);
-            } catch (err) { alert(err.message); reset(); }
+            } catch (err) { uiAlert(err.message); reset(); }
         });
     }
     function tileFor(x) {
@@ -3424,7 +3424,7 @@ FRONT CAMERA • FACE AI • LPR AI
                 await post("/api/sources/" + encodeURIComponent(n) + "/feed", {visible: on});
             syncPrimary(key, on);
         }
-        catch (e) { alert(e.message); }
+        catch (e) { uiAlert(e.message); }
         finally { btn.disabled = false; }
     }));
 
@@ -3445,16 +3445,16 @@ FRONT CAMERA • FACE AI • LPR AI
             const btn = e.currentTarget, on = btn.getAttribute("aria-pressed") !== "true";
             btn.disabled = true;
             try { await post("/api/sources/" + encodeURIComponent(c.name) + "/feed", {visible: on}); applyTile(t, {...t._c, feed_visible: on}); }
-            catch (err) { alert(err.message); } finally { btn.disabled = false; }
+            catch (err) { uiAlert(err.message); } finally { btn.disabled = false; }
         });
         t.querySelector('[data-act="pause"]').addEventListener("click", async e => {
             const btn = e.currentTarget, paused = !t._c.paused;
             btn.disabled = true;
             try { await post("/api/sources/" + encodeURIComponent(c.name) + "/pause", {paused}); applyTile(t, {...t._c, paused}); }
-            catch (err) { alert(err.message); } finally { btn.disabled = false; }
+            catch (err) { uiAlert(err.message); } finally { btn.disabled = false; }
         });
         t.querySelector('[data-act="remove"]').addEventListener("click", async e => {
-            if (!confirm("Remove " + c.name + "?\n\nIt will be deleted from Frigate and its slot freed on your plan. "
+            if (!await uiConfirm("Remove " + c.name + "?\n\nIt will be deleted from Frigate and its slot freed on your plan. "
                 + "Recordings already saved are kept.")) return;
             const btn = e.currentTarget;
             btn.disabled = true; btn.textContent = "REMOVING…";
@@ -3465,7 +3465,7 @@ FRONT CAMERA • FACE AI • LPR AI
                 window.detachLiveCamera?.(slot);
                 t.remove(); delete tiles[c.name];
                 document.getElementById("addDroneMsg").textContent = d.message + " Frigate is restarting.";
-            } catch (err) { alert(err.message); btn.disabled = false; btn.textContent = "REMOVE"; }
+            } catch (err) { uiAlert(err.message); btn.disabled = false; btn.textContent = "REMOVE"; }
         });
         return t;
     }
@@ -5651,7 +5651,7 @@ if (cameraToggle) {
             if (!response.ok || !result.ok) throw new Error(result.error || "Unable to change camera state.");
             paintCameraButton(result.enabled, true);
         } catch (error) {
-            alert(error.message || "Unable to change camera state.");
+            uiAlert(error.message || "Unable to change camera state.");
             await refreshCameraStatus();
         } finally {
             cameraBusy = false;
@@ -5753,7 +5753,7 @@ if (droneToggle) {
         const nextState = !droneEnabled;
 
         if (nextState) {
-            const confirmed = confirm(
+            const confirmed = await uiConfirm(
                 "Start DRONE AI?\n\nMake sure DJI Fly is already livestreaming to the PC first."
             );
             if (!confirmed) return;
@@ -5775,7 +5775,7 @@ if (droneToggle) {
             }
             paintDroneButton(result.enabled, true);
         } catch (error) {
-            alert(error.message || "Unable to change drone state.");
+            uiAlert(error.message || "Unable to change drone state.");
             await refreshDroneStatus();
         } finally {
             droneBusy = false;
@@ -5824,10 +5824,10 @@ async function refreshDroneTracking() {
 if (droneTrackingToggle) {
     droneTrackingToggle.addEventListener("click", async () => {
         const next = !droneTrackingEnabled;
-        if (next && !droneEnabled) { alert("Start DRONE AI first, then enable Tracking Assist."); return; }
+        if (next && !droneEnabled) { uiAlert("Start DRONE AI first, then enable Tracking Assist."); return; }
         const r = await fetch("/api/drone/tracking/toggle", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({enabled:next})});
         const d = await r.json();
-        if (!r.ok || !d.ok) { alert(d.error || "Unable to change tracking-assist state."); return; }
+        if (!r.ok || !d.ok) { uiAlert(d.error || "Unable to change tracking-assist state."); return; }
         refreshDroneTracking();
     });
 }
@@ -5890,7 +5890,7 @@ document.getElementById("clearAllEvents").addEventListener("click", async () => 
         if (!result.ok) throw new Error(result.error || "Unable to clear event history.");
         window.location.reload();
     } catch (error) {
-        alert(error.message || "Unable to clear event history.");
+        uiAlert(error.message || "Unable to clear event history.");
         button.disabled = false;
         button.innerText = oldText;
     }
@@ -5929,7 +5929,7 @@ document.addEventListener("click", async event => {
         }
         setTimeout(() => window.location.reload(), 260);
     } catch (error) {
-        alert(error.message || "Unable to delete event.");
+        uiAlert(error.message || "Unable to delete event.");
         button.disabled = false;
         button.innerText = oldText;
     }

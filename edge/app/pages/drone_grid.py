@@ -27,6 +27,8 @@ BODY = r"""
 .dg-tile:fullscreen{aspect-ratio:auto;border:0;border-radius:0}
 .dg-grid.solo .dg-tile:not(.sel){display:none}
 .dg-grid.solo{grid-template-columns:1fr}
+.dg-patrol{display:flex;align-items:center;gap:7px;margin:0 0 0 auto;color:#5bd9ff;font:bold 10px Arial;letter-spacing:1.5px;cursor:pointer;text-transform:none}
+.dg-tag.pt{color:#7dffc1;border-color:#1f7a4f}
 @media(max-width:760px){.dg-grid{grid-template-columns:1fr}}
 </style>
 <main class="hud-main">
@@ -39,7 +41,9 @@ BODY = r"""
 <label style="margin:0;display:flex;gap:6px;align-items:center;text-transform:none;letter-spacing:0">Layout
 <select id="dgCols" onchange="layout()"><option value="0">Auto</option><option value="1">1 per row</option><option value="2">2 per row</option><option value="3">3 per row</option><option value="4">4 per row</option></select></label>
 <a class="hud-btn" href="/drone-control" style="text-decoration:none">← Drone controls</a>
+<label class="dg-patrol" title="Every connected and virtual drone flies the last route set for it, again and again, until switched off"><input type="checkbox" class="toggle" id="patrolOn" onchange="setPatrol(this.checked)"> RUN PATROL</label>
 </div>
+<div class="muted" id="patrolInfo" style="display:none;margin:-4px 0 10px;font-size:12px"></div>
 <div class="dg-grid" id="dgGrid"></div>
 <p class="muted" id="dgEmpty" style="display:none">No drones yet. Add one on the Drone page, or add a virtual drone on the Virtual drones tab.</p>
 </main>
@@ -88,6 +92,26 @@ async function load(){let d;try{d=await fetch('/api/drone/links',{cache:'no-stor
   const live=d.drones.filter(x=>x.drone_connected).length;
   $('dgState').innerHTML='<i class="dot '+(live?'good':'warn')+'"></i>'+live+' / '+d.drones.length+' DRONES LINKED';
   $('dgEmpty').style.display=d.drones.length?'none':''}
+// Run patrol: every connected / virtual drone flies the last route set for it, on repeat.
+let patrolBusy=false,patrolling={};
+async function loadPatrol(){if(patrolBusy)return;try{const d=await fetch('/api/routes/patrol',{cache:'no-store'}).then(r=>r.json());if(!d.ok)return;
+  $('patrolOn').checked=d.on;const e=$('patrolInfo');e.style.display=d.on?'':'none';
+  if(d.on)e.innerHTML='<b style="color:#26ee89">RUN PATROL ON</b> · '+d.drones.map(x=>`<b>${esc(x.label)}</b>: ${x.route?'“'+esc(x.route)+'” · ':''}${esc(x.status)}`).join(' &nbsp;|&nbsp; ');
+  patrolling={};d.drones.forEach(x=>{patrolling[x.drone]=d.on&&x.patrolling});
+  Object.values(tiles).forEach(t=>{let g=t.querySelector('.dg-tag.pt');if(patrolling[t.dataset.drone]&&!g){g=document.createElement('span');g.className='dg-tag pt';g.textContent='PATROL';t.querySelector('.dg-name').appendChild(g)}else if(!patrolling[t.dataset.drone]&&g)g.remove()})}catch(e){}}
+async function setPatrol(on){patrolBusy=true;const box=$('patrolOn');
+  try{if(on){const s=await fetch('/api/routes/patrol',{cache:'no-store'}).then(r=>r.json());
+      const set=s.drones.filter(x=>x.route),none=s.drones.filter(x=>!x.route);
+      if(!set.length){box.checked=false;uiAlert('No drone has a route yet: fly or save a route on a drone\'s Drone Control page first.');return}
+      if(!await uiConfirm('RUN PATROL: these drones take off by themselves and fly their last route again and again:\n'
+        +set.map(x=>'• '+x.label+': “'+x.route+'” ('+x.stops+' stop'+(x.stops>1?'s':'')+')').join('\n')
+        +(none.length?'\n\nNo route yet (stays on the ground): '+none.map(x=>x.label).join(', '):'')
+        +'\n\nEach drone runs its own route\'s battery settings. STOP or the pilot leaves that drone alone. Keep the drones in sight.')){box.checked=false;return}}
+    else if(!await uiConfirm('Switch Run patrol off? Drones on a patrol stop and hover where they are.')){box.checked=true;return}
+    const d=await fetch('/api/routes/patrol',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({on})}).then(r=>r.json());
+    if(!d.ok){box.checked=!on;uiAlert(d.error||'Not allowed.')}}
+  catch(e){box.checked=!on}finally{patrolBusy=false;loadPatrol()}}
+loadPatrol();setInterval(loadPatrol,3000);
 document.addEventListener('fullscreenchange',()=>setTimeout(layout,100));
 window.addEventListener('resize',layout);
 load();setInterval(load,1000);

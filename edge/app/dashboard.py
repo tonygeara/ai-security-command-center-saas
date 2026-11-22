@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.13.4"
+APP_VERSION = "V11.14.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2283,6 +2283,7 @@ def _apply_license(data, connected, last_success):
             "usage": data.get("usage") if isinstance(data.get("usage"), dict) else {"cameras": 0, "drones": 0},
             "limits": data.get("limits") if isinstance(data.get("limits"), dict) else {"cameras": None, "drones": None},
             "updates": data.get("updates") if isinstance(data.get("updates"), dict) else cloud_state.get("updates"),
+            "trial_ends_at": data.get("trial_ends_at") or None,
             "last_success": last_success,
             "offline_grace": not connected,
             "grace_expires_at": last_success + LICENSE_GRACE_SECONDS,
@@ -2348,7 +2349,7 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
+import pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -3866,6 +3867,46 @@ def hud_topbar(active="", nav=True):
         '<script>(function(){const c=document.getElementById("hudClock");'
         'const t=()=>{c.textContent=new Date().toLocaleTimeString()};t();setInterval(t,1000)})()</script>'
     )
+
+
+def trial_ends_ms():
+    """When this client's free trial ends (ms since 1970), or None when it isn't on a trial."""
+    with cloud_lock:
+        status, ends = str(cloud_state.get("organization_status") or ""), cloud_state.get("trial_ends_at")
+    if onprem_mode() or status not in ("trial", "trial_expired") or not ends:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(ends).replace("Z", "+00:00")).timestamp() * 1000
+    except ValueError:
+        return None
+
+
+CHOOSE_PLAN_URL = "https://www.aisecuritycommandcenter.com/choose-plan"
+
+
+@app.after_request
+def _themed_dialogs(resp):
+    """Every page gets the themed dialogs (uiAlert / uiConfirm / uiPrompt) and, on a free trial, its counter."""
+    if resp.mimetype != "text/html" or resp.direct_passthrough or resp.status_code >= 300:
+        return resp
+    try:
+        html = resp.get_data(as_text=True)
+        if "uiDialogJs" in html:
+            return resp
+        add = pages.dialogs.DIALOG_HTML
+        ends = trial_ends_ms()
+        i = html.find("</head>")
+        if i == -1:
+            i = html.find("<body>") + len("<body>") if "<body>" in html else 0
+        html = html[:i] + add + html[i:]
+        if ends:
+            j = html.rfind("</body>")
+            j = len(html) if j == -1 else j
+            html = html[:j] + pages.dialogs.trial_html(ends, CHOOSE_PLAN_URL) + html[j:]
+        resp.set_data(html)
+    except Exception as e:
+        print("Dialog injection error:", e)
+    return resp
 
 
 def hud_page(title, body, active="", head="", nav=True):
@@ -7388,6 +7429,7 @@ def start_assistant():
     threading.Thread(target=_drone_response_worker, daemon=True).start()
     threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
     threading.Thread(target=_smart_patrol_worker, daemon=True).start()
+    threading.Thread(target=_patrol_mode_worker, daemon=True).start()
     threading.Thread(target=_nofly_watch_worker, daemon=True).start()
     start_mapping()
     threading.Thread(target=_traffic_worker, daemon=True).start()
@@ -7832,8 +7874,11 @@ def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None):
         # Claimed under the lock (not in the thread) so a second request can't take the same drones meanwhile.
         run = {"active": True, "id": f"{slot}-{time.time():.3f}", "route": route,
                "drone": slot, "backup": backup, "name": name or "unsaved route", "index": 0,
-               "total": len(route["points"]), "phase": "flying", "stop": False, "message": f"Route {name or 'unsaved route'} started"}
+               "total": len(route["points"]), "phase": "flying", "stop": False, "message": f"Route {name or 'unsaved route'} started",
+               "by": by}
         route_runs[run["id"]] = run
+        if not route.get("survey") and by != PATROL_MODE_BY:
+            remember_last_route(slot, name or "unsaved route", route)
         for k in [k for k, r in route_runs.items() if not r["active"] and time.time() - r.get("ended_at", time.time()) > 3600]:
             route_runs.pop(k, None)
     threading.Thread(target=_run_route, args=(name or "unsaved route", route, by, slot, run), daemon=True).start()
@@ -7850,6 +7895,9 @@ def api_routes():
         if request.method == "POST":
             data = request.get_json(silent=True) or {}
             name, route = save_route(data.get("name"), data)
+            slot = request.args.get("drone") or data.get("drone")
+            if slot in drone_slots():
+                remember_last_route(slot, name, route)
             return jsonify({"ok": True, "name": name, "route": route})
         if request.method == "DELETE":
             delete_route(str((request.get_json(silent=True) or {}).get("name") or ""))
@@ -7927,7 +7975,165 @@ def api_routes_stop():
         return jsonify({"ok": False, "error": "This drone is not flying a route."}), 409
     run["stop"] = True
     drone_command("hover", timeout=5.0, slot=slot)
+    if patrol_mode_on():
+        _patrol_mode["held"][slot] = "Stop route pressed: left alone until Run patrol is switched on again"
     return jsonify({"ok": True})
+
+
+# ---------- Run patrol: every connected or virtual drone flies its own last route, again and again ----------
+PATROL_MODE_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "patrol_mode.json")
+PATROL_MODE_BY = "Run patrol"
+PATROL_MODE_RETRY_S = 20  # wait after a patrol ends before the drone is sent again
+_patrol_mode = {"held": {}, "runs": {}, "why": {}, "ended": {}}  # per drone: left alone / its run id / why not flying / when it ended
+_patrol_mode_lock = threading.RLock()
+
+
+def _load_patrol_mode():
+    try:
+        with open(PATROL_MODE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {"on": bool(data.get("on")), "last": data.get("last") if isinstance(data.get("last"), dict) else {}}
+    except (FileNotFoundError, ValueError):
+        pass
+    return {"on": False, "last": {}}
+
+
+def _save_patrol_mode(data):
+    tmp = PATROL_MODE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    _replace_file(tmp, PATROL_MODE_FILE)
+
+
+def patrol_mode_on():
+    return _load_patrol_mode()["on"]
+
+
+def remember_last_route(slot, name, route):
+    """The route this drone was last set (saved or flown on its page): what Run patrol flies for it."""
+    try:
+        with _patrol_mode_lock:
+            data = _load_patrol_mode()
+            data["last"][slot] = {"name": name, "route": _clean_route(route), "at": time.time()}
+            _save_patrol_mode(data)
+    except Exception as e:
+        print("Last route save error:", e)
+
+
+def last_route_of(slot):
+    x = _load_patrol_mode()["last"].get(slot)
+    return x if isinstance(x, dict) and (x.get("route") or {}).get("points") else None
+
+
+def set_patrol_mode(on, by="dashboard"):
+    """Switch Run patrol on (each drone flies its last route on repeat) or off (those patrols stop, drones hover)."""
+    with _patrol_mode_lock:
+        data = _load_patrol_mode()
+        data["on"] = bool(on)
+        _save_patrol_mode(data)
+        _patrol_mode["held"].clear()
+        _patrol_mode["why"].clear()
+        _patrol_mode["ended"].clear()
+        stopped = []
+        if not on:
+            for slot, rid in list(_patrol_mode["runs"].items()):
+                run = route_runs.get(rid)
+                if run and run["active"]:
+                    run["stop"] = True
+                    drone_command("hover", timeout=5.0, slot=run["drone"])
+                    stopped.append(run["drone"])
+            _patrol_mode["runs"].clear()
+    _drone_event("Run patrol switched " + ("on: every drone flies its last route" if on else "off"))
+    audit_record("drone: run patrol " + ("on" if on else "off"), target="all drones", detail={"stopped": stopped} if stopped else None)
+    if on:
+        patrol_mode_tick()
+    return stopped
+
+
+def patrol_mode_tick():
+    """One look (every 5 s while Run patrol is on): start each ready drone's last route, repeating."""
+    if not patrol_mode_on():
+        return
+    with _patrol_mode_lock:
+        over = _sources_over_limit()
+        for slot in drone_slots():
+            rid = _patrol_mode["runs"].get(slot)
+            run = route_runs.get(rid) if rid else None
+            if run and run["active"]:
+                _patrol_mode["why"].pop(slot, None)
+                continue
+            if run is not None:
+                _patrol_mode["runs"].pop(slot, None)
+                _patrol_mode["ended"][slot] = time.time()
+                if run.get("phase") == "stopped" or "took over" in str(run.get("message") or ""):
+                    # STOP, the pilot or a fault ended it: never take the drone back from a pilot by itself.
+                    _patrol_mode["held"][slot] = run.get("message") or "the patrol stopped"
+                    send_telegram(f"⏸ Run patrol: {drone_label(slot)} is left alone ({run.get('message')}). "
+                                  "Switch Run patrol off and on again to send it back out.") if telegram_ready() else None
+            if slot in _patrol_mode["held"]:
+                _patrol_mode["why"][slot] = _patrol_mode["held"][slot]
+                continue
+            if slot in over:
+                _patrol_mode["why"][slot] = "over the licence's drone limit"
+                continue
+            last = last_route_of(slot)
+            if not last:
+                _patrol_mode["why"][slot] = "no route set yet: fly or save a route on its page first"
+                continue
+            if time.time() - _patrol_mode["ended"].get(slot, 0) < PATROL_MODE_RETRY_S:
+                continue
+            if _drone_busy(slot):
+                _patrol_mode["why"][slot] = "busy with another mission"
+                continue
+            route = {**last["route"], "loop": True}  # a patrol: the route again and again until switched off
+            problem = _route_problem(_clean_route(route), slot)
+            if problem:
+                _patrol_mode["why"][slot] = problem
+                continue
+            r = fly_route(last["name"], route, by=PATROL_MODE_BY, drone=slot)
+            if r["ok"]:
+                _patrol_mode["runs"][slot] = run_of(slot)["id"] if run_of(slot) else ""
+                _patrol_mode["why"].pop(slot, None)
+            else:
+                _patrol_mode["why"][slot] = r.get("error") or "could not start"
+
+
+def _patrol_mode_worker():
+    while True:
+        time.sleep(5)
+        try:
+            patrol_mode_tick()
+        except Exception as e:
+            print("Run patrol error:", e)
+
+
+def patrol_mode_status():
+    on = patrol_mode_on()
+    drones = []
+    for slot in drone_slots():
+        last = last_route_of(slot)
+        rid = _patrol_mode["runs"].get(slot)
+        run = route_runs.get(rid) if rid else None
+        if not on:
+            state = ""
+        elif run and run["active"]:
+            state = run.get("message") or "patrolling"
+        else:
+            state = _patrol_mode["why"].get(slot) or "waiting"
+        drones.append({"drone": slot, "label": drone_label(slot), "virtual": is_virtual(slot),
+                       "route": last["name"] if last else None, "stops": len(last["route"]["points"]) if last else 0,
+                       "patrolling": bool(run and run["active"]), "status": state})
+    return {"ok": True, "on": on, "drones": drones}
+
+
+@app.route("/api/routes/patrol", methods=["GET", "POST"])
+def api_routes_patrol():
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        stopped = set_patrol_mode(bool(data.get("on")))
+        return jsonify({**patrol_mode_status(), "stopped": [drone_label(s) for s in stopped]})
+    return jsonify(patrol_mode_status())
 
 
 # ---------- drone 3D site maps (survey grid → images → OpenDroneMap → 3D model + orthophoto) ----------
@@ -9801,7 +10007,7 @@ async function updPost(path,body){const r=await fetch(path,{method:'POST',header
   const d=await r.json().catch(()=>({ok:false,error:'No answer.'}));if(r.status===403)d.error='Only an admin can change updates.';return d}
 async function updToggle(on){const d=await updPost('/api/updates',{auto:on});if(!d.ok){updMsg.className='hud-msg bad';updMsg.textContent=d.error;updAuto.checked=!on;return}
   upd=d;updShow();updMsg.className='hud-msg';updMsg.textContent=on?'Updates on.':'Updates off: new versions will not be installed.';updAsk.hidden=true;if(d.ask)updAskShow()}
-async function updInstall(){if(!confirm('Install '+(upd.available||'the new version')+' now? The program closes and starts again in about a minute.'))return;
+async function updInstall(){if(!await uiConfirm('Install '+(upd.available||'the new version')+' now? The program closes and starts again in about a minute.'))return;
   updAsk.hidden=true;const d=await updPost('/api/updates/install');updMsg.className='hud-msg'+(d.ok?'':' bad');updMsg.textContent=d.ok?d.message:d.error;updLoad()}
 async function updSkip(){const d=await updPost('/api/updates/skip',{version:upd.available});updAsk.hidden=true;
   updMsg.className='hud-msg';updMsg.textContent=d.ok?'Not installed. Newer versions will install by themselves.':d.error;updLoad()}

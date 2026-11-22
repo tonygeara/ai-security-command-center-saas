@@ -183,9 +183,9 @@ async function importAirports(){msg('asMsg','Importing airports… (the first ti
 function pickFile(){const f=document.createElement('input');f.type='file';f.accept='.geojson,.json,.csv';f.onchange=async()=>{const fd=new FormData();fd.append('file',f.files[0]);
   msg('asMsg','Importing '+f.files[0].name+'…');const d=await fetch('/api/airspace/upload',{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({ok:false,error:'Upload failed.'}));
   msg('asMsg',d.ok?d.message:d.error,d.ok);load()};f.click()}
-async function authorise(id,on){if(on&&!confirm('Mark this zone authorised? Drones will fly in it. Only do this if the site has permission from the aviation authority.')){load();return}
+async function authorise(id,on){if(on&&!await uiConfirm('Mark this zone authorised? Drones will fly in it. Only do this if the site has permission from the aviation authority.')){load();return}
   const d=await post('/api/airspace/zone',{id,enabled:!on});msg('asMsg',d.ok?(on?'Marked authorised: drones may fly there.':'Zone active again.'):d.error,d.ok);load()}
-async function removeSource(src){if(!confirm('Remove all imported '+(src==='airport'?'airport':'airspace')+' zones?'))return;
+async function removeSource(src){if(!await uiConfirm('Remove all imported '+(src==='airport'?'airport':'airspace')+' zones?'))return;
   const d=await post('/api/airspace/zone',{source:src},'DELETE');msg('asMsg',d.ok?'Removed.':d.error,d.ok);load()}
 function toggleRf(){if($('fsShowRf').checked)showRf();else map.removeLayer(rfLayer)}
 async function showRf(){msg('rfMsg','Working out the coverage…');$('fsShowRf').checked=true;

@@ -53,3 +53,47 @@ def test_repeat_route_laps(d, client, fleet):
     (v1,) = fleet(1)
     assert fly(client, v1, {**A, "points": [offset(10, 0), offset(10, 10)]})["ok"]
     assert wait_until(lambda: (d.run_of(v1) or {}).get("lap", 1) >= 2, 90)
+
+
+def patrol(client, on):
+    return client.post("/api/routes/patrol", json={"on": on}).get_json()
+
+
+def test_run_patrol_flies_each_drones_last_route(d, client, fleet):
+    d._save_patrol_mode({"on": False, "last": {}})
+    v1, v2, v3 = fleet(3)
+    # v1's last route is the one it flew, v2's the one saved on its page; v3 has none and stays on the ground.
+    assert fly(client, v1, {**A, "loop": False})["ok"]
+    assert client.post(f"/api/routes/stop?drone={v1}").get_json()["ok"]
+    assert wait_until(lambda: d.run_of(v1) is None, 10)
+    assert client.post(f"/api/routes?drone={v2}", json={**B, "loop": False}).get_json()["ok"]
+    try:
+        s = patrol(client, True)
+        assert s["on"]
+        assert wait_until(lambda: d.run_of(v1) and d.run_of(v2), 15)
+        assert d.run_of(v1)["name"] == "A" and d.run_of(v2)["name"] == "B"
+        assert d.run_of(v1)["route"]["loop"] and d.run_of(v1)["by"] == d.PATROL_MODE_BY  # on repeat
+        assert d.run_of(v3) is None
+        st = {x["drone"]: x for x in client.get("/api/routes/patrol").get_json()["drones"]}
+        assert st[v1]["patrolling"] and st[v2]["patrolling"] and "no route set yet" in st[v3]["status"]
+        assert not d.last_route_of(v1)["route"]["loop"]  # the patrol's repeat doesn't change the drone's own route
+        # Stop route on one drone: it is left alone, the others carry on.
+        assert client.post(f"/api/routes/stop?drone={v2}").get_json()["ok"]
+        assert wait_until(lambda: d.run_of(v2) is None, 10)
+        d._patrol_mode["ended"].clear()
+        d.patrol_mode_tick()
+        assert d.run_of(v2) is None and d.run_of(v1) is not None
+        # Off: every patrol stops.
+        off = patrol(client, False)
+        assert not off["on"] and "Virtual 1" in off["stopped"]
+        assert wait_until(lambda: d.run_of(v1) is None, 10)
+        d.patrol_mode_tick()
+        assert d.run_of(v1) is None
+    finally:
+        d._save_patrol_mode({"on": False, "last": {}})
+
+
+def test_run_patrol_needs_an_operator(d):
+    import users
+    assert users.allowed("operator", "POST", "/api/routes/patrol")
+    assert not users.allowed("viewer", "POST", "/api/routes/patrol")

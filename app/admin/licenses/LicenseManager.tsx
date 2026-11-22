@@ -1,4 +1,5 @@
 "use client";
+import {uiAlert,uiConfirm} from "../../../lib/dialog";
 import {useEffect, useMemo, useState} from "react";
 import {useRouter} from "next/navigation";
 import {createClient} from "../../../lib/supabase/client";
@@ -97,16 +98,16 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
   }
 
   async function revoke(l: Lic){
-    if(!confirm(`Mark ${l.client_name}'s licence as revoked?` + (l.edition === "onprem" ? "\n\nNote: an on-prem file already installed keeps working until its expiry date (it is offline). Do not renew it." : ""))) return;
+    if(!await uiConfirm(`Mark ${l.client_name}'s licence as revoked?` + (l.edition === "onprem" ? "\n\nNote: an on-prem file already installed keeps working until its expiry date (it is offline). Do not renew it." : ""))) return;
     const {error} = await createClient().from("client_licenses").update({status: "revoked"}).eq("id", l.id);
-    if(error) alert(error.message); else router.refresh();
+    if(error) uiAlert(error.message); else router.refresh();
   }
 
   async function remove(l: Lic){
     const note = l.edition === "onprem" ? `An on-prem licence already installed keeps working until ${l.expires_on}.` : "Their online account stays; only these client details are removed.";
-    if(!confirm(`Remove ${l.client_name} and its licence record from the portal?\n\n${note}`)) return;
+    if(!await uiConfirm(`Remove ${l.client_name} and its licence record from the portal?\n\n${note}`)) return;
     const {error} = await createClient().rpc("admin_remove_client_license", {target_license: l.id});
-    if(error) alert(error.message); else router.refresh();
+    if(error) uiAlert(error.message); else router.refresh();
   }
 
   const F = (k: string, label: string, props: Lic = {}) => <label>{label}<input value={form?.[k] ?? ""} onChange={e => set(k, e.target.value)} {...props}/></label>;

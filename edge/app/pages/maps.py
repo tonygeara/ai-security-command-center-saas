@@ -143,12 +143,12 @@ async function load(){try{const d=await fetch('/api/maps',{cache:'no-store'}).th
   if(!document.querySelector('.mp-card select:focus'))render()}catch(e){}}
 async function fly(id){const dr=$('dr_'+id)?.value;const m=data.maps.find(x=>x.id===id);
   const dl=(data.drones||[]).find(x=>x.slot===dr);
-  if(!confirm(`Fly ${dl?dl.label:'the drone'} over “${m.name}” at ${m.settings.alt} m? It takes off by itself, flies the grid and returns home. Keep it in sight.`))return;
+  if(!await uiConfirm(`Fly ${dl?dl.label:'the drone'} over “${m.name}” at ${m.settings.alt} m? It takes off by itself, flies the grid and returns home. Keep it in sight.`))return;
   const d=await post(`/api/maps/${id}/fly`,{drone:dr});msg('mpMsg',d.ok?d.message:d.error,d.ok);load()}
 async function stopFly(id){const d=await post(`/api/maps/${id}/stop`);msg('mpMsg',d.ok?'Stopped: the drone is hovering.':d.error,d.ok);load()}
 async function processMap(id){const d=await post(`/api/maps/${id}/process`);msg('mpMsg',d.ok?'Processing queued. This page updates by itself.':d.error,d.ok);load()}
-async function cancelMap(id){if(!confirm('Cancel processing this map?'))return;const d=await post(`/api/maps/${id}/cancel`);msg('mpMsg',d.ok?'Cancelled.':d.error,d.ok);load()}
-async function delMap(id){const m=data.maps.find(x=>x.id===id);if(!confirm(`Delete “${m.name}” and all its images and results?`))return;
+async function cancelMap(id){if(!await uiConfirm('Cancel processing this map?'))return;const d=await post(`/api/maps/${id}/cancel`);msg('mpMsg',d.ok?'Cancelled.':d.error,d.ok);load()}
+async function delMap(id){const m=data.maps.find(x=>x.id===id);if(!await uiConfirm(`Delete “${m.name}” and all its images and results?`))return;
   const d=await fetch('/api/maps/'+id,{method:'DELETE'}).then(r=>r.json());msg('mpMsg',d.ok?'Deleted.':d.error,d.ok);if(sel===id)sel=null;load()}
 function pickPhotos(id){const f=document.createElement('input');f.type='file';f.multiple=true;f.accept='image/jpeg';f.onchange=()=>uploadPhotos(id,[...f.files]);f.click()}
 async function uploadPhotos(id,files){let ok=0,bad=[];

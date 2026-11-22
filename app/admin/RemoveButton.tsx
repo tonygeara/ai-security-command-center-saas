@@ -1,4 +1,5 @@
 "use client";
+import {uiAlert,uiConfirm} from "../../lib/dialog";
 import {useState} from "react";
 import {useRouter} from "next/navigation";
 import {createClient} from "../../lib/supabase/client";
@@ -9,11 +10,11 @@ export default function RemoveButton({rpc, args, label, confirmText, goTo, small
   const [busy, setBusy] = useState(false);
   async function run(e: React.MouseEvent){
     e.stopPropagation();
-    if(!confirm(confirmText)) return;
+    if(!await uiConfirm(confirmText)) return;
     setBusy(true);
     const {error} = await createClient().rpc(rpc, args);
     setBusy(false);
-    if(error){ alert(error.message); return; }
+    if(error){ uiAlert(error.message); return; }
     if(goTo) router.push(goTo); else router.refresh();
   }
   return <button className={"ghost danger" + (small ? " small" : "")} disabled={busy} onClick={run}>{busy ? "Removing…" : label}</button>;
