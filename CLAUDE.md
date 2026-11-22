@@ -38,16 +38,20 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (22 November 2026)
 
+- Released: Edge **V11.13.4** (22 Nov): Settings → Updates' Install now button fixed (its id clashed with its
+  function); the updater wakes as soon as the portal sends another version (approval, channel, pin) and checks hourly.
+  PCs on V11.13.1-V11.13.3 keep the old 6-hour timer: one restart (checks 2 minutes after start) or a hand install.
+- Released: Edge **V11.13.3** (22 Nov): the **14-day free trial** (below).
+- Approved for Normal clients: **V11.13.2** (set by the owner on 22 Nov); doumith moved to **Normal** by the owner.
 - Released: Edge **V11.13.2** (22 Nov): the signed-in role links to that role's dashboard (Windows badge: admins on
   online PCs → portal `/go`; website `/go` sends super admins to `/admin`, others to `/portal`).
 - **Plans now set all 13 features** (migrations `20261122120000`, `20261122130000`): Home (4 cameras, phone access,
   replay), Pro (+faces/plates, 1 drone, fly from PC), Business (+3 drones with AI, handoff, Smart patrol, verified
   alarms, 1 DJI Dock), Enterprise (everything, unlimited). A client's own Feature access still wins.
-- **14-day free trial** (V11.13.3, PR #33; Supabase part live since 22 Nov, migration `20261122140000`): Trial = Business
+- **14-day free trial** (V11.13.3, released; Supabase part live since 22 Nov, migration `20261122140000`): Trial = Business
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.13.1 approved for Normal clients; doumith on Test.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -96,7 +100,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 22 Nov (V11.13.2; 80 features; 31 capabilities, 19
+- Features and Capabilities docs current on 22 Nov (V11.13.4; 80 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
