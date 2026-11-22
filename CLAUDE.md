@@ -42,7 +42,7 @@ Google Docs connector isn't available in the session, say so and list the change
   function); the updater wakes as soon as the portal sends another version (approval, channel, pin) and checks hourly.
   PCs on V11.13.1-V11.13.3 keep the old 6-hour timer: one restart (checks 2 minutes after start) or a hand install.
 - Released: Edge **V11.13.3** (22 Nov): the **14-day free trial** (below).
-- Approved for Normal clients: **V11.13.2** (set by the owner on 22 Nov); doumith moved to **Normal** by the owner.
+- Approved for Normal clients: **V11.13.4** (22 Nov); doumith moved to **Normal** by the owner.
 - Released: Edge **V11.13.2** (22 Nov): the signed-in role links to that role's dashboard (Windows badge: admins on
   online PCs → portal `/go`; website `/go` sends super admins to `/admin`, others to `/portal`).
 - **Plans now set all 13 features** (migrations `20261122120000`, `20261122130000`): Home (4 cameras, phone access,
