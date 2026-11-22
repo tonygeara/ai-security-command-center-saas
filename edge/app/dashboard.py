@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.14.2"
+APP_VERSION = "V11.15.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2349,7 +2349,8 @@ import rf
 from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
-import pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
+import satview as satellite_mod
+import pages.satellite, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -3834,6 +3835,7 @@ from pages.live_player import LIVE_PLAYER_HTML  # noqa: E402
 
 HUD_NAV_ITEMS = [
     ("dashboard", "/", "⌂", "Dashboard"),
+    ("satellite", "/satellite", "◍", "Satellite"),
     ("drone", "/drone-control", "✈", "Drone"),
     ("virtual", "/virtual-drones", "◇", "Virtual drones"),
     ("devices", "/setup/add", "＋", "Devices"),
@@ -9207,6 +9209,62 @@ def api_incident_replay(inc_id):
                     "cameras": [{"name": n, "lat": c["lat"], "lon": c["lon"], "view": c["view"]} for n, c in cams.items()],
                     "zones": [{"name": z["name"], "source": z.get("source", ""), "points": z["points"]} for z in nofly_zones()],
                     "maps": maps[:1]})
+
+
+# ---------- Satellite tab (NASA GIBS imagery + FIRMS fire alerts; satellite.py) ----------
+SATELLITE_PINS_FILE = os.path.join(DATA_FOLDER, "satellite_pins.json")
+FIRMS_KEY_FILE = os.path.join(DATA_FOLDER, "firms_key.json")
+SATELLITE_PAGE = hud_page("Satellite", pages.satellite.BODY, active="satellite")
+
+
+@app.route("/satellite")
+def satellite_page():
+    return Response(SATELLITE_PAGE, mimetype="text/html")
+
+
+@app.route("/api/satellite/pins", methods=["GET", "POST"])
+def api_satellite_pins():
+    """GET: the saved pins (and the site, to centre the map). POST (operators, admins): {"pins": [...]} replaces them."""
+    if request.method == "POST":
+        try:
+            pins = satellite_mod.save_pins(SATELLITE_PINS_FILE, (request.get_json(silent=True) or {}).get("pins"))
+        except (TypeError, ValueError) as e:
+            return jsonify({"ok": False, "error": str(e)}), 400
+        audit_record("satellite: pins saved", target="satellite", detail={"pins": len(pins)})
+        return jsonify({"ok": True, "pins": pins})
+    centre = _site_location()[0]
+    return jsonify({"ok": True, "pins": satellite_mod.load_pins(SATELLITE_PINS_FILE), "centre": list(centre) if centre else None})
+
+
+def _firms_get(url, timeout):
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": "AI-Security-Command-Center"})
+    return r.status_code, r.text
+
+
+@app.route("/api/satellite/fires")
+def api_satellite_fires():
+    """Fires (NASA FIRMS) within 50 km of each pin. The key stays on this PC: only whether one is set is sent."""
+    key = satellite_mod.load_key(FIRMS_KEY_FILE)
+    if not key:
+        return jsonify({"ok": True, "key_set": False, "fires": {}, "error": ""})
+    pins = satellite_mod.load_pins(SATELLITE_PINS_FILE)
+    try:
+        days = int(request.args.get("days") or 1)
+    except ValueError:
+        days = 1
+    fires, error = satellite_mod.fires_near(pins, key, days, _firms_get)
+    return jsonify({"ok": not error, "key_set": True, "fires": fires, "error": error})
+
+
+@app.route("/api/satellite/firms-key", methods=["POST"])
+def api_satellite_firms_key():
+    """Admins: save (or, with an empty key, remove) the NASA FIRMS MAP_KEY."""
+    try:
+        on = satellite_mod.save_key(FIRMS_KEY_FILE, (request.get_json(silent=True) or {}).get("key"))
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    audit_record("satellite: FIRMS key " + ("saved" if on else "removed"), target="FIRMS")
+    return jsonify({"ok": True, "key_set": on})
 
 
 @app.route("/coverage")
