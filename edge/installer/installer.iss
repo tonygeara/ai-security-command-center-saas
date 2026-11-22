@@ -118,7 +118,10 @@ begin
       exit;
     end;
   WasRunning := True;
-  Exec(ExpandConstant('{sys}\taskkill.exe'), '/T /F /IM "{#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  { By name only, never /T (the process tree): when the program updates itself, this Setup is one of its child
+    processes, and /T made Setup kill itself, leaving the program stopped and not updated (V11.13.x / V11.14.0-1).
+    The launcher and the dashboard are both this .exe, so /IM stops them all; Docker Desktop keeps running. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM "{#MyAppExeName}"', '', SW_HIDE, ewWaitUntilTerminated, Code);
   for I := 1 to 30 do
   begin
     if not AppRunning() then

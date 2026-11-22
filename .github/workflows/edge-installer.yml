@@ -124,6 +124,24 @@ jobs:
           foreach ($i in 1..30) { Start-Sleep 2; if (Get-Process -Name 'AI-Security-Command-Center' -ErrorAction SilentlyContinue) { $again = $true; break } }
           if (-not $again) { throw 'The app was not started again after the upgrade' }
           Write-Host 'Upgrade over the running app: OK, and the app was started again.'
+          # Self-update (Settings → Updates): the program itself starts Setup, so Setup is its child process.
+          # Stand-in for the program: a copy of cmd.exe with the program's name, which starts Setup as its child.
+          # Setup must stop it by name without killing itself, finish, and start the program again.
+          Stop-Process -Name 'AI-Security-Command-Center' -Force -ErrorAction SilentlyContinue
+          Start-Sleep 3
+          $host2 = Join-Path $env:RUNNER_TEMP 'selfupdate\AI-Security-Command-Center.exe'
+          New-Item -ItemType Directory -Force (Split-Path $host2) | Out-Null
+          Copy-Item "$env:SystemRoot\System32\cmd.exe" $host2
+          $log3 = "$env:RUNNER_TEMP\setup3.log"
+          # (no quotes: cmd /c mangles nested ones; the runner's paths have no spaces)
+          Start-Process $host2 -ArgumentList "/c $setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=$log3 & ping -n 600 127.0.0.1 >nul" -WindowStyle Hidden
+          $done = $false
+          foreach ($i in 1..300) { Start-Sleep 2; if ((Test-Path $log3) -and (Select-String -Path $log3 -Pattern 'Installation process succeeded' -Quiet)) { $done = $true; break } }
+          if (-not $done) { if (Test-Path $log3) { Get-Content $log3 -Tail 40 }; throw 'Self-update: Setup started by the running program did not finish (it was killed with the program?)' }
+          $again = $false
+          foreach ($i in 1..30) { Start-Sleep 2; if (Get-Process -Name 'AI-Security-Command-Center' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }) { $again = $true; break } }
+          if (-not $again) { throw 'Self-update: the program was not started again after the update' }
+          Write-Host 'Self-update started by the running program: OK, and the program was started again.'
           Stop-Process -Name 'AI-Security-Command-Center' -Force -ErrorAction SilentlyContinue
       - uses: actions/upload-artifact@v4
         with:

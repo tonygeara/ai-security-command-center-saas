@@ -25,7 +25,7 @@ const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
 export async function edgeReleases(): Promise<string[]> {
   try {
     const r = await fetch("https://api.github.com/repos/tonygeara/ai-security-command-center-saas/releases?per_page=50",
-      {headers: {Accept: "application/vnd.github+json"}, next: {revalidate: 600}} as RequestInit);
+      {headers: {Accept: "application/vnd.github+json"}, next: {revalidate: 60}} as RequestInit);
     if(!r.ok) return [];
     const rows = await r.json() as {tag_name?: string; draft?: boolean}[];
     const vs = rows.filter(x => !x.draft).map(x => /^edge-v(\d+)\.(\d+)\.(\d+)$/.exec(x.tag_name || "")).filter(Boolean)
