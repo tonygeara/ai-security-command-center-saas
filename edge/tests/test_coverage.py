@@ -65,7 +65,12 @@ def test_coverage_api_and_send_to_spot(d, client, fleet):
     live = client.get(f"/api/live4d?drone={v1}").get_json()
     assert live["cameras"][0]["name"] == "front" and live["cameras"][0]["view"]["fov"] == 60
     far = offset(5000, 0)
-    assert "more than" in client.post("/api/coverage/send", json=far).get_json()["error"]
+    limit = d.DRONE_LIMITS["max_distance_m"]
+    d.DRONE_LIMITS["max_distance_m"] = 500  # the distance-from-home limit (off for now) refuses far spots when set
+    try:
+        assert "more than" in client.post("/api/coverage/send", json=far).get_json()["error"]
+    finally:
+        d.DRONE_LIMITS["max_distance_m"] = limit
     spot = offset(20, 30)
     r = client.post("/api/coverage/send", json=spot).get_json()
     assert r["ok"], r
