@@ -42,7 +42,13 @@ Google Docs connector isn't available in the session, say so and list the change
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
-- In pull request: Edge **V11.19.0**: **Remote ID** on Detector drones (`dronedetect.parse_remoteid` / `RemoteIdTracks`):
+- In pull request: Edge **V11.19.0**: **PX4 / ArduPilot drones over MAVLink** (`mavlink_bridge.py`, pymavlink; each
+  `drone-m<N>` slot is a `MavlinkDrone` linked to the PC like a Drone Link phone; saved in `mavlink_drones.json`;
+  `/api/mavlink` add/list, `/api/mavlink/<slot>` DELETE, `/api/mavlink/scan` for "Others"; admins only, licence drone
+  limit). **Add a drone** page (`/drone-add`, `pages/drone_add.py`, the Drone page's + Add drone opens it): DJI, PX4,
+  ArduPilot, MAVLink/MAVSDK, DJI Dock, Virtual ready; Azur, Asylon, Nightingale, Percepto, Sunflower, Autel, FlytBase,
+  ROS 2 "on request" (`/api/drone/integration-request` → demo-request edge function); "Others" last (scan). Tests use
+  `edge/tests/fake_mavlink.py`. Not yet tried with a real PX4/ArduPilot drone. Also **Remote ID** on Detector drones (`dronedetect.parse_remoteid` / `RemoteIdTracks`):
   receivers send JSON by UDP (switch + port, default 47911, site-network senders only) or HTTP POST
   `/api/remoteid/report` with `X-RemoteID-Token` (open path, token in `drone_detector_settings.json`, admins see it via
   `/api/detector/remoteid-config`, never in settings answers). Remote ID drones = drones `rid:<id>`; one within 40 m of a

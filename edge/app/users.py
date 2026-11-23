@@ -24,7 +24,7 @@ OPEN_PATHS = ("/login", "/logout", "/reset-signin", "/hud.css", "/healthz", "/fa
 ADMIN_ONLY_READ = ("/users", "/api/users", "/api/detector/remoteid-config", "/api/drone/link/pair", "/api/docks/setup", "/audit", "/api/audit")
 # What an operator may change: flying, routes, responses, which live feeds are shown.
 OPERATOR_WRITES = [re.compile(p) for p in (
-    r"^/api/drone/(?!add$|remove$|link/pair)",  # adding, removing and pairing drones: admins
+    r"^/api/drone/(?!add$|remove$|link/pair|integration-request$)",  # adding, removing and pairing drones: admins
     r"^/api/routes(/fly|/stop|/patrol)?$",  # incl. the Run patrol switch
     r"^/api/satellite/pins$",  # Satellite tab pins (the FIRMS key: admins)
     r"^/api/detector/(sites|settings|mine|alarm/ack)$",  # Detector drones: detectors, my drones, acknowledge (the YOLO model: admins)

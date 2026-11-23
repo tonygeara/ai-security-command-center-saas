@@ -2351,7 +2351,7 @@ import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import satview as satellite_mod
 import dronedetect as dronedetect_mod
-import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
+import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -4823,7 +4823,7 @@ _slots_cache = {"at": 0.0, "slots": [DRONE_CAMERA_NAME]}
 def drone_slots():
     """Drone slots in order (first drone first); always at least the first one."""
     if time.time() - _slots_cache["at"] > 5:  # sticks call this 10x per second; the config rarely changes
-        names = {n for n in _frigate_camera_names() if _is_drone_name(n)} | {DRONE_CAMERA_NAME} | set(virtual_drones)
+        names = {n for n in _frigate_camera_names() if _is_drone_name(n)} | {DRONE_CAMERA_NAME} | set(virtual_drones) | set(mavlink_drones)
         _slots_cache.update(at=time.time(), slots=sorted(names, key=lambda n: (is_virtual(n), n != DRONE_CAMERA_NAME, len(n), n)))
     return list(_slots_cache["slots"])
 
@@ -4831,6 +4831,9 @@ def drone_slots():
 def drone_label(slot):
     if str(slot).startswith("drone-v"):  # virtual drones (simulator)
         return "Virtual " + slot[len("drone-v"):]
+    if str(slot).startswith("drone-m"):  # MAVLink drones (PX4, ArduPilot): the name given when added
+        m = mavlink_drones.get(slot) if "mavlink_drones" in globals() else None
+        return (m.name if m and m.name else "MAVLink " + slot[len("drone-m"):])
     return "Drone 1" if slot == DRONE_CAMERA_NAME else "Drone " + (slot[len(DRONE_CAMERA_NAME):] or "?")
 
 
@@ -5473,6 +5476,169 @@ def start_virtual_drones():
             virtual_drones[slot] = v
             v.start()
     _slots_cache["at"] = 0.0
+
+
+# ---------- MAVLink drones (PX4, ArduPilot, other MAVLink autopilots; mavlink_bridge.py) ----------
+# Each one is linked to the PC like a Drone Link phone, so every drone feature works with it.
+import mavlink_bridge  # noqa: E402
+
+mavlink_bridge.host = sys.modules[__name__]
+MAVLINK_PREFIX = "drone-m"
+MAVLINK_FILE = os.path.join(DATA_FOLDER, "mavlink_drones.json")
+mavlink_drones = {}  # slot -> MavlinkDrone
+mavlink_lock = threading.Lock()
+
+
+def _mavlink_saved():
+    try:
+        with open(MAVLINK_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _mavlink_save():
+    data = [{"slot": d.slot, "name": d.name, "connection": d.connection} for d in mavlink_drones.values()]
+    tmp = MAVLINK_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    _replace_file(tmp, MAVLINK_FILE)
+
+
+def _clean_mavlink_connection(c):
+    """udpin:/udpout:/udp:/tcp:host:port only (a telemetry radio, companion computer, network link or simulator)."""
+    c = str(c or "").strip()
+    m = re.fullmatch(r"(udpin|udpout|udp|tcp):([A-Za-z0-9.\-]{1,253}):(\d{2,5})", c)
+    if not m or not 1 <= int(m.group(3)) <= 65535:
+        raise ValueError("Connection must look like udpin:0.0.0.0:14550 or tcp:192.168.1.50:5760.")
+    return c
+
+
+def start_mavlink_drones():
+    for d in _mavlink_saved():
+        slot = str(d.get("slot") or "")
+        if slot.startswith(MAVLINK_PREFIX) and slot not in mavlink_drones:
+            try:
+                drone = mavlink_bridge.MavlinkDrone(slot, _clean_mavlink_connection(d.get("connection")), str(d.get("name") or "")[:40])
+            except ValueError:
+                continue
+            mavlink_drones[slot] = drone
+            drone.start()
+    _slots_cache["at"] = 0.0
+
+
+@app.route("/api/mavlink", methods=["GET", "POST"])
+def api_mavlink():
+    """GET: the MAVLink drones. POST (admins): {"name", "connection"} adds one (within the licence's drone count)."""
+    if request.method == "GET":
+        return jsonify({"ok": True, "drones": [d.summary() for d in mavlink_drones.values()]})
+    if not drone_control_allowed():
+        return jsonify({"ok": False, "error": "Drone control is not included in this licence."}), 403
+    allowed = api_cloud_can_add_source("drone").get_json()
+    if not allowed.get("allowed", True):
+        return jsonify({"ok": False, "error": allowed.get("message") or "The licence's drone limit is reached."}), 409
+    data = request.get_json(silent=True) or {}
+    try:
+        conn = _clean_mavlink_connection(data.get("connection"))
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if any(d.connection == conn for d in mavlink_drones.values()):
+        return jsonify({"ok": False, "error": "A drone already uses that connection."}), 409
+    name = re.sub(r"[\x00-\x1f<>]", "", str(data.get("name") or "")).strip()[:40]
+    with mavlink_lock:
+        n = next(i for i in range(1, 1000) if f"{MAVLINK_PREFIX}{i}" not in mavlink_drones)
+        slot = f"{MAVLINK_PREFIX}{n}"
+        drone_link_token(reset=True, slot=slot)
+        drone = mavlink_bridge.MavlinkDrone(slot, conn, name)
+        mavlink_drones[slot] = drone
+        _mavlink_save()
+    _slots_cache["at"] = 0.0
+    drone.start()
+    audit_record("drone: MAVLink drone added", target=drone_label(slot), detail={"connection": conn})
+    return jsonify({"ok": True, "drone": slot, "label": drone_label(slot)})
+
+
+@app.route("/api/mavlink/<slot>", methods=["DELETE"])
+def api_mavlink_remove(slot):
+    d = mavlink_drones.get(slot)
+    if d is None:
+        return jsonify({"ok": False, "error": "Unknown MAVLink drone."}), 404
+    if d.flying():
+        return jsonify({"ok": False, "error": f"{drone_label(slot)} is flying. Land it first."}), 409
+    label = drone_label(slot)
+    with mavlink_lock:
+        mavlink_drones.pop(slot, None)
+        _mavlink_save()
+    d.close()
+    drone_links.pop(slot, None)
+    set_my_drone(slot, False)
+    try:
+        os.remove(_token_file(slot))
+    except OSError:
+        pass
+    _slots_cache["at"] = 0.0
+    audit_record("drone: MAVLink drone removed", target=label)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/mavlink/scan", methods=["POST"])
+def api_mavlink_scan():
+    """Admins ("Others"): listen a few seconds for MAVLink aircraft on the usual UDP ports and say what each one is."""
+    data = request.get_json(silent=True) or {}
+    ports = [int(p) for p in (data.get("ports") or mavlink_bridge.DEFAULT_SCAN_PORTS) if str(p).isdigit() and 1024 <= int(p) <= 65535][:8]
+    busy = {int(d.connection.rsplit(":", 1)[1]) for d in mavlink_drones.values() if d.connection.startswith(("udpin", "udp:"))}
+    try:
+        found = mavlink_bridge.scan(ports, seconds=float(data.get("seconds") or 6), busy=busy)
+    except ImportError:
+        return jsonify({"ok": False, "error": "MAVLink support is not installed on this PC."}), 500
+    return jsonify({"ok": True, "found": found, "ports": ports})
+
+
+DRONE_ADD_PAGE = hud_page("Add a drone", pages.drone_add.BODY, active="drone")
+
+
+@app.route("/drone-add")
+def drone_add_page():
+    return Response(DRONE_ADD_PAGE, mimetype="text/html")
+
+
+# Drone families that need a partner agreement before they can be connected: the PC sends a request to the provider.
+DRONE_INTEGRATIONS_ON_REQUEST = {
+    "azur": "Azur Drones (Skeyetech)", "asylon": "Asylon (DroneSentry)", "nightingale": "Nightingale Security",
+    "percepto": "Percepto", "sunflower": "Sunflower Labs", "autel": "Autel Robotics (EVO II / Max, EVO Nest)",
+    "flytbase": "FlytBase", "ros2": "ROS 2 robot / drone", "other": "Another drone or dock",
+}
+INTEGRATION_REQUEST_URL = "https://qfnxwuejfotofuxlyqjd.supabase.co/functions/v1/demo-request"
+
+
+@app.route("/api/drone/integration-request", methods=["POST"])
+def api_drone_integration_request():
+    """Admins: ask the provider to connect a drone family that needs a partner agreement (emailed to the provider)."""
+    data = request.get_json(silent=True) or {}
+    key = str(data.get("kind") or "")
+    if key not in DRONE_INTEGRATIONS_ON_REQUEST:
+        return jsonify({"ok": False, "error": "Unknown drone family."}), 400
+    email = str(data.get("email") or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return jsonify({"ok": False, "error": "Give an email address the provider can answer."}), 400
+    details = re.sub(r"[\x00-\x08\x0b-\x1f]", " ", str(data.get("details") or ""))[:1500]
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    family = DRONE_INTEGRATIONS_ON_REQUEST[key]
+    body = {"full_name": who if len(who) >= 2 else "Dashboard user", "email": email,
+            "company": str(data.get("company") or "")[:160],
+            "message": f"Drone integration request from a PC ({VERSION_LABEL}): {family}.\n\n{details}".strip()}
+    audit_record("drone: integration requested", target=family, detail={"email": email})
+    if onprem_mode():
+        return jsonify({"ok": True, "sent": False, "message": f"Noted. Tell your provider you'd like {family} connected (this PC is offline)."})
+    try:
+        r = requests.post(INTEGRATION_REQUEST_URL, json=body, timeout=15)
+        ok = r.ok and r.json().get("ok")
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        return jsonify({"ok": False, "error": "The request couldn't be sent (no internet?). Try again later or contact your provider."}), 502
+    return jsonify({"ok": True, "sent": True, "message": f"Request for {family} sent to your provider. They will contact you at {email}."})
 
 
 @app.route("/api/virtual-drones", methods=["GET", "POST"])
@@ -11376,6 +11542,7 @@ def main():
     _start_v105_recovery()
     start_drone_link()
     start_virtual_drones()
+    start_mavlink_drones()
     start_docks()
     threading.Thread(target=_enforce_source_limits_worker, daemon=True).start()
     start_assistant()

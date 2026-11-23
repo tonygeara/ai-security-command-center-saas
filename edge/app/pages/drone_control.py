@@ -291,9 +291,7 @@ async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no
   $('fleet').querySelector('a[href="/drone-grid"]').style.display=many?'':'none';
   others=d.drones.filter(x=>x.drone!==DRONE&&x.lat&&x.lon);if(typeof drawOthers==='function')drawOthers();
   if(typeof drawDockFleet==='function')drawDockFleet()}catch(e){}}
-async function addDroneSlot(){if(!await uiConfirm('Add another drone? It gets its own pairing QR code and video. Frigate restarts (about 20 s).'))return;
-  const d=await fetch('/api/drone/add',{method:'POST'}).then(r=>r.json());
-  if(d.ok){location.href='/drone-control?drone='+encodeURIComponent(d.name)}else uiAlert(d.error||'Could not add a drone.')}
+function addDroneSlot(){location.href='/drone-add'}  // choose the kind of drone: DJI, PX4, ArduPilot, ... or Others
 let others=[],oMarks=[],droneNames={};
 let vcam=null;
 function vcamUpdate(t){if(!$('vcam')||typeof L==='undefined'||!t.lat)return;
