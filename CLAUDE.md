@@ -47,7 +47,9 @@ Google Docs connector isn't available in the session, say so and list the change
   `/api/remoteid/report` with `X-RemoteID-Token` (open path, token in `drone_detector_settings.json`, admins see it via
   `/api/detector/remoteid-config`, never in settings answers). Remote ID drones = drones `rid:<id>`; one within 40 m of a
   linked drone of ours is that drone; alarm text gives the pilot's position, map shows the pilot. Test sender
-  `edge/tools/remoteid_send.py`. And the 500 m limit off (above).
+  `edge/tools/remoteid_send.py`. **Backup drone switch** (`response_backup`, Drone tab → Drone responses): each response
+  also sends the next ready drone (one-stop route "Backup for <camera>", 25 m to the side, +10 m), released home by
+  `_release_response_backup` on recall or when the response ends. And the 500 m limit off (above).
 - Released and approved 23 Nov (PR #44): Edge **V11.18.1**: Detector drones page fixes: range / on-off / delete weren't saved and renames showed
   the old name (2-s refresh left handlers on stale objects; now looked up by id, list redraw paused only while dragging a
   slider or a select is open). Drag detectors and drones on the map: virtual drone → `uiChoose` Fly there (route to the

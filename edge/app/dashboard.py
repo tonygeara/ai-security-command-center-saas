@@ -6533,6 +6533,7 @@ DRONE_CONTROL_PAGE = DRONE_CONTROL_PAGE[:_body_end] + LIVE_PLAYER_HTML + DRONE_C
 # so the assistant can answer "who came today?" and build the morning briefing offline.
 RESPONSE_SETTINGS_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "response_settings.json")
 RESPONSE_DEFAULTS = {"camera_locations": {}, "altitude_m": 30, "speed_ms": 6, "hover_seconds": 60, "auto_return": True,
+                     "response_backup": False,
                      "min_battery": 35, "briefing_enabled": True, "briefing_time": "08:00", "patrol_schedules": [],
                      # Auto-send the nearest drone when a camera sees someone at night (off until the owner turns it on).
                      "auto_dispatch": False, "auto_person": True, "auto_vehicle": True, "auto_from": "19:00", "auto_to": "06:00",
@@ -6629,7 +6630,7 @@ def save_response_settings(data):
         elif k in ("smart_patrol_stops", "smart_patrol_alt"):
             lo, hi = (2, ROUTE_MAX_POINTS) if k == "smart_patrol_stops" else (10, DRONE_LIMITS["max_altitude_m"])
             v = int(max(lo, min(hi, float(v))))
-        elif k in ("auto_return", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle", "handoff",
+        elif k in ("auto_return", "response_backup", "briefing_enabled", "auto_dispatch", "auto_person", "auto_vehicle", "handoff",
                    "smart_patrol", "smart_patrol_auto_start"):
             v = bool(v)
         elif k in ("auto_from", "auto_to"):
@@ -6784,7 +6785,53 @@ def dispatch_drone(camera, by="dashboard", drone=None, target=None):
         _drone_event(f"Flying round the no-fly zones to {camera} ({len(via)} turn{'s' if len(via) > 1 else ''})", slot)
     _drone_event(f"Drone response to {camera} started ({by})", slot)
     PIPELINE.publish("dispatch", camera=camera, drone=slot, drone_label=drone_label(slot), by=by, lat=loc["lat"], lon=loc["lon"])
-    return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m."}
+    backup_note = _send_response_backup(camera, slot, loc, cfg) if cfg.get("response_backup") else ""
+    return {"ok": True, "drone": slot, "message": f"{who} on its way to {camera} at {int(cfg['altitude_m'])} m.{backup_note}"}
+
+
+RESPONSE_BACKUP_SIDE_M = 25   # the backup hovers this far to the side of the spot…
+RESPONSE_BACKUP_ABOVE_M = 10  # …and this much higher, so the two drones keep apart
+
+
+def _send_response_backup(camera, primary, loc, cfg):
+    """Drone tab switch "Send a backup drone with each response": the next ready drone flies to the same spot (to the side
+    and higher), hovers there with its camera, ready to take over, and goes home when the response ends. Returns a note."""
+    pool = [d for d in drone_slots() if d != primary and d not in _sources_over_limit()
+            and (not is_virtual(d) or _virtual_cfg.get("demo_auto") or is_virtual(primary))]
+    ready = [d for d in pool if not _drone_ready_problem(camera, d)]
+    if not ready:
+        _drone_event(f"No backup drone ready for the response to {camera}", primary)
+        return " No backup drone is ready."
+
+    def far(d):
+        tel = get_link(d)["telemetry"]
+        return _distance_m(tel["lat"], tel["lon"], loc["lat"], loc["lon"]) if tel.get("lat") else math.inf
+    backup = min(ready, key=far)
+    side = {"lat": loc["lat"], "lon": loc["lon"] + RESPONSE_BACKUP_SIDE_M / (111320.0 * max(0.05, math.cos(math.radians(loc["lat"]))))}
+    alt = min(float(DRONE_LIMITS["max_altitude_m"]), float(cfg["altitude_m"]) + RESPONSE_BACKUP_ABOVE_M)
+    r = fly_route(f"Backup for {camera}", {"points": [side], "alt": alt, "speed": cfg["speed_ms"], "pause": 0, "end": "hover",
+                                           "loop": False, "lost_link": "home"}, by="response backup", drone=backup)
+    if not r.get("ok"):
+        _drone_event(f"Backup drone not sent to {camera}: {r.get('error')}", backup)
+        return f" Backup drone not sent: {r.get('error')}"
+    drone_response["backup"] = backup
+    _drone_event(f"Backup for the response to {camera}: flying to the spot ({int(alt)} m, {RESPONSE_BACKUP_SIDE_M} m to the side)", backup)
+    send_telegram(f"🛡 {drone_label(backup)} is going to {camera} as the backup drone.") if telegram_ready() else None
+    return f" Backup: {drone_label(backup)}."
+
+
+def _release_response_backup(why):
+    """The response is over: the backup drone goes home (round no-fly zones)."""
+    backup = drone_response.pop("backup", None)
+    if not backup:
+        return
+    run = run_of(backup)
+    if run is not None:
+        run["stop_home"] = True  # the route thread sends it home as it stops
+        run["stop"] = True
+    else:
+        _go_home_safe(backup, f"backup released ({why})")
+    _drone_event(f"Backup drone returning home ({why})", backup)
 
 
 def _dock_sn(slot):
@@ -7065,6 +7112,7 @@ def recall_drone(reason="recalled"):
     result = _go_home_safe(drone_response["drone"], reason)
     drone_response.update(phase="returning", message=f"Returning home ({reason})")
     _drone_event(f"Drone response: returning home ({reason})", drone_response["drone"])
+    _release_response_backup(reason)  # the backup comes home with it
     return result
 
 
@@ -7086,6 +7134,11 @@ def _drone_response_worker():
             drone_response["log_pending"] = False
             threading.Thread(target=save_response_event, args=(dict(drone_response), time.time()), daemon=True).start()
         if not drone_response["active"]:
+            if drone_response.get("backup"):
+                try:
+                    _release_response_backup(drone_response.get("message") or "response ended")
+                except Exception as e:
+                    print("Backup drone release error:", e)
             continue
         try:
             link = get_link(drone_response["drone"])
