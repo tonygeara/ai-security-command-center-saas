@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.18.0"
+APP_VERSION = "V11.18.1"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -5531,6 +5531,16 @@ def api_virtual_drone(slot):
         elif action == "drop_link":
             v.link_down_until = time.time() + 10
             v._close()
+        elif action == "move":  # put it there now (testing): flying it keeps its height; landed, its home moves too
+            try:
+                lat, lon = float(data["lat"]), float(data["lon"])
+            except (KeyError, TypeError, ValueError):
+                return jsonify({"ok": False, "error": "No position."}), 400
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                return jsonify({"ok": False, "error": "No position."}), 400
+            v.lat, v.lon = lat, lon
+            if not v.flying:
+                v.home = (lat, lon)
         elif action == "home":
             if v.flying:
                 return jsonify({"ok": False, "error": "Land it before moving its home point."}), 409
@@ -5541,7 +5551,7 @@ def api_virtual_drone(slot):
             v.lat, v.lon = v.home
         else:
             return jsonify({"ok": False, "error": "Unknown action."}), 400
-    if action == "home":
+    if action in ("home", "move"):
         _save_virtual_config()
     return jsonify({"ok": True, "drone": v.summary()})
 
