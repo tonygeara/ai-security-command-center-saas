@@ -1,0 +1,141 @@
+"""The Detector drones tab: drone detectors pinned on the map, each with how far it detects, the drones each one sees
+(camera AI with YOLO, or by position for this site's and virtual drones), and the detections log."""
+BODY = r"""
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<style>
+.dt-grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(340px,1fr);gap:16px;align-items:start}
+#dtMap{height:calc(100vh - 220px);min-height:460px;border:1px solid #155879;border-radius:5px;background:#020a10}
+#dtMap.adding{cursor:crosshair}
+.dt-det{border:1px solid #153c56;border-radius:4px;background:#05131d;padding:9px 10px;margin-bottom:8px}
+.dt-det.alarm{border-color:#a3303f;box-shadow:0 0 0 1px #a3303f inset}
+.dt-det.off{opacity:.6}
+.dt-det h4{margin:0;display:flex;align-items:center;gap:8px;font:bold 13px Arial;color:#e9f8ff}
+.dt-det h4 span{flex:1;cursor:pointer}
+.dt-det h4 button{background:none;border:1px solid #155879;color:#9edfff;border-radius:3px;padding:2px 7px;cursor:pointer;font:11px Arial}
+.dt-row{display:flex;gap:8px;align-items:center;margin-top:7px;flex-wrap:wrap;font-size:12px;color:#9edfff}
+.dt-row input[type=range]{flex:1;min-width:120px}
+.dt-row b{color:#fff;min-width:64px;text-align:right;font-variant-numeric:tabular-nums}
+.dt-row select{flex:1;min-width:120px}
+.dt-seen{margin-top:6px;font-size:12px}
+.dt-seen div{padding:3px 0;border-top:1px solid #0f2a3b;color:#ffb3bb}
+.dt-seen div.friend{color:#7dffc1}
+.dt-ev{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #0f2a3b;font-size:12px;color:#cfeeff}
+.dt-ev small{color:#6d8b9d;white-space:nowrap}
+.dt-ev a{white-space:nowrap}
+.dt-pin{width:26px;height:26px;border-radius:50%;background:#05131d;border:2px solid #36cfff;color:#5bd9ff;font:bold 13px/22px Arial;text-align:center;box-shadow:0 0 10px rgba(54,207,255,.5)}
+.dt-pin.alarm{border-color:#ff5d6c;color:#ff5d6c;box-shadow:0 0 14px #ff5d6c;animation:dtBlink 1s infinite}
+@keyframes dtBlink{50%{box-shadow:0 0 2px #ff5d6c}}
+.dt-drone{width:18px;height:18px;border-radius:50%;border:2px solid #fff;font:bold 10px/14px Arial;text-align:center;color:#fff}
+.dt-drone.intruder{background:#e0283e}.dt-drone.friend{background:#1f9c63}
+.dt-label{background:rgba(3,16,26,.9);border:1px solid #155879;color:#e9f8ff;font:bold 11px Arial;padding:2px 6px;border-radius:3px;white-space:nowrap}
+@media(max-width:1000px){.dt-grid{grid-template-columns:1fr}#dtMap{height:60vh}}
+</style>
+<main class="hud-main">
+<div class="page-head"><div><div class="page-kicker">Drones</div><h1 class="page-title">Detector drones</h1>
+<div class="page-sub">Pin drone detectors on the map and set how far each one detects. Your drones are known; any other drone that comes into a detector's range raises the alarm on every screen, with a siren, a spoken warning on this PC and Telegram. A detector with a camera also checks its picture with YOLO.</div></div>
+<div class="actions"><span class="state" id="dtState"><i class="dot warn"></i>LOADING</span></div></div>
+<div class="dt-grid">
+<section class="panel"><div class="panel-body"><div id="dtMap"></div>
+<div class="muted" style="margin-top:8px;font-size:12px">Circles: each detector's range. Red dot: unknown drone · green dot: one of your drones. Drag a detector to move it.</div></div></section>
+<div>
+<section class="panel"><div class="panel-head"><div class="panel-title">⌖ Detectors</div><div class="live" id="dtCount"></div></div><div class="panel-body">
+<div class="actions" style="margin-bottom:10px"><button class="hud-btn primary" id="dtAdd" onclick="startAdd()">＋ Add detector</button><span class="muted" id="dtHint" style="display:none">Click the map where the detector is (Esc cancels).</span></div>
+<div id="dtList"></div><div id="dtMsg" class="hud-msg"></div>
+</div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">✈ My drones</div><div class="live" id="mineCount"></div></div><div class="panel-body">
+<div class="muted" style="font-size:12px;margin-bottom:6px">Your drones never raise the alarm. A drone added later (real or virtual) is unknown until you mark it as yours; a removed drone leaves this list.</div>
+<div id="mineList"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">🛸 Detections</div><div class="live" id="dtEvCount"></div></div><div class="panel-body">
+<div id="dtEvents" style="max-height:300px;overflow:auto"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">⚙ Detection</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Telegram alerts</b><div class="muted">Each detection also goes to Telegram (camera detections with the picture).</div></div><input class="toggle" type="checkbox" id="setTg" onchange="saveSettings()"></div>
+<div class="hud-row"><div><b>Camera AI (YOLO) model</b><div class="muted" id="modelState">–</div></div></div>
+<div class="muted" style="font-size:12px">Admins: upload a YOLO model trained on drones, exported as ONNX (YOLOv5, YOLOv8 or YOLO11, 640×640). Then pick a camera on a detector. Check the model's licence allows your use.</div>
+<div class="actions" style="margin-top:8px"><input type="file" id="modelFile" accept=".onnx" style="flex:1;min-width:160px"><button class="hud-btn" onclick="uploadModel()">Upload model</button><button class="hud-btn danger" onclick="removeModel()">Remove</button></div>
+<div class="dt-row"><span>Class names</span><input id="setClasses" placeholder="drone" style="flex:1" onchange="saveSettings()"><span>Min. score</span><input id="setScore" type="number" min="0.1" max="0.95" step="0.05" style="width:70px" onchange="saveSettings()"></div>
+<div id="setMsg" class="hud-msg"></div>
+</div></section>
+</div></div>
+</main>
+<script src="/vendor/leaflet/leaflet.js"></script><script src="/mapsearch.js"></script>
+<script>
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+const fmtM=m=>m>=1000?(m/1000).toFixed(m%1000?1:0)+' km':m+' m';
+let data={detectors:[],seen:{},drones:[],events:[],cameras:[]},dets=[],adding=false,saveT=null,fitted=false,editing=0;
+const map=L.map('dtMap',{maxZoom:20}).setView([33.9,35.5],15);
+L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:20,maxNativeZoom:19}).addTo(map);
+const detLayer=L.layerGroup().addTo(map),droneLayer=L.layerGroup().addTo(map);
+
+function msg(id,t,ok){const e=$(id);e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
+function alarmOf(id){return (data.seen[id]||[]).some(x=>x.intruder)}
+function drawMap(){detLayer.clearLayers();
+  dets.forEach(d=>{const al=alarmOf(d.id);
+    L.circle([d.lat,d.lon],{radius:d.range_m,color:al?'#ff5d6c':'#36cfff',weight:2,fillOpacity:d.enabled?.08:.02,dashArray:d.enabled?null:'6 6'}).addTo(detLayer);
+    L.marker([d.lat,d.lon],{draggable:true,icon:L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div class="dt-pin${al?' alarm':''}">⌖</div>`})})
+      .bindTooltip(esc(d.name)+' · '+fmtM(d.range_m),{permanent:true,direction:'top',offset:[0,-14],className:'dt-label'})
+      .on('dragend',e=>{const ll=e.target.getLatLng();d.lat=+ll.lat.toFixed(6);d.lon=+ll.lng.toFixed(6);save('Moved.')}).addTo(detLayer)});
+  droneLayer.clearLayers();
+  (data.drones||[]).forEach(x=>{const lines=dets.filter(d=>(data.seen[d.id]||[]).some(s=>s.slot===x.slot));
+    lines.forEach(d=>L.polyline([[d.lat,d.lon],[x.lat,x.lon]],{color:x.intruder?'#ff5d6c':'#26ee89',weight:1.5,dashArray:'4 4'}).addTo(droneLayer));
+    L.marker([x.lat,x.lon],{icon:L.divIcon({className:'',iconSize:[18,18],iconAnchor:[9,9],html:`<div class="dt-drone ${x.intruder?'intruder':'friend'}">✈</div>`})})
+      .bindTooltip(`${esc(x.label)}${x.virtual?' (virtual)':''} · ${x.alt} m ${x.intruder?'· UNKNOWN DRONE':'· yours'}`).addTo(droneLayer)})}
+function renderList(){
+  $('dtCount').textContent=dets.length+' DETECTOR'+(dets.length===1?'':'S');
+  const cams=data.cameras||[];
+  $('dtList').innerHTML=dets.length?dets.map((d,i)=>{const seen=data.seen[d.id]||[],al=seen.some(x=>x.intruder),cc=(data.camera_checks||{})[d.id];
+    return `<div class="dt-det${al?' alarm':''}${d.enabled?'':' off'}" data-i="${i}">
+      <h4><span data-act="go">${al?'🚨 ':''}${esc(d.name)}</span><input type="checkbox" class="toggle" data-act="on" ${d.enabled?'checked':''} title="On / off"><button data-act="ren">✎</button><button data-act="del">✕</button></h4>
+      <div class="dt-row"><span>Range</span><input type="range" min="20" max="10000" step="10" value="${d.range_m}" data-act="range" title="How far this detector sees drones: about 50–150 m for a normal camera, up to ~1 km for a zoom camera"><b>${fmtM(d.range_m)}</b></div>
+      <div class="dt-row"><span>Camera</span><select data-act="cam"><option value="">None (position only)</option>${cams.map(c=>`<option ${c===d.camera?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
+      ${d.camera&&cc?`<div class="muted" style="font-size:11px;margin-top:4px">YOLO checked ${new Date(cc.at*1000).toLocaleTimeString()}: ${cc.count?cc.count+' drone(s), '+Math.round(cc.best*100)+'%':'no drone'}</div>`:''}
+      <div class="dt-seen">${seen.length?seen.map(x=>`<div class="${x.intruder?'':'friend'}">${x.intruder?'🛸 Unknown drone':'✈ Yours'}: ${esc(x.label)}${x.virtual?' (virtual)':''} · ${x.distance_m} m · ${x.bearing}° · ${x.alt} m high</div>`).join(''):'<span class="muted">No drone in range.</span>'}</div></div>`}).join('')
+    :'<div class="muted">No detectors yet. Press <b>＋ Add detector</b> and click the map.</div>';
+  document.querySelectorAll('.dt-det').forEach(el=>{const d=dets[+el.dataset.i];
+    el.querySelector('[data-act=go]').onclick=()=>map.setView([d.lat,d.lon],Math.max(map.getZoom(),15));
+    el.querySelector('[data-act=on]').onchange=e=>{d.enabled=e.target.checked;save(d.enabled?'Detector on.':'Detector off.')};
+    el.querySelector('[data-act=ren]').onclick=async()=>{const n=await uiPrompt('New name for this detector:',d.name);if(n&&n.trim()){d.name=n.trim();save('Renamed.')}};
+    el.querySelector('[data-act=del]').onclick=async()=>{if(await uiConfirm('Delete detector “'+d.name+'”?')){dets=dets.filter(x=>x!==d);save('Deleted.')}};
+    const r=el.querySelector('[data-act=range]');r.oninput=()=>{editing=Date.now();d.range_m=+r.value;r.nextElementSibling.textContent=fmtM(d.range_m);drawMap()};r.onchange=()=>save('Range: '+fmtM(d.range_m)+'.');
+    el.querySelector('[data-act=cam]').onchange=e=>{d.camera=e.target.value;save(d.camera?'Camera '+d.camera+' checked by YOLO.':'Camera removed.')}})}
+function renderEvents(){const ev=data.events||[];$('dtEvCount').textContent=ev.length?ev.length+' RECENT':'NONE';
+  $('dtEvents').innerHTML=ev.length?ev.map(e=>`<div class="dt-ev"><small>${new Date(e.at*1000).toLocaleTimeString()}</small><span style="flex:1">${e.kind==='camera'?'📷':'📡'} ${esc(e.text)}</span>${e.photo?`<a href="/api/detector/photo/${e.id}" target="_blank" rel="noopener">Picture</a>`:''}</div>`).join(''):'<div class="muted">No detections yet.</div>'}
+function save(okText){clearTimeout(saveT);saveT=setTimeout(async()=>{
+  const d=await fetch('/api/detector/sites',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({detectors:dets})}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer from the PC.'}));
+  if(d.ok){dets=d.detectors;msg('dtMsg',okText,true)}else msg('dtMsg',d.error||'Not saved.',false);await load()},250)}
+function startAdd(){adding=!adding;$('dtMap').classList.toggle('adding',adding);$('dtHint').style.display=adding?'':'none';$('dtAdd').textContent=adding?'Cancel':'＋ Add detector'}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&adding)startAdd()});
+map.on('click',async e=>{if(!adding)return;startAdd();
+  const name=await uiPrompt('Name for this detector:','Detector '+(dets.length+1));if(!name||!name.trim())return;
+  const r=await uiPrompt('How far does it detect drones (metres, 20–10000)?','500');if(r===null)return;
+  dets.push({name:name.trim(),lat:+e.latlng.lat.toFixed(6),lon:+e.latlng.lng.toFixed(6),range_m:Math.max(20,Math.min(10000,parseInt(r)||500)),camera:'',enabled:true});
+  save('Detector added.')});
+async function saveSettings(){const d=await fetch('/api/detector/settings',{method:'POST',headers:{'content-type':'application/json'},
+  body:JSON.stringify({telegram:$('setTg').checked,classes:$('setClasses').value||'drone',min_score:+$('setScore').value||0.45})}).then(r=>r.json()).catch(()=>({ok:false}));
+  msg('setMsg',d.ok?'Saved.':(d.error||'Only operators and admins can change this.'),d.ok);load()}
+async function uploadModel(){const f=$('modelFile').files[0];if(!f){msg('setMsg','Choose the .onnx file first.',false);return}
+  msg('setMsg','Uploading and checking the model…');const fd=new FormData();fd.append('model',f);
+  const r=await fetch('/api/detector/model',{method:'POST',body:fd});const d=await r.json().catch(()=>({ok:false}));
+  msg('setMsg',d.ok?'Model installed: cameras on detectors are now checked by YOLO.':(r.status===403?'Only an admin can upload a model.':d.error||'Not installed.'),d.ok);load()}
+async function removeModel(){if(!await uiConfirm('Remove the YOLO model? Cameras stop being checked for drones.'))return;
+  const r=await fetch('/api/detector/model',{method:'DELETE'});msg('setMsg',r.ok?'Model removed.':'Only an admin can remove the model.',r.ok);load()}
+async function load(){let d;try{d=await fetch('/api/detector',{cache:'no-store'}).then(r=>r.json())}catch(e){$('dtState').innerHTML='<i class="dot bad"></i>PC NOT ANSWERING';return}
+  data=d;if(Date.now()-editing>1500)dets=d.detectors;
+  const alarms=dets.filter(x=>alarmOf(x.id)).length;
+  $('dtState').innerHTML=alarms?`<i class="dot bad"></i>${alarms} DETECTOR${alarms>1?'S':''} SEE AN INTRUDER`:`<i class="dot good"></i>${dets.filter(x=>x.enabled).length} WATCHING · NO INTRUDER`;
+  if(document.activeElement?.tagName!=='INPUT'){$('setTg').checked=d.settings.telegram;$('setClasses').value=d.settings.classes.join(', ');$('setScore').value=d.settings.min_score}
+  $('modelState').textContent=d.model.installed?(d.model.error?'⚠ '+d.model.error:`Installed (${d.model.size_mb} MB): detectors with a camera are checked every 3 s.`):'No model: detectors see drones by position only.';
+  $('modelState').style.color=d.model.installed&&!d.model.error?'#7dffc1':d.model.error?'#ff9ea8':'';
+  if(!fitted){fitted=true;if(dets.length)map.fitBounds(dets.map(x=>L.circle([x.lat,x.lon],{radius:x.range_m}).addTo(map)).map(c=>{const b=c.getBounds();map.removeLayer(c);return b}).reduce((a,b)=>a.extend(b)),{padding:[30,30]});
+    else{const f=window.mapFocus&&mapFocus.get();if(f)map.setView([f.lat,f.lon],16);else if(d.centre)map.setView(d.centre,16)}
+    if(window.addMapSearch)addMapSearch(map)}
+  drawMap();if(!document.querySelector('.dt-det :focus'))renderList();renderEvents();renderMine()}
+function renderMine(){const f=data.fleet||[];$('mineCount').textContent=f.filter(x=>x.mine).length+' OF '+f.length;
+  $('mineList').innerHTML=f.length?f.map(x=>`<div class="hud-row"><div><b>${esc(x.label)}</b>${x.virtual?' <span class="muted">(virtual)</span>':''}<div class="muted" style="color:${x.mine?'#7dffc1':'#ff9ea8'}">${x.mine?'✓ Mine: never raises the alarm':'⚠ Unknown: raises the alarm in a detector\'s range'}</div></div>`
+    +`<button class="hud-btn${x.mine?'':' primary'}" data-slot="${esc(x.slot)}" data-mine="${x.mine?0:1}">${x.mine?'Not mine':'Mark as mine'}</button></div>`).join(''):'<div class="muted">No drones yet.</div>';
+  document.querySelectorAll('#mineList button').forEach(b=>b.onclick=async()=>{const mine=b.dataset.mine==='1';
+    if(!mine&&!await uiConfirm('Treat this drone as unknown? It will raise the alarm when it flies into a detector\'s range.'))return;
+    const r=await fetch('/api/detector/mine',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({drone:b.dataset.slot,mine})});
+    msg('setMsg',r.ok?(mine?'Marked as yours.':'Marked as unknown.'):'Only operators and admins can change this.',r.ok);load()})}
+load();setInterval(load,2000);
+</script>"""

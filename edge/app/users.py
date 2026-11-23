@@ -26,6 +26,7 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/drone/(?!add$|remove$|link/pair)",  # adding, removing and pairing drones: admins
     r"^/api/routes(/fly|/stop|/patrol)?$",  # incl. the Run patrol switch
     r"^/api/satellite/pins$",  # Satellite tab pins (the FIRMS key: admins)
+    r"^/api/detector/(sites|settings|mine|alarm/ack)$",  # Detector drones: detectors, my drones, acknowledge (the YOLO model: admins)
     r"^/api/response/(dispatch|recall)$",
     r"^/api/assistant/briefing$",
     r"^/api/sources/[^/]+/feed$",
