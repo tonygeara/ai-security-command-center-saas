@@ -15,6 +15,20 @@ export default function Home(){return <main className="flightLanding" id="top">
 <section className="flightHero" id="content"><div><p className="flightEyebrow">● DRONE OPERATIONS + AI SECURITY</p><h1>Your site.<br/>Your fleet.<br/><em>One command centre.</em></h1><p className="flightLead">Bring drone patrols, live video, telemetry and AI security into one local operating picture. Plan with purpose. Stay in control.</p><div className="flightActions"><a className="flightButton" href="#request-demo">Request a demo ↗</a><a className="flightTextLink" href="#operations">Explore operations ↓</a></div><p className="heroFoot">WINDOWS EDGE AGENT / COMPATIBLE DRONE LINK / PILOT OVERSIGHT</p></div><figure className="operationsPreview dashboardHero"><div className="previewTop"><span>COMMAND CENTRE DASHBOARD</span><b>ILLUSTRATIVE PREVIEW</b></div><a href="#demo" aria-label="Watch the Command centre dashboard video"><Image src="/images/command-centre-dashboard-hero.jpg" alt="Command centre dashboard from the video, showing drone video, site activity and AI identification panels" width={1280} height={720} priority sizes="(max-width: 800px) 90vw, 50vw"/></a><figcaption>Main dashboard from the Command centre video. Illustrative concept.</figcaption></figure></section>
 <div className="flightStrip" aria-label="Platform capabilities"><span>FLEET VISIBILITY</span><span>SAVED ROUTES</span><span>SCHEDULED PATROLS</span><span>LIVE TELEMETRY</span><span>LOCAL AI</span></div>
 <section className="flightSection" id="operations"><div className="sectionIntro"><div><p className="flightEyebrow">01 / THE OPERATING PICTURE</p><h2>From the perimeter<br/>to the bigger picture.</h2></div><p>Connect the tools that help your team see, plan and respond. Drone operations live in the Windows dashboard; your cloud portal keeps account and device setup together.</p></div><div className="capabilityGrid">{features.map(([n,title,description])=><article key={n}><span className="capabilityNumber">{n}<span aria-hidden="true">↗</span></span><h3>{title}</h3><p>{description}</p></article>)}</div></section>
+<section className="flightSection dockIntegration" id="drone-detection" aria-labelledby="drone-detection-title">
+  <div className="dockIntegrationIntro">
+    <h2 id="drone-detection-title">Detect drones near your site</h2>
+    <p className="flightLead">Monitor for unfamiliar drones using configured detectors and camera-based AI. Map detector coverage, distinguish your registered fleet from unknown drones, and review detections in the command centre.</p>
+    <p className="flightLead">When the system detects an unknown drone in a monitored area, it can alert operators in the dashboard and through Telegram.</p>
+  </div>
+  <figure className="dockIntegrationVideo">
+    <video controls playsInline preload="none" poster="/videos/drone-detection.jpg" aria-label="Illustrative drone detection demo">
+      <source src="/videos/drone-detection.mp4" type="video/mp4"/>
+      Your browser does not support embedded video. <a href="/videos/drone-detection.mp4">Download the drone detection video</a>
+    </video>
+    <figcaption className="droneDetectionCaption">Illustrative drone detection demo</figcaption>
+  </figure>
+</section>
 <section className="flightSection dockIntegration" id="dji-dock-4" aria-labelledby="dock-integration-title">
   <div className="dockIntegrationIntro">
     <h2 id="dock-integration-title">AI Security Command Center + DJI Dock 4</h2>
