@@ -12,7 +12,9 @@ import {BlockClient, PcName, PcSwitch, RenameClient, SourceSwitch} from "../../D
 
 const FEATURES: [string, string][] = [["camera_ai", "Camera AI"], ["face_ai", "Face AI"], ["lpr", "Licence plate reading"], ["drone_live", "Drone live"], ["drone_ai", "Drone AI"], ["drone_tracking", "Drone tracking"], ["drone_control", "Fly drone from PC"], ["drone_dock", "DJI Docks"],
   ["handoff", "Camera-to-drone handoff"], ["smart_patrol", "Smart patrol"], ["verified_alarms", "Drone-verified alarms"],
-  ["incident_replay", "4D incident replay"], ["phone_access", "Phone access"]];
+  ["incident_replay", "4D incident replay"], ["phone_access", "Phone access"], ["satellite", "Satellite view"], ["drone_detector", "Detector drones"]];
+// Off for a client until switched on here (or included in its plan).
+const OFF_UNTIL_ON = new Set(["drone_dock", "satellite", "drone_detector"]);
 // Newer features: until set for a client, they are included (as before these switches existed).
 const PREMIUM = new Set(["handoff", "smart_patrol", "verified_alarms", "incident_replay", "phone_access"]);
 const FEATURE_LABEL = Object.fromEntries(FEATURES);
@@ -63,7 +65,7 @@ export default async function ClientPage({params}: {params: Promise<{key: string
           const follows = k === "drone_control" && !ov && !def;
           const included = PREMIUM.has(k) && !ov && !def;
           const initial = ov?.enabled ?? def?.enabled ?? (follows ? !!live?.enabled : included);
-          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}{k === "drone_dock" && !ov && !def && <span className="muted"> · off until switched on</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial} limit={ov?.limit_value ?? def?.limit_value ?? null}/></p>; })}</article>
+          return <p key={k} className="toggleRow"><span>{label}{lim != null && <span className="muted"> · max {lim}</span>}{follows && <span className="muted"> · follows Drone live until set</span>}{included && <span className="muted"> · included until set</span>}{OFF_UNTIL_ON.has(k) && !ov && !def && <span className="muted"> · off until switched on</span>}</span><FeatureToggle orgId={o.id} feature={k} initial={initial} limit={ov?.limit_value ?? def?.limit_value ?? null}/></p>; })}</article>
         <article className="card"><h3>Updates</h3>
           <UpdateChannel orgId={o.id} initialChannel={upd?.update_channel || "normal"} initialPinned={upd?.pinned_version ?? null}
             versions={versions} approved={policy?.approved_version ?? null}/></article>

@@ -5,7 +5,7 @@ import {useRouter} from "next/navigation";
 import {createClient} from "../../../lib/supabase/client";
 
 type Lic = Record<string, any>;
-const FEATURES: [string, string][] = [["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","Plate reading (LPR)"],["drone_live","Drone live"],["drone_ai","Drone AI"],["drone_tracking","Drone tracking"],["drone_control","Fly drone from PC"],["drone_dock","DJI Docks"],["handoff","Camera-to-drone handoff"],["smart_patrol","Smart patrol"],["verified_alarms","Drone-verified alarms"],["incident_replay","4D incident replay"],["phone_access","Phone access"]];
+const FEATURES: [string, string][] = [["camera_ai","Camera AI"],["face_ai","Face AI"],["lpr","Plate reading (LPR)"],["drone_live","Drone live"],["drone_ai","Drone AI"],["drone_tracking","Drone tracking"],["drone_control","Fly drone from PC"],["drone_dock","DJI Docks"],["handoff","Camera-to-drone handoff"],["smart_patrol","Smart patrol"],["verified_alarms","Drone-verified alarms"],["incident_replay","4D incident replay"],["phone_access","Phone access"],["satellite","Satellite view"],["drone_detector","Detector drones"]];
 // The newer features: a licence record saved before they were listed had them all (nothing could turn them off).
 const PREMIUM = ["handoff","smart_patrol","verified_alarms","incident_replay","phone_access"];
 const DEFAULT_FEATURES = ["camera_ai","face_ai","lpr","drone_live","drone_ai","drone_tracking","handoff","smart_patrol","verified_alarms","incident_replay","phone_access"];
@@ -84,7 +84,8 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         // The Windows app enforces these through the client's portal entitlements.
         for(const [feature] of FEATURES){
           // DJI Docks: on only with at least one dock; the dock count is its limit (each dock carries its own drone).
-          const on = f.features.includes(feature) && (feature === "drone_dock" ? docks > 0 : !feature.startsWith("drone") || drones > 0);
+          // Detector drones doesn't need drones of the client's own (it watches for other people's).
+          const on = f.features.includes(feature) && (feature === "drone_dock" ? docks > 0 : feature === "drone_detector" || !feature.startsWith("drone") || drones > 0);
           const limit = feature === "camera_ai" ? cameras : feature === "drone_live" ? drones : feature === "drone_dock" ? docks : null;
           const {error: e} = await sb.rpc("set_feature_override", {target_org: f.organization_id, target_feature: feature, target_enabled: feature === "camera_ai" || on, target_limit: limit});
           if(e) throw e;

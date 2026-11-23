@@ -154,3 +154,29 @@ def test_camera_yolo_detection(det, client, tmp_path, monkeypatch):
     d.detector_tick(now=time.time() + 4)
     assert len([e for e in client.get("/api/detector").get_json()["events"] if e["kind"] == "camera"]) == 1  # no repeat within 60 s
     assert client.delete("/api/detector/model").get_json()["ok"] and not os.path.exists(d.DETECTOR_MODEL_FILE)
+
+
+def test_tab_licences_and_settings_switches(det, client, monkeypatch):
+    """Satellite and Detector drones are licence features (off unless switched on for the client) with a Settings switch."""
+    d = det
+    monkeypatch.setattr(d, "feature_licensed", lambda key: key == "satellite")  # licensed: Satellite only
+    html = client.get("/settings").get_data(as_text=True)
+    assert '<style>a[href="/drone-detector"]{display:none!important}</style>' in html  # tab hidden
+    assert 'a[href="/satellite"]{display' not in html and 'id="droneAlarm"' not in html
+    r = client.get("/drone-detector")
+    assert r.status_code == 403 and "isn't included in this PC's licence" in r.get_data(as_text=True)
+    assert client.get("/api/detector").status_code == 403
+    assert client.get("/api/detector/alarm").get_json()["alarms"] == []  # the alarm check stays quiet
+    assert d.detector_tick() == {}
+    assert client.get("/satellite").status_code == 200
+    lic = client.get("/api/customer/settings").get_json()["_licensed"]
+    assert lic == {"satellite": True, "drone_detector": False}
+    # Licensed, but switched off in Settings on this PC.
+    cfg = client.get("/api/customer/settings").get_json()
+    try:
+        client.post("/api/customer/settings", json={**cfg, "satellite_tab": False})
+        assert client.get("/satellite").status_code == 403 and "switched off in Settings" in client.get("/satellite").get_data(as_text=True)
+        assert client.get("/api/satellite/pins").status_code == 403
+    finally:
+        client.post("/api/customer/settings", json={**cfg, "satellite_tab": True})
+    assert client.get("/satellite").status_code == 200

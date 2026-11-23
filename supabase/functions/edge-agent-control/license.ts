@@ -3,7 +3,7 @@
 // Must match PUBLIC_KEY_B64 in edge/app/licensing.py.
 const APP_PUBLIC_KEY_B64 = "FdDMvjooLB3N8bOWc6mjnX1AjPcZHcQ8B5da/E01Lb4=";
 export const FEATURES = ["camera_ai", "face_ai", "lpr", "drone_live", "drone_ai", "drone_tracking", "drone_control", "drone_dock",
-  "handoff", "smart_patrol", "verified_alarms", "incident_replay", "phone_access"];
+  "handoff", "smart_patrol", "verified_alarms", "incident_replay", "phone_access", "satellite", "drone_detector"];
 export const MACHINE_ID = /^[0-9A-F]{4}(-[0-9A-F]{4}){4}$/;
 
 // Same bytes as Python json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).
