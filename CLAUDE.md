@@ -38,13 +38,17 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (22 November 2026)
 
-- In pull request: Edge **V11.15.0**: **Satellite** tab next to Dashboard (`/satellite`, `pages/satellite.py`,
-  `satview.py`): named pins (`satellite_pins.json`), NASA GIBS imagery in the browser (VIIRS NOAA-20 / MODIS Terra true
-  colour, fires via GIBS WMS, clouds), day slider (0–30 days), per-pin view; optional NASA FIRMS fire alerts within 50 km
-  of each pin (admin-set MAP_KEY in `firms_key.json`, fetched by the PC, never sent to the browser).
+- In pull request: Edge **V11.16.0**: Satellite tab → **Live cameras**: public webcams worldwide from the Windy Webcams
+  API v3 (`/api/satellite/webcams?bbox=n,e,s,w`, admin-set key in `windy_key.json`, sent by the PC as `x-windy-api-key`,
+  cached 5 min because free picture links expire after ~10). Markers + list + viewer (Windy live or timelapse player
+  in an iframe), Windy credit on every view. Only owner-published webcams, never exposed private CCTV.
+- Released and approved 22 Nov (PR #39): Edge **V11.15.0**: **Satellite** tab next to Dashboard (`/satellite`,
+  `pages/satellite.py`, `satview.py`): named pins (`satellite_pins.json`), NASA GIBS imagery in the browser (VIIRS NOAA-20
+  / MODIS Terra true colour, fires via GIBS WMS, clouds), day slider (0–30 days), per-pin view; optional NASA FIRMS fire
+  alerts within 50 km of each pin (admin-set MAP_KEY in `firms_key.json`, fetched by the PC, never sent to the browser).
 - Merged and released 22 Nov (PR #38): Edge **V11.14.2**: self-updates (Check now / Install now / automatic) killed
   themselves: the installer's `taskkill /T` also killed Setup, a child of the program; now `/F /IM` only. CI "Upgrade
-  test" now also runs a self-update. **V11.14.2 approved** for Normal clients.
+  test" now also runs a self-update.
 - Merged 22 Nov (PR #36): Edge **V11.14.1**: switching Run patrol off sends those drones home (was: hover).
 - Merged 22 Nov (PR #35): Edge **V11.14.0**: **Run patrol** switch beside the Drone Control live view and on the Drone Grid
   (`/api/routes/patrol`, `patrol_mode.json`): every connected/virtual drone flies its own last route (last flown or
@@ -61,7 +65,7 @@ Google Docs connector isn't available in the session, say so and list the change
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.14.2 approved for Normal clients (22 Nov); doumith is on **Normal**.
+- V11.15.0 approved for Normal clients (22 Nov); doumith is on **Normal**.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -110,7 +114,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 22 Nov (V11.14.2 released, V11.15.0 in pull request; 83 features; 31 capabilities, 19
+- Features and Capabilities docs current on 22 Nov (V11.15.0 released, V11.16.0 in pull request; 84 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.

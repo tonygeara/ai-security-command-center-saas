@@ -1,4 +1,5 @@
-"""Satellite tab (satview): named pins over NASA satellite imagery, with optional NASA FIRMS fire alerts near them.
+"""Satellite tab (satview): named pins over NASA satellite imagery, with optional NASA FIRMS fire alerts near them,
+and public webcams worldwide (Windy Webcams).
 
 Imagery comes from NASA GIBS (free, no key), loaded by the browser straight from NASA: true colour from the
 VIIRS (NOAA-20) or MODIS (Terra) satellites once a day, plus a clouds and a fires overlay. Near real time, not
@@ -60,7 +61,8 @@ def clean_pin(p):
     return {"id": pid, "name": name, "lat": round(lat, 6), "lon": round(lon, 6),
             "layer": p.get("layer") if p.get("layer") in LAYERS else "truecolor",
             "sat": p.get("sat") if p.get("sat") in SATELLITES else "viirs",
-            "days_ago": max(0, min(MAX_DAYS_AGO, int(float(p.get("days_ago") or 0))))}
+            # Yesterday unless chosen: today's picture is still being filled in (and empty at night).
+            "days_ago": max(0, min(MAX_DAYS_AGO, int(float(1 if p.get("days_ago") is None else p.get("days_ago")))))}
 
 
 def load_pins(path):
@@ -92,13 +94,14 @@ def load_key(path):
     return str((_read(path, {}) or {}).get("map_key") or "")
 
 
-def save_key(path, key):
+def save_key(path, key, what="FIRMS MAP_KEY (letters and digits, usually 32)"):
     key = str(key or "").strip()
-    if key and not re.fullmatch(r"[A-Za-z0-9]{16,64}", key):
-        raise ValueError("That doesn't look like a FIRMS MAP_KEY (letters and digits, usually 32).")
+    if key and not re.fullmatch(r"[A-Za-z0-9_-]{16,80}", key):
+        raise ValueError(f"That doesn't look like a {what}.")
     with _lock:
         _write(path, {"map_key": key} if key else {})
     _cache.clear()
+    _cam_cache.clear()
     return bool(key)
 
 
@@ -161,3 +164,64 @@ def fires_near(pins, key, days, get, now=time.time):
                 near.append({**f, "km": round(d, 1)})
         out[p["id"]] = sorted(near, key=lambda f: f["km"])[:200]
     return out, (errors[0] if errors else "")
+
+
+# ---------- Public webcams worldwide (Windy Webcams API v3) ----------
+# Only webcams their owners publish (traffic, city, tourism, weather, ski): the Windy catalogue, never private CCTV
+# that happens to be reachable on the internet. Needs a free Windy key (api.windy.com/keys), kept on this PC.
+# Terms: link every picture to the webcam's Windy page or player and credit Windy; picture links expire after about
+# 10 minutes on the free plan, so they're only cached for 5.
+WINDY_URL = "https://api.windy.com/webcams/api/v3/webcams"
+WINDY_CACHE_S = 300
+_cam_cache = {}
+
+
+def _picture(images):
+    """The largest picture the plan gives (the free plan: small sizes only)."""
+    cur = (images or {}).get("current") or {}
+    sizes = (images or {}).get("sizes") or {}
+    best = sorted(((sizes.get(k) or {}).get("width") or 0, k) for k, v in cur.items() if isinstance(v, str) and v.startswith("https://"))
+    return cur[best[-1][1]] if best else ""
+
+
+def clean_webcam(w):
+    loc = w.get("location") or {}
+    player = w.get("player") or {}
+    try:
+        lat, lon = float(loc["latitude"]), float(loc["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    https = lambda v: v if isinstance(v, str) and v.startswith("https://") else ""  # noqa: E731
+    return {"id": str(w.get("webcamId") or ""), "title": str(w.get("title") or "Webcam")[:120],
+            "lat": lat, "lon": lon, "city": str(loc.get("city") or ""), "country": str(loc.get("country") or ""),
+            "status": str(w.get("status") or ""), "updated": str(w.get("lastUpdatedOn") or ""),
+            "image": https(_picture(w.get("images"))), "live": https(player.get("live")),
+            "player": https(player.get("day") or player.get("month") or player.get("lifetime") or ""),
+            "page": https((w.get("urls") or {}).get("detail"))}
+
+
+def webcams_in(bbox, key, get, now=time.time):
+    """Public webcams in a map area (north, east, south, west), most popular first, 50 at most.
+    get(url, params, headers, timeout) returns (status, json or None). Returns (webcams, error text)."""
+    n, e, s_, w = (round(float(v), 3) for v in bbox)
+    if not (-90 <= s_ < n <= 90 and -180 <= w <= 180 and -180 <= e <= 180):
+        raise ValueError("That isn't a map area.")
+    params = {"bbox": f"{n},{e},{s_},{w}", "limit": 50, "include": "location,images,player,urls",
+              "sortKey": "popularity", "sortDirection": "desc", "lang": "en"}
+    ck = json.dumps(params, sort_keys=True)
+    hit = _cam_cache.get(ck)
+    if hit and now() - hit[0] < WINDY_CACHE_S:
+        return hit[1], ""
+    try:
+        status, data = get(WINDY_URL, params, {"x-windy-api-key": key}, 20)
+    except Exception as e:  # noqa: BLE001 - offline PC
+        return [], f"Windy can't be reached ({type(e).__name__})."
+    if status in (401, 403):
+        return [], "Windy refused the key: check it under Live cameras → Windy key."
+    if status != 200 or not isinstance(data, dict):
+        return [], f"Windy answered HTTP {status}."
+    cams = [c for c in (clean_webcam(x) for x in data.get("webcams") or []) if c and c["status"] != "inactive"]
+    _cam_cache[ck] = (now(), cams)
+    if len(_cam_cache) > 200:
+        _cam_cache.pop(next(iter(_cam_cache)))
+    return cams, ""
