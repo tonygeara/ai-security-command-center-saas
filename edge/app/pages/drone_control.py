@@ -139,13 +139,13 @@ BODY = r"""
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🗺️ Auto-fly route</div><div class="live" id="routeState"></div></div>
 <div class="panel-body">
-<div class="muted">Click the map to add stops; the drone takes off if needed and flies through them in order (one stop = fly to a point). Every stop must be within <span id="routeMax">500</span> m of home. STOP, any flying key or the controller cancels it.</div>
+<div class="muted">Click the map to add stops; the drone takes off if needed and flies through them in order (one stop = fly to a point). <span id="routeMaxNote">Every stop must be within <span id="routeMax">500</span> m of home.</span> STOP, any flying key or the controller cancels it.</div>
 <div class="actions" style="margin-top:10px"><button class="hud-btn" onclick="undoPoint()">Undo</button><button class="hud-btn" onclick="clearRoute()">Clear</button>
 <button class="hud-btn" onclick="shortestOrder()" title="Reorder the stops to fly the shortest distance">Shortest order</button>
 <button class="hud-btn" onclick="checkSignal()" title="Expected controller signal at each stop">Check signal</button>
 <select id="routeSel" onchange="loadRoute(this.value)" style="flex:1;min-width:140px"><option value="">Saved routes…</option></select></div>
 <div style="margin-top:10px;border:1px solid #5a1b25;border-radius:4px;padding:8px 10px;background:rgba(122,16,32,.08)">
-<b style="color:#ff7b86;font-size:11px;letter-spacing:1.5px">⛔ NO-FLY ZONES</b> <span class="muted">Areas every drone stays out of (neighbours, roads, a helipad). Routes crossing them are refused; auto-fly, drone responses and return home fly round them. The dashed circle is this drone's <span class="nf-range">500</span> m range from its home point: keep route stops inside it.</span>
+<b style="color:#ff7b86;font-size:11px;letter-spacing:1.5px">⛔ NO-FLY ZONES</b> <span class="muted">Areas every drone stays out of (neighbours, roads, a helipad). Routes crossing them are refused; auto-fly, drone responses and return home fly round them. <span id="nfRangeNote">The dashed circle is this drone's <span class="nf-range">500</span> m range from its home point: keep route stops inside it.</span></span>
 <div class="actions" style="margin-top:6px"><button class="hud-btn" id="nfDrawBtn" onclick="nfDraw()">＋ Draw a zone</button>
 <input id="nfName" placeholder="Zone name, e.g. Neighbour" style="flex:1;min-width:120px;display:none"><button class="hud-btn primary" id="nfSaveBtn" style="display:none" onclick="nfSave()">Save zone</button>
 <button class="hud-btn" id="nfUndoBtn" style="display:none" onclick="nfUndo()">Undo corner</button><button class="hud-btn" id="nfCancelBtn" style="display:none" onclick="nfCancel()">Cancel</button></div>
@@ -351,8 +351,8 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));
     trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon]);
       // The range ring: every route stop must be inside it.
-      rCircle=rCircle||L.circle([t.home_lat,t.home_lon],{radius:rMax,color:'#36cfff',weight:1.5,dashArray:'8 6',fillColor:'#36cfff',fillOpacity:.04,interactive:false}).addTo(map);
-      rCircle.setLatLng([t.home_lat,t.home_lon]).setRadius(rMax)}}
+      if(isFinite(rMax))rCircle=rCircle||L.circle([t.home_lat,t.home_lon],{radius:rMax,color:'#36cfff',weight:1.5,dashArray:'8 6',fillColor:'#36cfff',fillOpacity:.04,interactive:false}).addTo(map);
+      if(rCircle)rCircle.setLatLng([t.home_lat,t.home_lon]).setRadius(rMax)}}
     $('coords').textContent=t.lat.toFixed(6)+', '+t.lon.toFixed(6)}
   $('mapState').textContent=typeof L==='undefined'?'MAP NEEDS INTERNET':'';
   const m=t.mission;if(m)$('flyState').textContent='AUTO-FLY · '+m.state+(m.distance>=0?' · '+Math.round(m.distance)+' m to stop':'');
@@ -379,6 +379,7 @@ function nfmsg(t,ok){const e=$('nfMsg');e.className='hud-msg '+(ok===true?'ok':o
 function nfButtons(){const on=!!nfPts;$('nfDrawBtn').style.display=on?'none':'';['nfName','nfSaveBtn','nfUndoBtn','nfCancelBtn'].forEach(id=>$(id).style.display=on?'':'none')}
 async function loadNofly(){try{const d=await fetch('/api/nofly?drone='+encodeURIComponent(DRONE)).then(r=>r.json());nfZones=d.zones||[];
   if(d.max_distance_m)document.querySelectorAll('.nf-range').forEach(e=>e.textContent=d.max_distance_m);
+  else $('nfRangeNote').textContent='There is no distance limit from the home point at the moment.';
   if(d.map_cache)$('mapCache').textContent='Offline map: '+d.map_cache.tiles+' tiles saved ('+d.map_cache.mb+' MB). Pan and zoom round the site once while online to save it for use without internet.';
   if(!map&&d.centre)initMap(d.centre[0],d.centre[1]);drawNofly()}catch(e){}}
 function drawNofly(){
@@ -477,7 +478,10 @@ async function loadSafety(){try{const d=await fetch('/api/safety',{cache:'no-sto
     html:`<div style="transform:rotate(${(a.track||0)-45}deg);font-size:18px;line-height:24px;text-align:center;color:${th.has(a.hex)?'#ff4d6a':'#ffd23f'};text-shadow:0 0 4px #000">✈</div>`})})
     .bindTooltip(`${esc(a.call||a.hex)} · ${(a.dist_m/1000).toFixed(1)} km · ${a.height_ft==null?'?':Math.round(a.height_ft/100)*100} ft`).addTo(map)))}catch(e){}}
 setInterval(loadSafety,10000);setTimeout(loadSafety,1500);
-async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||500;$('routeMax').textContent=rMax;if(rCircle)rCircle.setRadius(rMax);
+async function loadRoutes(){try{const d=await fetch('/api/routes').then(r=>r.json());routes=d.routes||{};rMax=d.max_distance_m||Infinity;
+  // The distance-from-home limit can be off (no number): no range ring, no "beyond" warning.
+  if(isFinite(rMax)){$('routeMaxNote').innerHTML='Every stop must be within <span id="routeMax">'+rMax+'</span> m of home.';if(rCircle)rCircle.setRadius(rMax)}
+  else{$('routeMaxNote').textContent='No distance limit from home at the moment: keep the drone in sight and within the controller\'s range.';if(rCircle){map.removeLayer(rCircle);rCircle=null}}
   const sel=$('routeSel'),cur=sel.value;sel.innerHTML='<option value="">Saved routes…</option>'+Object.keys(routes).map(n=>`<option>${esc(n)}</option>`).join('');sel.value=cur;
   if(typeof renderScheds==='function'&&$('scRoute'))renderScheds();
   const bf=d.backup_for;$('backupNote').style.display=bf?'':'none';$('flyRouteBtn').disabled=!!bf;

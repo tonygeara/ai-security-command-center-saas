@@ -28,6 +28,8 @@ BODY = r"""
 .dt-drone{width:18px;height:18px;border-radius:50%;border:2px solid #fff;font:bold 10px/14px Arial;text-align:center;color:#fff}
 .dt-drone.intruder{background:#e0283e}.dt-drone.friend{background:#1f9c63}
 .dt-label{background:rgba(3,16,26,.9);border:1px solid #155879;color:#e9f8ff;font:bold 11px Arial;padding:2px 6px;border-radius:3px;white-space:nowrap}
+.dt-pilot{width:18px;height:18px;border-radius:50%;background:#7a3cff;border:2px solid #fff;color:#fff;font:bold 10px/14px Arial;text-align:center}
+.dt-rid{font:11px monospace;color:#cfeeff;background:#020a10;border:1px solid #155879;border-radius:3px;padding:6px 8px;word-break:break-all;margin-top:6px}
 @media(max-width:1000px){.dt-grid{grid-template-columns:1fr}#dtMap{height:60vh}}
 </style>
 <main class="hud-main">
@@ -47,6 +49,16 @@ BODY = r"""
 <div id="mineList"></div></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🛸 Detections</div><div class="live" id="dtEvCount"></div></div><div class="panel-body">
 <div id="dtEvents" style="max-height:300px;overflow:auto"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">📡 Remote ID receivers</div><div class="live" id="ridState">–</div></div><div class="panel-body">
+<div class="muted" style="font-size:12px">Most drones over 250 g broadcast their ID, position, height and their pilot's position (Remote ID). A Remote ID receiver on this site's network (for example an ESP32 OpenDroneID receiver) sends what it hears to this PC; those drones then count like any other: yours, or an intruder that sounds the alarm, with where the pilot is.</div>
+<div id="ridSources" class="muted" style="font-size:12px;margin-top:6px"></div>
+<div class="hud-row"><div><b>Listen for receivers on UDP</b><div class="muted">JSON messages from receivers on the site network.</div></div><input class="toggle" type="checkbox" id="ridUdp" onchange="saveSettings()"></div>
+<div class="dt-row"><span>UDP port</span><input id="ridPort" type="number" min="1024" max="65535" style="width:110px" onchange="saveSettings()"><span class="muted" id="ridUdpState"></span></div>
+<details style="margin-top:8px"><summary style="cursor:pointer;color:#5bd9ff;font:bold 12px Arial">Receiver address and token (admins)</summary>
+<div class="muted" style="font-size:12px;margin-top:6px">Receivers can also send by HTTP: POST the JSON to the address below with the header <code>X-RemoteID-Token</code>. Example message: <code>{"id":"1581F5FJ…","lat":33.89,"lon":35.50,"alt":60,"operator_lat":33.88,"operator_lon":35.49}</code> (OpenDroneID-style messages work too).</div>
+<div class="actions" style="margin-top:6px"><button class="hud-btn" onclick="showRid()">Show address and token</button><button class="hud-btn danger" onclick="newRidToken()">New token</button></div>
+<div id="ridConf"></div></details>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⚙ Detection</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Telegram alerts</b><div class="muted">Each detection also goes to Telegram (camera detections with the picture).</div></div><input class="toggle" type="checkbox" id="setTg" onchange="saveSettings()"></div>
 <div class="hud-row"><div><b>Camera AI (YOLO) model</b><div class="muted" id="modelState">–</div></div></div>
@@ -80,8 +92,11 @@ function drawMap(keepDets){if(!keepDets){detLayer.clearLayers();
   droneLayer.clearLayers();
   (data.drones||[]).forEach(x=>{const lines=dets.filter(d=>(data.seen[d.id]||[]).some(s=>s.slot===x.slot));
     lines.forEach(d=>L.polyline([[d.lat,d.lon],[x.lat,x.lon]],{color:x.intruder?'#ff5d6c':'#26ee89',weight:1.5,dashArray:'4 4'}).addTo(droneLayer));
-    L.marker([x.lat,x.lon],{draggable:true,icon:L.divIcon({className:'',iconSize:[18,18],iconAnchor:[9,9],html:`<div class="dt-drone ${x.intruder?'intruder':'friend'}">✈</div>`})})
-      .bindTooltip(`${esc(x.label)}${x.virtual?' (virtual)':''} · ${x.alt} m ${x.intruder?'· UNKNOWN DRONE':'· yours'} · drag to send it somewhere`)
+    if(x.operator){L.polyline([[x.lat,x.lon],[x.operator.lat,x.operator.lon]],{color:'#a98bff',weight:1.5,dashArray:'2 6'}).addTo(droneLayer);
+      L.marker([x.operator.lat,x.operator.lon],{icon:L.divIcon({className:'',iconSize:[18,18],iconAnchor:[9,9],html:'<div class="dt-pilot">👤</div>'})})
+        .bindTooltip('Pilot of '+esc(x.label)).addTo(droneLayer)}
+    L.marker([x.lat,x.lon],{draggable:!x.remote_id||x.slot.indexOf('rid:')!==0,icon:L.divIcon({className:'',iconSize:[18,18],iconAnchor:[9,9],html:`<div class="dt-drone ${x.intruder?'intruder':'friend'}">✈</div>`})})
+      .bindTooltip(`${esc(x.label)}${x.virtual?' (virtual)':''} · ${x.alt} m ${x.intruder?'· UNKNOWN DRONE':'· yours'}${String(x.slot).startsWith('rid:')?' · heard by Remote ID'+(x.operator?' (pilot shown)':''):' · drag to send it somewhere'}`)
       .on('mousedown touchstart',()=>{dragDrone=x.slot})  // hold the redraw from the press, before the drag starts
       .on('dragstart',()=>{dragDrone=x.slot;dragMoved=true}).on('dragend',e=>{dragMoved=false;dropDrone(x,e.target.getLatLng())})
       .on('mouseup click',()=>setTimeout(()=>{if(!dragMoved&&dragDrone===x.slot)dragDrone=null},50)).addTo(droneLayer)})}
@@ -108,7 +123,7 @@ function renderList(){
       <div class="dt-row"><span>Range</span><input type="range" min="20" max="10000" step="10" value="${d.range_m}" data-act="range" title="How far this detector sees drones: about 50–150 m for a normal camera, up to ~1 km for a zoom camera"><b>${fmtM(d.range_m)}</b></div>
       <div class="dt-row"><span>Camera</span><select data-act="cam"><option value="">None (position only)</option>${cams.map(c=>`<option ${c===d.camera?'selected':''}>${esc(c)}</option>`).join('')}</select></div>
       ${d.camera&&cc?`<div class="muted" style="font-size:11px;margin-top:4px">YOLO checked ${new Date(cc.at*1000).toLocaleTimeString()}: ${cc.count?cc.count+' drone(s), '+Math.round(cc.best*100)+'%':'no drone'}</div>`:''}
-      <div class="dt-seen">${seen.length?seen.map(x=>`<div class="${x.intruder?'':'friend'}">${x.intruder?'🛸 Unknown drone':'✈ Yours'}: ${esc(x.label)}${x.virtual?' (virtual)':''} · ${x.distance_m} m · ${x.bearing}° · ${x.alt} m high</div>`).join(''):'<span class="muted">No drone in range.</span>'}</div></div>`}).join('')
+      <div class="dt-seen">${seen.length?seen.map(x=>`<div class="${x.intruder?'':'friend'}">${x.intruder?'🛸 Unknown drone':'✈ Yours'}: ${esc(x.label)}${x.virtual?' (virtual)':''} · ${x.distance_m} m · ${x.bearing}° · ${x.alt} m high${x.operator?' · pilot shown on the map':''}</div>`).join(''):'<span class="muted">No drone in range.</span>'}</div></div>`}).join('')
     :'<div class="muted">No detectors yet. Press <b>＋ Add detector</b> and click the map.</div>';
   // Each control finds its detector when used (the list is refreshed every 2 s, so never keep an old copy).
   document.querySelectorAll('.dt-det').forEach(el=>{const id=el.dataset.id,i0=+el.dataset.i,cur=()=>dets.find(x=>id&&x.id===id)||dets[i0];
@@ -120,7 +135,7 @@ function renderList(){
     const r=el.querySelector('[data-act=range]');r.oninput=()=>{editing=Date.now();d.range_m=+r.value;r.nextElementSibling.textContent=fmtM(d.range_m);drawMap()};r.onchange=()=>{editing=Date.now();d.range_m=+r.value;save('Range: '+fmtM(d.range_m)+'.')};
     el.querySelector('[data-act=cam]').onchange=e=>{d.camera=e.target.value;save(d.camera?'Camera '+d.camera+' checked by YOLO.':'Camera removed.')}})}
 function renderEvents(){const ev=data.events||[];$('dtEvCount').textContent=ev.length?ev.length+' RECENT':'NONE';
-  $('dtEvents').innerHTML=ev.length?ev.map(e=>`<div class="dt-ev"><small>${new Date(e.at*1000).toLocaleTimeString()}</small><span style="flex:1">${e.kind==='camera'?'📷':'📡'} ${esc(e.text)}</span>${e.photo?`<a href="/api/detector/photo/${e.id}" target="_blank" rel="noopener">Picture</a>`:''}</div>`).join(''):'<div class="muted">No detections yet.</div>'}
+  $('dtEvents').innerHTML=ev.length?ev.map(e=>`<div class="dt-ev"><small>${new Date(e.at*1000).toLocaleTimeString()}</small><span style="flex:1">${e.kind==='camera'?'📷':e.kind==='remote_id'?'🛰':'📡'} ${esc(e.text)}</span>${e.photo?`<a href="/api/detector/photo/${e.id}" target="_blank" rel="noopener">Picture</a>`:''}</div>`).join(''):'<div class="muted">No detections yet.</div>'}
 function save(okText){editing=Date.now();clearTimeout(saveT);saveT=setTimeout(async()=>{
   const d=await fetch('/api/detector/sites',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({detectors:dets})}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer from the PC.'}));
   if(d.ok){dets=d.detectors;msg('dtMsg',okText,true)}else msg('dtMsg',d.error||'Not saved.',false);editing=0;await load()},250)}
@@ -132,7 +147,7 @@ map.on('click',async e=>{if(!adding)return;startAdd();
   dets.push({name:name.trim(),lat:+e.latlng.lat.toFixed(6),lon:+e.latlng.lng.toFixed(6),range_m:Math.max(20,Math.min(10000,parseInt(r)||500)),camera:'',enabled:true});
   save('Detector added.')});
 async function saveSettings(){const d=await fetch('/api/detector/settings',{method:'POST',headers:{'content-type':'application/json'},
-  body:JSON.stringify({telegram:$('setTg').checked,classes:$('setClasses').value||'drone',min_score:+$('setScore').value||0.45})}).then(r=>r.json()).catch(()=>({ok:false}));
+  body:JSON.stringify({remoteid_udp:$('ridUdp').checked,remoteid_port:+$('ridPort').value||47911,telegram:$('setTg').checked,classes:$('setClasses').value||'drone',min_score:+$('setScore').value||0.45})}).then(r=>r.json()).catch(()=>({ok:false}));
   msg('setMsg',d.ok?'Saved.':(d.error||'Only operators and admins can change this.'),d.ok);load()}
 async function uploadModel(){const f=$('modelFile').files[0];if(!f){msg('setMsg','Choose the .onnx file first.',false);return}
   msg('setMsg','Uploading and checking the model…');const fd=new FormData();fd.append('model',f);
@@ -144,7 +159,7 @@ async function load(){let d;try{d=await fetch('/api/detector',{cache:'no-store'}
   data=d;if(Date.now()-editing>1500)dets=d.detectors;
   const alarms=dets.filter(x=>alarmOf(x.id)).length;
   $('dtState').innerHTML=alarms?`<i class="dot bad"></i>${alarms} DETECTOR${alarms>1?'S':''} SEE AN INTRUDER`:`<i class="dot good"></i>${dets.filter(x=>x.enabled).length} WATCHING · NO INTRUDER`;
-  if(document.activeElement?.tagName!=='INPUT'){$('setTg').checked=d.settings.telegram;$('setClasses').value=d.settings.classes.join(', ');$('setScore').value=d.settings.min_score}
+  if(document.activeElement?.tagName!=='INPUT'){$('ridUdp').checked=d.settings.remoteid_udp;$('ridPort').value=d.settings.remoteid_port;$('setTg').checked=d.settings.telegram;$('setClasses').value=d.settings.classes.join(', ');$('setScore').value=d.settings.min_score}
   $('modelState').textContent=d.model.installed?(d.model.error?'⚠ '+d.model.error:`Installed (${d.model.size_mb} MB): detectors with a camera are checked every 3 s.`):'No model: detectors see drones by position only.';
   $('modelState').style.color=d.model.installed&&!d.model.error?'#7dffc1':d.model.error?'#ff9ea8':'';
   // First look: frame every detector's circle and every drone.
@@ -155,9 +170,17 @@ async function load(){let d;try{d=await fetch('/api/detector',{cache:'no-store'}
     if(window.addMapSearch)addMapSearch(map)}
   // Redraw the list unless a range is being dragged or a camera list is open.
   const busy=Date.now()-editing<1500||document.activeElement?.matches?.('.dt-det select');
+  const rid=d.remote_id||{};$('ridState').textContent=rid.heard?rid.heard+' HEARD NOW':(rid.sources||[]).length?'LISTENING':'NO RECEIVER YET';
+  $('ridSources').innerHTML=(rid.sources||[]).length?'Receivers: '+rid.sources.map(x=>`${esc(x.source)} (${x.ago_s<60?x.ago_s+' s':Math.round(x.ago_s/60)+' min'} ago)`).join(' · '):'No receiver has reported yet.';
+  $('ridUdpState').textContent=rid.udp_error?'⚠ '+rid.udp_error:rid.udp?'Listening on '+rid.udp:'';
   drawMap(busy);if(!busy)renderList();renderEvents();renderMine()}
+async function showRid(){const r=await fetch('/api/detector/remoteid-config',{cache:'no-store'});const d=await r.json().catch(()=>({}));
+  $('ridConf').innerHTML=r.ok?`<div class="dt-rid">POST ${esc(location.origin)}${esc(d.http_path)}<br>X-RemoteID-Token: ${esc(d.token)}${d.udp?'<br>UDP: this PC, port '+d.port:''}</div>`:'<div class="hud-msg bad">Only an admin can see the receiver token.</div>'}
+async function newRidToken(){if(!await uiConfirm('Make a new receiver token? Receivers using the old one stop being accepted until they get the new one.'))return;
+  const r=await fetch('/api/detector/remoteid-config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({new_token:true})});
+  if(r.ok)showRid();else $('ridConf').innerHTML='<div class="hud-msg bad">Only an admin can change the receiver token.</div>'}
 function renderMine(){const f=data.fleet||[];$('mineCount').textContent=f.filter(x=>x.mine).length+' OF '+f.length;
-  $('mineList').innerHTML=f.length?f.map(x=>`<div class="hud-row"><div><b>${esc(x.label)}</b>${x.virtual?' <span class="muted">(virtual)</span>':''}<div class="muted" style="color:${x.mine?'#7dffc1':'#ff9ea8'}">${x.mine?'✓ Mine: never raises the alarm':'⚠ Unknown: raises the alarm in a detector\'s range'}</div></div>`
+  $('mineList').innerHTML=f.length?f.map(x=>`<div class="hud-row"><div><b>${esc(x.label)}</b>${x.virtual?' <span class="muted">(virtual)</span>':''}${x.remote_id?' <span class="muted">(Remote ID)</span>':''}<div class="muted" style="color:${x.mine?'#7dffc1':'#ff9ea8'}">${x.mine?'✓ Mine: never raises the alarm':'⚠ Unknown: raises the alarm in a detector\'s range'}</div></div>`
     +`<button class="hud-btn${x.mine?'':' primary'}" data-slot="${esc(x.slot)}" data-mine="${x.mine?0:1}">${x.mine?'Not mine':'Mark as mine'}</button></div>`).join(''):'<div class="muted">No drones yet.</div>';
   document.querySelectorAll('#mineList button').forEach(b=>b.onclick=async()=>{const mine=b.dataset.mine==='1';
     if(!mine&&!await uiConfirm('Treat this drone as unknown? It will raise the alarm when it flies into a detector\'s range.'))return;

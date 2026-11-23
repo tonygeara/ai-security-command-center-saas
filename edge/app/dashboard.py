@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.18.1"
+APP_VERSION = "V11.19.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -4791,7 +4791,16 @@ DEVICE_WIZARD_PAGE = hud_page("Devices", pages.device_wizard.BODY, active="devic
 DRONE_LINK_PORT = int(os.environ.get("AI_SECURITY_DRONE_LINK_PORT", "8765"))
 DRONE_LINK_TOKEN_FILE = os.path.join(os.environ.get("AI_SECURITY_DATA") or os.path.dirname(BASE_FOLDER), "drone_link_token")
 DRONE_STICK_TIMEOUT = 0.4    # browser stopped sending sticks -> send zero sticks (hover)
-DRONE_LIMITS = {"max_altitude_m": 120, "max_distance_m": 500, "max_speed_level": 0.5}
+# max_distance_m: how far from its home point a drone may be sent (route stops, fly-to-a-point, responses).
+# None = no limit: switched off for now on the owner's request (23 Nov 2026), to be put back (was 500 m).
+DRONE_LIMITS = {"max_altitude_m": 120, "max_distance_m": None, "max_speed_level": 0.5}
+DRONE_PLAN_RADIUS_M = 500  # area used for planning (radio coverage map, Smart patrol stops), whatever the limit
+
+
+def too_far_from_home(dist_m):
+    """True when the distance-from-home limit is on and dist_m is beyond it."""
+    lim = DRONE_LIMITS["max_distance_m"]
+    return lim is not None and dist_m > lim
 DRONE_COMMANDS = {"takeoff", "land", "cancel_land", "confirm_land", "goto", "goto_cancel", "go_home", "cancel_go_home", "hover",
                   "control_on", "control_off", "gimbal", "photo", "record_start", "record_stop",
                   "sim_on", "sim_off", "stream_on", "stream_off"}
@@ -5332,7 +5341,7 @@ def api_drone_command():
         home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
         if None in home:
             return jsonify({"ok": False, "error": "The drone has no GPS position yet."}), 409
-        if _distance_m(home[0], home[1], lat, lon) > DRONE_LIMITS["max_distance_m"]:
+        if too_far_from_home(_distance_m(home[0], home[1], lat, lon)):
             return jsonify({"ok": False, "error": f"That point is more than {DRONE_LIMITS['max_distance_m']} m from home."}), 400
         z = nofly.zone_at(nofly_zones(), lat, lon)
         if z:
@@ -6685,7 +6694,7 @@ def _drone_ready_problem(camera, slot=None):
     home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
     if None in home:
         return "The drone has no GPS position yet."
-    if _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
+    if too_far_from_home(_distance_m(home[0], home[1], loc["lat"], loc["lon"])):
         return f"That camera is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."
     problem = flight_conditions(home)[0]  # weather and crewed aircraft
     if problem:
@@ -6740,7 +6749,7 @@ def dispatch_drone(camera, by="dashboard", drone=None, target=None):
     tel = get_link(slot)["telemetry"]
     if target:
         home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
-        if None not in home and _distance_m(home[0], home[1], loc["lat"], loc["lon"]) > DRONE_LIMITS["max_distance_m"]:
+        if None not in home and too_far_from_home(_distance_m(home[0], home[1], loc["lat"], loc["lon"])):
             return {"ok": False, "error": f"That spot is more than {DRONE_LIMITS['max_distance_m']} m from the drone's home point."}
         z = nofly.zone_at(nofly_zones(), loc["lat"], loc["lon"])
         if z:
@@ -7495,6 +7504,7 @@ def start_assistant():
     threading.Thread(target=_smart_patrol_worker, daemon=True).start()
     threading.Thread(target=_patrol_mode_worker, daemon=True).start()
     threading.Thread(target=_detector_worker, daemon=True).start()
+    threading.Thread(target=_remoteid_udp_worker, daemon=True).start()
     threading.Thread(target=_nofly_watch_worker, daemon=True).start()
     start_mapping()
     threading.Thread(target=_traffic_worker, daemon=True).start()
@@ -7659,7 +7669,7 @@ def _route_problem(route, slot=None):
         return "The drone has no GPS position yet."
     for i, p in enumerate(pts, 1):
         d = _distance_m(home[0], home[1], p["lat"], p["lon"])
-        if d > DRONE_LIMITS["max_distance_m"]:
+        if too_far_from_home(d):
             return f"Stop {i} is {int(d)} m from home (limit {DRONE_LIMITS['max_distance_m']} m)."
     problem = nofly.route_problem(nofly_zones(), pts, route.get("loop"), home, route.get("end") == "home")
     if problem:
@@ -9094,9 +9104,9 @@ def api_rf_coverage():
     if not c:
         return jsonify({"ok": False, "error": "Set the controller position first, or connect a drone."}), 409
     alt = max(5.0, min(float(DRONE_LIMITS["max_altitude_m"]), float(request.args.get("alt") or 30)))
-    pts = rf.grid((c["lat"], c["lon"]), DRONE_LIMITS["max_distance_m"])
+    pts = rf.grid((c["lat"], c["lon"]), DRONE_LIMITS["max_distance_m"] or DRONE_PLAN_RADIUS_M)
     results, terrain = rf.check({**s["rf"], "controller": c}, elevation, pts, alt)
-    step = 2 * DRONE_LIMITS["max_distance_m"] / 12
+    step = 2 * (DRONE_LIMITS["max_distance_m"] or DRONE_PLAN_RADIUS_M) / 12
     return jsonify({"ok": True, "results": results, "terrain": terrain, "controller": c, "cell_m": step, "alt": alt})
 
 
@@ -9375,6 +9385,7 @@ DETECTOR_PAGE = hud_page("Detector drones", pages.detector.BODY, active="detecto
 DETECTOR_CAMERA_EVERY_S = 3      # how often each detector's camera picture is checked by YOLO
 DETECTOR_REALERT_S = 60          # the same drone at the same detector alerts again only after this long out of range
 DETECTOR_YOLO = dronedetect_mod.Yolo(DETECTOR_MODEL_FILE)
+REMOTE_ID = dronedetect_mod.RemoteIdTracks()
 _detector = {"inside": {}, "left": {}, "cam_at": {}, "cam_alert": {}, "last_cam": {}, "events": [], "photos": {}, "alarms": []}
 _detector_lock = threading.RLock()
 
@@ -9419,6 +9430,20 @@ def _known_drones():
         out.append({"slot": slot, "label": drone_label(slot), "lat": tel["lat"], "lon": tel["lon"],
                     "alt": round(float(tel.get("altitude") or 0), 1), "flying": bool(tel.get("flying")),
                     "virtual": virt, "mine": slot in mine, "intruder": slot not in mine})
+    linked = list(out)
+    for r in REMOTE_ID.live():
+        slot = "rid:" + r["id"]
+        # Our own drones broadcast Remote ID too: one heard right where a linked drone of ours is, is that drone.
+        own = next((x for x in linked if x["mine"] and _distance_m(x["lat"], x["lon"], r["lat"], r["lon"]) <= dronedetect_mod.REMOTEID_SAME_DRONE_M), None)
+        if own:
+            own["remote_id"] = r["id"]
+            continue
+        x = {"slot": slot, "label": "Remote ID " + r["id"], "lat": r["lat"], "lon": r["lon"], "alt": r.get("alt") or 0,
+             "flying": True, "virtual": False, "remote_id": r["id"], "mine": slot in mine, "intruder": slot not in mine,
+             "seen_s": round(time.time() - r["seen"]), "speed": r.get("speed"), "heading": r.get("heading")}
+        if r.get("op_lat") is not None:
+            x["operator"] = {"lat": r["op_lat"], "lon": r["op_lon"]}
+        out.append(x)
     return out
 
 
@@ -9432,7 +9457,7 @@ def _detector_event(det, kind, text, drone=None, photo=None, extra=None):
             _detector["photos"][ev["id"]] = photo
             for k in list(_detector["photos"])[:-30]:
                 _detector["photos"].pop(k, None)
-    if kind in ("position", "camera"):
+    if kind in ("position", "camera", "remote_id"):
         with _detector_lock:
             _detector["alarms"].append({"id": ev["id"], "at": ev["at"], "text": text, "detector": det["name"], "kind": kind,
                                         "photo": bool(photo), "acked": False})
@@ -9470,9 +9495,16 @@ def detector_tick(now=None):
                 _detector["inside"][key] = now
                 if first and x["intruder"] and now - _detector["left"].get(key, 0) > DETECTOR_REALERT_S:
                     d = by_id[did]
-                    _detector_event(d, "position", f"{d['name']}: unknown drone ({x['label']}{', virtual' if x['virtual'] else ''}) "
-                                    f"{x['distance_m']} m away, bearing {x['bearing']}°, {x['alt']:.0f} m high.",
-                                    drone={k: x[k] for k in ("slot", "label", "lat", "lon", "alt", "distance_m", "bearing", "virtual")})
+                    pilot = ""
+                    if x.get("operator"):
+                        o = x["operator"]
+                        pilot = (f" Pilot {round(_distance_m(d['lat'], d['lon'], o['lat'], o['lon']))} m from the detector "
+                                 f"at {o['lat']:.5f}, {o['lon']:.5f}.")
+                    _detector_event(d, "remote_id" if x.get("remote_id") else "position",
+                                    f"{d['name']}: unknown drone ({x['label']}{', virtual' if x['virtual'] else ''}) "
+                                    f"{x['distance_m']} m away, bearing {x['bearing']}°, {x['alt']:.0f} m high.{pilot}",
+                                    drone={k: x[k] for k in ("slot", "label", "lat", "lon", "alt", "distance_m", "bearing", "virtual", "operator")
+                                           if k in x})
         current = {(did, x["slot"]) for did, xs in seen.items() for x in xs}
         for key in [k for k in _detector["inside"] if k not in current]:
             _detector["inside"].pop(key, None)
@@ -9526,8 +9558,12 @@ def api_detector():
     centre = _site_location()[0]
     mine = my_drones()
     fleet = [{"slot": s_, "label": drone_label(s_), "virtual": is_virtual(s_), "mine": s_ in mine} for s_ in drone_slots()]
+    fleet += [{"slot": x["slot"], "label": x["label"], "virtual": False, "remote_id": x["remote_id"], "mine": x["mine"]}
+              for x in drones if str(x["slot"]).startswith("rid:")]
+    cfg = {k: v for k, v in cfg.items() if k != "remoteid_token"}  # the receivers' token: admins, /api/detector/remoteid-config
     return jsonify({"ok": True, "detectors": dets, "settings": cfg, "drones": drones, "seen": seen, "events": events, "fleet": fleet,
                     "camera_checks": last_cam, "cameras": _detector_cameras(), "centre": list(centre) if centre else None,
+                    "remote_id": {**REMOTE_ID.status(), "udp": _remoteid_udp["bound"], "udp_error": _remoteid_udp["error"]},
                     "model": {"installed": DETECTOR_YOLO.installed(), "error": DETECTOR_YOLO.error if DETECTOR_YOLO.installed() else "",
                               "size_mb": round(os.path.getsize(DETECTOR_MODEL_FILE) / 1e6, 1) if DETECTOR_YOLO.installed() else 0}})
 
@@ -9552,6 +9588,7 @@ def api_detector_settings():
         cfg = dronedetect_mod.save_settings(DETECTOR_SETTINGS_FILE, request.get_json(silent=True) or {})
     except (TypeError, ValueError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+    cfg = {k: v for k, v in cfg.items() if k != "remoteid_token"}  # the receivers' token: admins only (remoteid-config)
     audit_record("drone detector: settings", target="detectors", detail=cfg)
     return jsonify({"ok": True, "settings": cfg})
 
@@ -9561,10 +9598,12 @@ def api_detector_mine():
     """Operators, admins: {"drone": slot, "mine": true/false}: a drone of this site (friendly) or not (an intruder)."""
     data = request.get_json(silent=True) or {}
     slot = str(data.get("drone") or "")
-    if slot not in drone_slots():
+    rid_ok = slot.startswith("rid:") and re.fullmatch(r"rid:[\w\-.:]{1,40}", slot)
+    if slot not in drone_slots() and not rid_ok:
         return jsonify({"ok": False, "error": "Unknown drone."}), 404
     set_my_drone(slot, bool(data.get("mine")))
-    audit_record("drone detector: " + ("marked as ours" if data.get("mine") else "marked as not ours"), target=drone_label(slot))
+    audit_record("drone detector: " + ("marked as ours" if data.get("mine") else "marked as not ours"),
+                 target=("Remote ID " + slot[4:]) if slot.startswith("rid:") else drone_label(slot))
     return jsonify({"ok": True})
 
 
@@ -9587,6 +9626,82 @@ def api_detector_alarm_ack():
     who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
     audit_record("drone detector: alarm acknowledged", target="drone alarm", detail={"alarms": n, "by": who})
     return jsonify({"ok": True, "acknowledged": n})
+
+
+_remoteid_udp = {"bound": None, "error": ""}
+
+
+def _remoteid_report(data, source):
+    reports = dronedetect_mod.parse_remoteid_payload(data)
+    if reports:
+        REMOTE_ID.update(reports, source)
+    return reports
+
+
+@app.route("/api/remoteid/report", methods=["POST"])
+def api_remoteid_report():
+    """Remote ID receivers on the network (no sign-in): JSON report(s) with the receiver token
+    (header X-RemoteID-Token or ?token=). Shown on the Detector drones tab within 2 seconds."""
+    import hmac
+    token = request.headers.get("X-RemoteID-Token") or request.args.get("token") or ""
+    if not hmac.compare_digest(str(token), load_detector_settings()["remoteid_token"]):
+        return jsonify({"ok": False, "error": "Wrong or missing receiver token."}), 401
+    if not tab_on("drone_detector"):
+        return jsonify({"ok": False, "error": tab_off_reason("drone_detector")}), 403
+    reports = _remoteid_report(request.get_json(silent=True), "http " + (request.remote_addr or "?"))
+    return jsonify({"ok": True, "accepted": len(reports)})
+
+
+@app.route("/api/detector/remoteid-config", methods=["GET", "POST"])
+def api_detector_remoteid_config():
+    """Admins: the receivers' token and how to send (GET); {"new_token": true} makes a new token."""
+    if request.method == "POST" and (request.get_json(silent=True) or {}).get("new_token"):
+        dronedetect_mod.save_settings(DETECTOR_SETTINGS_FILE, {"remoteid_token": "new"})
+        audit_record("drone detector: new Remote ID receiver token", target="Remote ID")
+    cfg = load_detector_settings()
+    return jsonify({"ok": True, "token": cfg["remoteid_token"], "udp": cfg["remoteid_udp"], "port": cfg["remoteid_port"],
+                    "http_path": "/api/remoteid/report"})
+
+
+def _remoteid_udp_worker():
+    """Listens for Remote ID receivers' JSON over UDP while switched on (site network only)."""
+    sock, port = None, None
+    while True:
+        try:
+            cfg = load_detector_settings()
+            want = cfg["remoteid_port"] if cfg["remoteid_udp"] and tab_on("drone_detector") else None
+            if want != port:
+                if sock:
+                    sock.close()
+                sock, port = None, None
+                _remoteid_udp.update(bound=None, error="")
+                if want:
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        sock.bind(("0.0.0.0", want))
+                        sock.settimeout(1.0)
+                        port = want
+                        _remoteid_udp.update(bound=want, error="")
+                    except OSError as e:
+                        sock = None
+                        _remoteid_udp.update(error=f"UDP port {want} can't be opened: {e.strerror or e}")
+            if not sock:
+                time.sleep(2)
+                continue
+            try:
+                data, addr = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            ip = ipaddress.ip_address(addr[0])
+            if not (ip.is_private or ip.is_loopback):
+                continue  # only receivers on the site network
+            try:
+                _remoteid_report(json.loads(data.decode("utf-8", "replace")), "udp " + addr[0])
+            except ValueError:
+                pass
+        except Exception as e:
+            print("Remote ID UDP error:", e)
+            time.sleep(2)
 
 
 @app.route("/api/detector/model", methods=["POST", "DELETE"])
@@ -9824,7 +9939,7 @@ def build_smart_patrol(by="dashboard"):
     home = _site_location()[0]
     analysis = coverage.analyse(site_cameras(), cfg.get("site_outline") or None)
     incidents = INCIDENTS.list(time.time() - _risk_patrol_mod.HISTORY_DAYS * 86400, limit=5000, min_severity=1)
-    stops, summary = _risk_patrol_mod.plan(analysis, site_cameras(), incidents, home, DRONE_LIMITS["max_distance_m"],
+    stops, summary = _risk_patrol_mod.plan(analysis, site_cameras(), incidents, home, DRONE_LIMITS["max_distance_m"] or DRONE_PLAN_RADIUS_M,
                                            stops=int(cfg["smart_patrol_stops"]),
                                            zone_at=lambda lat, lon: nofly.zone_at(nofly_zones(), lat, lon))
     if summary.get("error"):

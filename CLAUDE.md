@@ -38,6 +38,16 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (23 November 2026)
 
+- **TO PUT BACK: the drones' 500 m distance-from-home limit**, switched off for now on the owner's request (23 Nov,
+  V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
+  page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
+  for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.19.0**: **Remote ID** on Detector drones (`dronedetect.parse_remoteid` / `RemoteIdTracks`):
+  receivers send JSON by UDP (switch + port, default 47911, site-network senders only) or HTTP POST
+  `/api/remoteid/report` with `X-RemoteID-Token` (open path, token in `drone_detector_settings.json`, admins see it via
+  `/api/detector/remoteid-config`, never in settings answers). Remote ID drones = drones `rid:<id>`; one within 40 m of a
+  linked drone of ours is that drone; alarm text gives the pilot's position, map shows the pilot. Test sender
+  `edge/tools/remoteid_send.py`. And the 500 m limit off (above).
 - Released and approved 23 Nov (PR #44): Edge **V11.18.1**: Detector drones page fixes: range / on-off / delete weren't saved and renames showed
   the old name (2-s refresh left handlers on stale objects; now looked up by id, list redraw paused only while dragging a
   slider or a select is open). Drag detectors and drones on the map: virtual drone → `uiChoose` Fly there (route to the
@@ -132,7 +142,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 23 Nov (V11.18.1 released and approved; 85 features; 31 capabilities, 19
+- Features and Capabilities docs current on 23 Nov (V11.18.1 released and approved, V11.19.0 in pull request; 85 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.

@@ -258,7 +258,8 @@ class VirtualDrone:
                 z = 0.0
             if self.alt <= 0.5 and z < 0:
                 z = 0.0  # landing protection: sticks alone never put it on the ground
-            if self.distance_home() >= host.DRONE_LIMITS["max_distance_m"] and (x or y):
+            lim = host.DRONE_LIMITS["max_distance_m"]
+            if lim is not None and self.distance_home() >= lim and (x or y):
                 h = math.radians(self.heading)
                 north, east = y * math.cos(h) - x * math.sin(h), y * math.sin(h) + x * math.cos(h)
                 away_n, away_e = self.lat - self.home[0], (self.lon - self.home[1]) * math.cos(math.radians(self.lat))

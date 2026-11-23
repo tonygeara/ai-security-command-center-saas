@@ -194,3 +194,89 @@ def test_move_a_virtual_drone_now(det, client, fleet):
     assert wait_until(lambda: abs((d.get_link(v1)["telemetry"].get("lat") or 0) - p["lat"]) < 1e-6, 10)  # and reports it
     html = client.get("/drone-detector").get_data(as_text=True)
     assert "dropDrone" in html and "Move there now" in html and "uiChoose" in client.get("/drone-detector").get_data(as_text=True)
+
+
+def _rid(d, client, msg, token=None):
+    tok = token if token is not None else d.load_detector_settings()["remoteid_token"]
+    return client.post("/api/remoteid/report", json=msg, headers={"X-RemoteID-Token": tok})
+
+
+def test_remote_id_drone_raises_the_alarm_with_its_pilot(det, client):
+    d = det
+    d.REMOTE_ID.tracks.clear()
+    if os.path.exists(d.MY_DRONES_FILE):
+        os.remove(d.MY_DRONES_FILE)
+    sites(client, {"name": "Fence", "lat": HOME[0], "lon": HOME[1], "range_m": 300})
+    near, pilot = offset(150, 0), offset(600, 200)
+    msg = {"id": "1581F5FJD239C00", "lat": near["lat"], "lon": near["lon"], "alt": 62, "operator_lat": pilot["lat"], "operator_lon": pilot["lon"]}
+    assert _rid(d, client, msg, token="nope").status_code == 401
+    assert _rid(d, client, msg).get_json() == {"ok": True, "accepted": 1}
+    d.detector_tick()
+    st = client.get("/api/detector").get_json()
+    (x,) = st["seen"][st["detectors"][0]["id"]]
+    assert x["slot"] == "rid:1581F5FJD239C00" and x["intruder"] and x["operator"]["lat"] == round(pilot["lat"], 7)
+    assert "remoteid_token" not in st["settings"] and st["remote_id"]["heard"] == 1  # the token never goes to the page
+    (a,) = client.get("/api/detector/alarm").get_json()["alarms"]
+    assert "Remote ID 1581F5FJD239C00" in a["text"] and "Pilot" in a["text"] and a["kind"] == "remote_id"
+    assert any(f["slot"] == "rid:1581F5FJD239C00" for f in st["fleet"])  # can be marked as ours
+    assert client.post("/api/detector/mine", json={"drone": "rid:1581F5FJD239C00", "mine": True}).get_json()["ok"]
+    st = client.get("/api/detector").get_json()
+    assert not st["seen"][st["detectors"][0]["id"]][0]["intruder"]
+    client.post("/api/detector/alarm/ack")
+    # OpenDroneID-style nested messages, several at once.
+    nested = {"messages": [{"Basic ID": {"id": "ODID-2"}, "Location/Vector Message": {"latitude": near["lat"], "longitude": near["lon"],
+                                                                                         "geodetic_altitude": 40},
+                            "System Message": {"latitude": pilot["lat"], "longitude": pilot["lon"]}}, {"junk": 1}]}
+    assert _rid(d, client, nested).get_json()["accepted"] == 1
+    assert "ODID-2" in {t["id"] for t in d.REMOTE_ID.live()}
+    import users
+    assert not users.allowed("operator", "GET", "/api/detector/remoteid-config")  # the token: admins only
+    assert client.get("/api/detector/remoteid-config").get_json()["token"] == d.load_detector_settings()["remoteid_token"]
+    d.REMOTE_ID.tracks.clear()
+
+
+def test_own_drone_broadcasting_remote_id_is_not_an_intruder(det, client, fleet):
+    d = det
+    d.REMOTE_ID.tracks.clear()
+    if os.path.exists(d.MY_DRONES_FILE):
+        os.remove(d.MY_DRONES_FILE)
+    (v1,) = fleet(1)
+    sites(client, {"name": "Pad", "lat": HOME[0], "lon": HOME[1], "range_m": 100})
+    tel = d.get_link(v1)["telemetry"]
+    _rid(d, client, {"id": "OUR-DRONE", "lat": tel["lat"] + 0.0001, "lon": tel["lon"]})  # ~11 m from our linked drone
+    drones = client.get("/api/detector").get_json()["drones"]
+    assert [x["slot"] for x in drones] == [v1] and drones[0]["remote_id"] == "OUR-DRONE"
+    d.REMOTE_ID.tracks.clear()
+
+
+def test_remote_id_over_udp(det, client):
+    import socket
+    import threading
+    d = det
+    d.REMOTE_ID.tracks.clear()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    r = client.post("/api/detector/settings", json={"remoteid_udp": True, "remoteid_port": port}).get_json()
+    assert "remoteid_token" not in r["settings"]  # never in a settings answer
+    threading.Thread(target=d._remoteid_udp_worker, daemon=True).start()
+    assert wait_until(lambda: d._remoteid_udp["bound"] == port, 10), d._remoteid_udp
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.sendto(b'{"uas_id":"UDP-1","latitude":45.5,"longitude":-75.66,"height":30}', ("127.0.0.1", port))
+    assert wait_until(lambda: any(t["id"] == "UDP-1" for t in d.REMOTE_ID.live()), 10)
+    assert client.get("/api/detector").get_json()["remote_id"]["udp"] == port
+    client.post("/api/detector/settings", json={"remoteid_udp": False})
+    assert wait_until(lambda: d._remoteid_udp["bound"] is None, 10)
+    d.REMOTE_ID.tracks.clear()
+
+
+def test_distance_from_home_limit_is_off_for_now(det, client, fleet, monkeypatch):
+    """The 500 m limit is switched off on the owner's request (to be put back): far points are allowed; with a limit set
+    again they are refused as before."""
+    d = det
+    assert d.DRONE_LIMITS["max_distance_m"] is None and not d.too_far_from_home(5000)
+    (v1,) = fleet(1)
+    far = offset(2000, 0)
+    assert "from home" not in (d._route_problem({"points": [far], "loop": False, "end": "hover"}, v1) or "")
+    monkeypatch.setitem(d.DRONE_LIMITS, "max_distance_m", 500)
+    assert "from home (limit 500 m)" in d._route_problem({"points": [far], "loop": False, "end": "hover"}, v1)
