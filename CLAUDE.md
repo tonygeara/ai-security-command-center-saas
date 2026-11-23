@@ -38,6 +38,13 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (23 November 2026)
 
+- In pull request: Edge **V11.17.0**: **Detector drones** tab (`/drone-detector`, `pages/detector.py`, `dronedetect.py`):
+  detectors pinned with a range (`drone_detectors.json`), **my drones** list (`my_drones.json`, made when the first
+  detector is created; removed drones leave it, new ones are unknown), detection by position (known/virtual drones) and
+  by camera with a user-uploaded YOLO ONNX model run by OpenCV DNN (`drone_detector_model.onnx`, every 3 s). Unknown
+  drone in range → alarm on every page (`ALARM_HTML` in `pages/dialogs.py`: red overlay + WebAudio siren until
+  Acknowledge, `/api/detector/alarm[/ack]`), `speak()` + `warning_sound()` on the PC, Telegram. Tested with 5 virtual
+  drones: remove #5, add a new 5th, fly it into a detector → alarm in ~40 s.
 - Released and approved 23 Nov (PR #40): Edge **V11.16.0**: Satellite tab → **Live cameras**: public webcams worldwide from the Windy Webcams
   API v3 (`/api/satellite/webcams?bbox=n,e,s,w`, admin-set key in `windy_key.json`, sent by the PC as `x-windy-api-key`,
   cached 5 min because free picture links expire after ~10). Markers + list + viewer (Windy live or timelapse player
@@ -114,7 +121,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 23 Nov (V11.16.0 released and approved; 84 features; 31 capabilities, 19
+- Features and Capabilities docs current on 23 Nov (V11.16.0 released and approved, V11.17.0 in pull request; 85 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
