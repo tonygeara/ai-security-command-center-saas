@@ -128,3 +128,56 @@ TRIAL_HTML = r"""
 def trial_html(ends_at_ms, choose_plan_url):
     return (TRIAL_HTML.replace("__TRIAL_END_MS__", str(int(ends_at_ms)))
             .replace("__CHOOSE_PLAN__", choose_plan_url.replace('"', "%22").replace("'", "%27")))
+
+
+# The drone alarm, on every page: when a detector sees a drone that isn't one of this site's, a red warning opens in the
+# middle of the screen with a siren until someone acknowledges it (operators, admins; anyone can silence their own screen).
+ALARM_HTML = r"""
+<style>
+#droneAlarm{position:fixed;inset:0;z-index:100500;display:none;align-items:center;justify-content:center;padding:16px;
+  background:rgba(40,0,6,.55);animation:daPulse 1s infinite}
+@keyframes daPulse{50%{background:rgba(120,0,16,.35)}}
+#droneAlarm>div{width:min(560px,100%);background:#1a0408;border:2px solid #ff3b50;border-radius:8px;box-shadow:0 0 60px rgba(255,40,60,.6);
+  color:#ffe3e6;font-family:Arial,Helvetica,sans-serif;overflow:hidden}
+#droneAlarm h2{margin:0;padding:14px 18px;background:#b3132a;color:#fff;font:bold 18px Arial;letter-spacing:2px;display:flex;gap:10px;align-items:center}
+#droneAlarm ul{margin:0;padding:12px 18px 4px 34px;max-height:40vh;overflow:auto;font-size:14px;line-height:1.5}
+#droneAlarm .da-note{padding:4px 18px;font-size:12px;color:#ffb3bb}
+#droneAlarm .da-btns{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;padding:12px 18px 16px}
+#droneAlarm button,#droneAlarm a{padding:10px 16px;border-radius:4px;border:1px solid #ff5d6c;background:#2a0a10;color:#ffd5da;
+  font:bold 11px Arial;letter-spacing:1.5px;text-transform:uppercase;cursor:pointer;text-decoration:none}
+#droneAlarm .da-ack{background:#ff3b50;color:#fff}
+</style>
+<div id="droneAlarm" role="alertdialog" aria-modal="true" aria-labelledby="daTitle"><div>
+<h2 id="daTitle">🚨 UNKNOWN DRONE DETECTED</h2><ul id="daList"></ul><div class="da-note" id="daNote"></div>
+<div class="da-btns"><button type="button" id="daMute">🔇 Silence this screen</button><a href="/drone-detector">Open Detector drones</a>
+<button type="button" class="da-ack" id="daAck">Acknowledge</button></div></div></div>
+<script>
+(function(){
+  if(window.__droneAlarm)return;window.__droneAlarm=1;
+  const box=document.getElementById('droneAlarm'),list=document.getElementById('daList'),note=document.getElementById('daNote');
+  let ctx=null,siren=null,muted='',shown='';
+  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+  // Browsers only allow sound after a click or key press on the page: get the sound ready on the first one.
+  function unlock(){try{ctx=ctx||new (window.AudioContext||window.webkitAudioContext)();if(ctx.state==='suspended')ctx.resume()}catch(e){}}
+  ['click','keydown','touchstart'].forEach(ev=>document.addEventListener(ev,unlock,{capture:true}));
+  function start(){unlock();if(!ctx||siren)return;
+    const o=ctx.createOscillator(),g=ctx.createGain(),lfo=ctx.createOscillator(),lg=ctx.createGain();
+    o.type='sawtooth';o.frequency.value=900;lfo.frequency.value=1.6;lg.gain.value=350;lfo.connect(lg);lg.connect(o.frequency);
+    g.gain.value=0.18;o.connect(g);g.connect(ctx.destination);o.start();lfo.start();siren={o,lfo,g}}
+  function stop(){if(!siren)return;try{siren.o.stop();siren.lfo.stop()}catch(e){}siren=null}
+  async function check(){
+    let d;try{const r=await fetch('/api/detector/alarm',{cache:'no-store'});if(!r.ok)return;d=await r.json()}catch(e){return}
+    const al=d.alarms||[],key=al.map(a=>a.id).join(',');
+    if(!al.length){box.style.display='none';stop();shown='';return}
+    if(key!==shown){shown=key;list.innerHTML=al.map(a=>`<li><b>${new Date(a.at*1000).toLocaleTimeString()}</b> ${esc(a.text)}</li>`).join('')}
+    box.style.display='flex';
+    note.textContent=(d.intruders_now?d.intruders_now+' unknown drone'+(d.intruders_now>1?'s are':' is')+' in a detector\'s range now. ':'The drone has left the detectors\' range. ')
+      +(ctx&&ctx.state==='running'?'':'Click anywhere to hear the alarm.');
+    if(muted!==key)start();else stop()}
+  document.getElementById('daMute').onclick=()=>{muted=shown;stop()};
+  document.getElementById('daAck').onclick=async()=>{const r=await fetch('/api/detector/alarm/ack',{method:'POST'}).catch(()=>null);
+    if(r&&r.ok){box.style.display='none';stop();shown=''}else{muted=shown;stop();note.textContent='Only an operator or an admin can acknowledge the alarm; this screen is silenced.'}};
+  check();setInterval(check,2000);
+})();
+</script>
+"""

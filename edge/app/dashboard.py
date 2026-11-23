@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.16.0"
+APP_VERSION = "V11.17.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2350,7 +2350,8 @@ from geo import _bearing_deg, _distance_m, _wrap180  # noqa: E402
 import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import satview as satellite_mod
-import pages.satellite, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
+import dronedetect as dronedetect_mod
+import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -3837,6 +3838,7 @@ HUD_NAV_ITEMS = [
     ("dashboard", "/", "⌂", "Dashboard"),
     ("satellite", "/satellite", "◍", "Satellite"),
     ("drone", "/drone-control", "✈", "Drone"),
+    ("detector", "/drone-detector", "⌖", "Detector drones"),
     ("virtual", "/virtual-drones", "◇", "Virtual drones"),
     ("devices", "/setup/add", "＋", "Devices"),
     ("settings", "/settings", "⚙", "Settings"),
@@ -3901,10 +3903,12 @@ def _themed_dialogs(resp):
         if i == -1:
             i = html.find("<body>") + len("<body>") if "<body>" in html else 0
         html = html[:i] + add + html[i:]
+        j = html.rfind("</body>")
+        j = len(html) if j == -1 else j
+        tail = pages.dialogs.ALARM_HTML if request.path not in ("/login", "/reset-signin") else ""
         if ends:
-            j = html.rfind("</body>")
-            j = len(html) if j == -1 else j
-            html = html[:j] + pages.dialogs.trial_html(ends, CHOOSE_PLAN_URL) + html[j:]
+            tail += pages.dialogs.trial_html(ends, CHOOSE_PLAN_URL)
+        html = html[:j] + tail + html[j:]
         resp.set_data(html)
     except Exception as e:
         print("Dialog injection error:", e)
@@ -5231,6 +5235,7 @@ def api_drone_remove():
                 _drone_drop(link["conn"], "drone removed (unpaired)", slot)
         link.update(telemetry={}, tel_at=0.0, device="")
         drone_trails.pop(slot, None)
+        set_my_drone(slot, False)  # the next phone paired here is a new drone until marked as ours
         return jsonify({"ok": True, "removed": False,
                         "message": f"{label} unpaired: its phone was disconnected and it has a new pairing code. "
                                    "The first drone slot always stays; pair another phone when you need it."})
@@ -5239,6 +5244,7 @@ def api_drone_remove():
     except OSError as e:
         return jsonify({"ok": False, "error": f"Could not update the camera settings file ({e.strerror or e}). Try again."}), 409
     drone_trails.pop(slot, None)
+    set_my_drone(slot, False)
     return jsonify({**r.get_json(), "removed": True, "message": f"{label} removed."})
 
 
@@ -5496,6 +5502,7 @@ def api_virtual_drone(slot):
         with virtual_lock:
             virtual_drones.pop(slot, None)
         drone_links.pop(slot, None)
+        set_my_drone(slot, False)  # a new virtual drone later given this name is not one of ours until marked
         try:
             os.remove(_token_file(slot))
         except OSError:
@@ -7432,6 +7439,7 @@ def start_assistant():
     threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
     threading.Thread(target=_smart_patrol_worker, daemon=True).start()
     threading.Thread(target=_patrol_mode_worker, daemon=True).start()
+    threading.Thread(target=_detector_worker, daemon=True).start()
     threading.Thread(target=_nofly_watch_worker, daemon=True).start()
     start_mapping()
     threading.Thread(target=_traffic_worker, daemon=True).start()
@@ -9301,6 +9309,263 @@ def api_satellite_windy_key():
         return jsonify({"ok": False, "error": str(e)}), 400
     audit_record("satellite: Windy key " + ("saved" if on else "removed"), target="Windy Webcams")
     return jsonify({"ok": True, "key_set": on})
+
+
+# ---------- Detector drones tab (dronedetect.py): detectors on the map, YOLO on cameras, drones by position ----------
+DETECTORS_FILE = os.path.join(DATA_FOLDER, "drone_detectors.json")
+DETECTOR_SETTINGS_FILE = os.path.join(DATA_FOLDER, "drone_detector_settings.json")
+DETECTOR_MODEL_FILE = os.path.join(DATA_FOLDER, "drone_detector_model.onnx")
+MY_DRONES_FILE = os.path.join(DATA_FOLDER, "my_drones.json")
+DETECTOR_PAGE = hud_page("Detector drones", pages.detector.BODY, active="detector")
+DETECTOR_CAMERA_EVERY_S = 3      # how often each detector's camera picture is checked by YOLO
+DETECTOR_REALERT_S = 60          # the same drone at the same detector alerts again only after this long out of range
+DETECTOR_YOLO = dronedetect_mod.Yolo(DETECTOR_MODEL_FILE)
+_detector = {"inside": {}, "left": {}, "cam_at": {}, "cam_alert": {}, "last_cam": {}, "events": [], "photos": {}, "alarms": []}
+_detector_lock = threading.RLock()
+
+
+def _detector_cameras():
+    return sorted(n for n in _frigate_camera_names() if not _is_drone_name(n))
+
+
+def my_drones(start=False):
+    """This site's drones: {slot: {"since"}}. Made when the first detector is created, from every drone there is then
+    (real and virtual; never at program start, when virtual drones may not be back yet). After that a new drone is
+    unknown until someone marks it as theirs, and a removed drone leaves the list."""
+    with _detector_lock:
+        mine = dronedetect_mod.load_mine(MY_DRONES_FILE)
+        if mine is None and start:
+            mine = dronedetect_mod.save_mine(MY_DRONES_FILE, {s: {"since": time.time()} for s in drone_slots()})
+        return mine if mine is not None else {s: {} for s in drone_slots()}  # no list yet: nothing is an intruder
+
+
+def set_my_drone(slot, mine):
+    with _detector_lock:
+        if dronedetect_mod.load_mine(MY_DRONES_FILE) is None:
+            return {}  # no detectors yet: the list is made with the first one
+        m = my_drones()
+        if mine:
+            m[slot] = {"since": time.time()}
+        else:
+            m.pop(slot, None)
+        dronedetect_mod.save_mine(MY_DRONES_FILE, m)
+    return m
+
+
+def _known_drones():
+    """Drones whose position the system knows; those not on the my-drones list are intruders."""
+    mine = my_drones()
+    out = []
+    for slot in drone_slots():
+        tel = get_link(slot)["telemetry"]
+        if not link_fresh(slot, 5) or tel.get("lat") is None or not tel.get("drone_connected", True):
+            continue
+        virt = is_virtual(slot)
+        out.append({"slot": slot, "label": drone_label(slot), "lat": tel["lat"], "lon": tel["lon"],
+                    "alt": round(float(tel.get("altitude") or 0), 1), "flying": bool(tel.get("flying")),
+                    "virtual": virt, "mine": slot in mine, "intruder": slot not in mine})
+    return out
+
+
+def _detector_event(det, kind, text, drone=None, photo=None, extra=None):
+    ev = {"id": uuid.uuid4().hex[:12], "at": time.time(), "detector": det["id"], "detector_name": det["name"],
+          "kind": kind, "text": text, **({"drone": drone} if drone else {}), **(extra or {}), "photo": bool(photo)}
+    with _detector_lock:
+        _detector["events"].append(ev)
+        del _detector["events"][:-200]
+        if photo:
+            _detector["photos"][ev["id"]] = photo
+            for k in list(_detector["photos"])[:-30]:
+                _detector["photos"].pop(k, None)
+    if kind in ("position", "camera"):
+        with _detector_lock:
+            _detector["alarms"].append({"id": ev["id"], "at": ev["at"], "text": text, "detector": det["name"], "kind": kind,
+                                        "photo": bool(photo), "acked": False})
+            del _detector["alarms"][:-50]
+        try:  # the PC itself: spoken warning and the warning sound, even with no browser open
+            speak(f"Warning. Unknown drone detected at {det['name']}.", "drone-detector-" + det["id"])
+            warning_sound()
+        except Exception as e:
+            print("Drone alarm sound error:", e)
+    PIPELINE.publish("drone_detected", detector=det["id"], via=kind, text=text)
+    audit_record("drone detector: " + kind, target=det["name"], detail={"text": text}, source="system")
+    if load_detector_settings()["telegram"] and telegram_ready():
+        send_telegram("🛸 " + text, photo) if photo else send_telegram("🛸 " + text)
+    return ev
+
+
+def load_detector_settings():
+    return dronedetect_mod.load_settings(DETECTOR_SETTINGS_FILE)
+
+
+def detector_tick(now=None):
+    """One look (every 2 s): drones by position in each detector's range, and each detector camera through YOLO."""
+    now = now or time.time()
+    dets = dronedetect_mod.load_detectors(DETECTORS_FILE)
+    cfg = load_detector_settings()
+    seen = dronedetect_mod.in_range(dets, _known_drones())
+    by_id = {d["id"]: d for d in dets}
+    with _detector_lock:
+        for did, drones in seen.items():
+            for x in drones:
+                key = (did, x["slot"])
+                first = key not in _detector["inside"]
+                _detector["inside"][key] = now
+                if first and x["intruder"] and now - _detector["left"].get(key, 0) > DETECTOR_REALERT_S:
+                    d = by_id[did]
+                    _detector_event(d, "position", f"{d['name']}: unknown drone ({x['label']}{', virtual' if x['virtual'] else ''}) "
+                                    f"{x['distance_m']} m away, bearing {x['bearing']}°, {x['alt']:.0f} m high.",
+                                    drone={k: x[k] for k in ("slot", "label", "lat", "lon", "alt", "distance_m", "bearing", "virtual")})
+        current = {(did, x["slot"]) for did, xs in seen.items() for x in xs}
+        for key in [k for k in _detector["inside"] if k not in current]:
+            _detector["inside"].pop(key, None)
+            _detector["left"][key] = now
+    if not DETECTOR_YOLO.installed():
+        return seen
+    for d in dets:
+        if not (d["enabled"] and d["camera"]) or now - _detector["cam_at"].get(d["id"], 0) < DETECTOR_CAMERA_EVERY_S:
+            continue
+        _detector["cam_at"][d["id"]] = now
+        jpeg = _camera_snapshot(d["camera"])
+        if not jpeg:
+            continue
+        found = DETECTOR_YOLO.find(jpeg, cfg["classes"], cfg["min_score"])
+        with _detector_lock:
+            _detector["last_cam"][d["id"]] = {"at": now, "count": len(found), "best": max((f["score"] for f in found), default=0)}
+        if found and now - _detector["cam_alert"].get(d["id"], 0) > DETECTOR_REALERT_S:
+            _detector["cam_alert"][d["id"]] = now
+            best = max(found, key=lambda f: f["score"])
+            _detector_event(d, "camera", f"{d['name']}: camera {d['camera']} sees {len(found)} drone{'s' if len(found) > 1 else ''} "
+                            f"(YOLO {best['score']:.0%}), within about {d['range_m']} m.", photo=jpeg,
+                            extra={"boxes": found[:10], "camera": d["camera"]})
+    return seen
+
+
+def _detector_worker():
+    while True:
+        time.sleep(2)
+        try:
+            detector_tick()
+        except Exception as e:
+            print("Drone detector error:", e)
+
+
+@app.route("/drone-detector")
+def drone_detector_page():
+    return Response(DETECTOR_PAGE, mimetype="text/html")
+
+
+@app.route("/api/detector")
+def api_detector():
+    """Detectors, what each sees now, the latest detections, the cameras and the YOLO model's state."""
+    dets = dronedetect_mod.load_detectors(DETECTORS_FILE)
+    cfg = load_detector_settings()
+    drones = _known_drones()
+    seen = dronedetect_mod.in_range(dets, drones)
+    with _detector_lock:
+        events = list(reversed(_detector["events"][-50:]))
+        last_cam = dict(_detector["last_cam"])
+    DETECTOR_YOLO._load() if DETECTOR_YOLO.installed() else None
+    centre = _site_location()[0]
+    mine = my_drones()
+    fleet = [{"slot": s_, "label": drone_label(s_), "virtual": is_virtual(s_), "mine": s_ in mine} for s_ in drone_slots()]
+    return jsonify({"ok": True, "detectors": dets, "settings": cfg, "drones": drones, "seen": seen, "events": events, "fleet": fleet,
+                    "camera_checks": last_cam, "cameras": _detector_cameras(), "centre": list(centre) if centre else None,
+                    "model": {"installed": DETECTOR_YOLO.installed(), "error": DETECTOR_YOLO.error if DETECTOR_YOLO.installed() else "",
+                              "size_mb": round(os.path.getsize(DETECTOR_MODEL_FILE) / 1e6, 1) if DETECTOR_YOLO.installed() else 0}})
+
+
+@app.route("/api/detector/sites", methods=["POST"])
+def api_detector_sites():
+    """Operators, admins: {"detectors": [...]} replaces the detectors."""
+    try:
+        dets = dronedetect_mod.save_detectors(DETECTORS_FILE, (request.get_json(silent=True) or {}).get("detectors"), _detector_cameras())
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if dets:
+        my_drones(start=True)  # the first detector: every drone there is now is one of ours
+    audit_record("drone detector: detectors saved", target="detectors", detail={"detectors": len(dets)})
+    return jsonify({"ok": True, "detectors": dets})
+
+
+@app.route("/api/detector/settings", methods=["POST"])
+def api_detector_settings():
+    """Operators, admins: test mode (virtual drones are intruders), Telegram alerts, YOLO score and class names."""
+    try:
+        cfg = dronedetect_mod.save_settings(DETECTOR_SETTINGS_FILE, request.get_json(silent=True) or {})
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    audit_record("drone detector: settings", target="detectors", detail=cfg)
+    return jsonify({"ok": True, "settings": cfg})
+
+
+@app.route("/api/detector/mine", methods=["POST"])
+def api_detector_mine():
+    """Operators, admins: {"drone": slot, "mine": true/false}: a drone of this site (friendly) or not (an intruder)."""
+    data = request.get_json(silent=True) or {}
+    slot = str(data.get("drone") or "")
+    if slot not in drone_slots():
+        return jsonify({"ok": False, "error": "Unknown drone."}), 404
+    set_my_drone(slot, bool(data.get("mine")))
+    audit_record("drone detector: " + ("marked as ours" if data.get("mine") else "marked as not ours"), target=drone_label(slot))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/detector/alarm")
+def api_detector_alarm():
+    """The drone alarm every page shows: alarms not yet acknowledged, and how many intruders detectors see now."""
+    with _detector_lock:
+        alarms = [a for a in _detector["alarms"] if not a["acked"]]
+        now_in = len({k[1] for k, _ in _detector["inside"].items() if k[1] not in my_drones()})
+    return jsonify({"ok": True, "alarms": alarms[-10:], "intruders_now": now_in})
+
+
+@app.route("/api/detector/alarm/ack", methods=["POST"])
+def api_detector_alarm_ack():
+    """Operators, admins: acknowledge the drone alarms (stops the alarm on every screen)."""
+    with _detector_lock:
+        n = sum(1 for a in _detector["alarms"] if not a["acked"])
+        for a in _detector["alarms"]:
+            a["acked"] = True
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    audit_record("drone detector: alarm acknowledged", target="drone alarm", detail={"alarms": n, "by": who})
+    return jsonify({"ok": True, "acknowledged": n})
+
+
+@app.route("/api/detector/model", methods=["POST", "DELETE"])
+def api_detector_model():
+    """Admins: upload (POST, file "model", an ONNX export of a YOLO model trained on drones) or remove the model."""
+    if request.method == "DELETE":
+        try:
+            os.remove(DETECTOR_MODEL_FILE)
+        except OSError:
+            pass
+        audit_record("drone detector: YOLO model removed", target="detectors")
+        return jsonify({"ok": True})
+    f = request.files.get("model")
+    if not f or not f.filename.lower().endswith(".onnx"):
+        return jsonify({"ok": False, "error": "Choose a YOLO model exported as .onnx."}), 400
+    tmp = DETECTOR_MODEL_FILE + ".upload"
+    f.save(tmp)
+    if os.path.getsize(tmp) > 400e6:
+        os.remove(tmp)
+        return jsonify({"ok": False, "error": "That file is over 400 MB."}), 400
+    try:
+        import cv2
+        cv2.dnn.readNetFromONNX(tmp)
+    except Exception as e:  # noqa: BLE001
+        os.remove(tmp)
+        return jsonify({"ok": False, "error": f"OpenCV can't load that model: {str(e)[:160]}"}), 400
+    _replace_file(tmp, DETECTOR_MODEL_FILE)
+    audit_record("drone detector: YOLO model installed", target="detectors", detail={"file": f.filename})
+    return jsonify({"ok": True})
+
+
+@app.route("/api/detector/photo/<eid>")
+def api_detector_photo(eid):
+    with _detector_lock:
+        jpeg = _detector["photos"].get(str(eid))
+    return Response(jpeg, mimetype="image/jpeg") if jpeg else ("", 404)
 
 
 @app.route("/coverage")
