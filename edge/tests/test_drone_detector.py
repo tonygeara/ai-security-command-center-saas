@@ -180,3 +180,17 @@ def test_tab_licences_and_settings_switches(det, client, monkeypatch):
     finally:
         client.post("/api/customer/settings", json={**cfg, "satellite_tab": True})
     assert client.get("/satellite").status_code == 200
+
+
+def test_move_a_virtual_drone_now(det, client, fleet):
+    """Dragging a virtual drone on the Detector drones map and choosing "Move there now" puts it there at once."""
+    d = det
+    (v1,) = fleet(1)
+    p = offset(200, 50)
+    assert client.post(f"/api/virtual-drones/{v1}", json={"action": "move", "lat": p["lat"], "lon": p["lon"]}).get_json()["ok"]
+    vd = d.virtual_drones[v1]
+    assert abs(vd.lat - p["lat"]) < 1e-9 and abs(vd.lon - p["lon"]) < 1e-9 and vd.home == (p["lat"], p["lon"])  # landed: home moves too
+    assert client.post(f"/api/virtual-drones/{v1}", json={"action": "move", "lat": 200, "lon": 0}).status_code == 400
+    assert wait_until(lambda: abs((d.get_link(v1)["telemetry"].get("lat") or 0) - p["lat"]) < 1e-6, 10)  # and reports it
+    html = client.get("/drone-detector").get_data(as_text=True)
+    assert "dropDrone" in html and "Move there now" in html and "uiChoose" in client.get("/drone-detector").get_data(as_text=True)

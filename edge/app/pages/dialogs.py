@@ -2,6 +2,7 @@
 
 They open in the middle of the page in the HUD look and return Promises:
     await uiAlert("Saved.")                       -> undefined
+    await uiChoose("Do what?", ["A", "B"])        -> 0 / 1, or null when cancelled
     if (!await uiConfirm("Delete it?")) return;   -> true / false
     const v = await uiPrompt("Name:", "Dock 1");  -> text, or null when cancelled
 Dialogs asked for while one is open wait their turn. Esc cancels, Enter confirms.
@@ -57,15 +58,16 @@ DIALOG_HTML = r"""
       const btns=document.createElement('div');btns.className='ui-dlg-btns';
       const cancel=document.createElement('button');cancel.type='button';cancel.textContent=opts.cancel||'Cancel';
       const ok=document.createElement('button');ok.type='button';ok.className='ok';ok.textContent=opts.ok||'OK';
-      if(kind!=='alert')btns.appendChild(cancel);
-      btns.appendChild(ok);
+      if(kind==='choose'){btns.appendChild(cancel);(opts.choices||[]).forEach((label,i)=>{const b=document.createElement('button');b.type='button';
+        b.textContent=label;if(i===(opts.choices.length-1))b.className='ok';b.onclick=()=>done(i);btns.appendChild(b)})}
+      else{if(kind!=='alert')btns.appendChild(cancel);btns.appendChild(ok)}
       box.append(head,body,btns);back.appendChild(box);document.body.appendChild(back);
       const done=v=>{document.removeEventListener('keydown',key,true);back.remove();try{prev&&prev.focus&&prev.focus()}catch(e){}resolve(v)};
-      const yes=()=>done(kind==='confirm'?true:kind==='prompt'?input.value:undefined);
-      const no=()=>done(kind==='confirm'?false:kind==='prompt'?null:undefined);
+      const yes=()=>done(kind==='confirm'?true:kind==='prompt'?input.value:kind==='choose'?null:undefined);
+      const no=()=>done(kind==='confirm'?false:kind==='prompt'||kind==='choose'?null:undefined);
       function key(e){
         if(e.key==='Escape'){e.preventDefault();e.stopPropagation();no()}
-        else if(e.key==='Enter'&&(kind!=='confirm'||document.activeElement!==cancel)){e.preventDefault();e.stopPropagation();yes()}
+        else if(e.key==='Enter'&&kind!=='choose'&&(kind!=='confirm'||document.activeElement!==cancel)){e.preventDefault();e.stopPropagation();yes()}
         else if(e.key==='Tab'){const f=[...box.querySelectorAll('input,button')];const i=f.indexOf(document.activeElement);
           e.preventDefault();f[(i+(e.shiftKey?-1:1)+f.length)%f.length].focus()}
         else e.stopPropagation();  // keep flying keys (W/A/S/D, Space) away from the page while a dialog is open
@@ -73,7 +75,7 @@ DIALOG_HTML = r"""
       document.addEventListener('keydown',key,true);
       ok.onclick=yes;cancel.onclick=no;
       back.addEventListener('mousedown',e=>{if(e.target===back&&kind!=='alert')no()});
-      (input||(danger&&kind==='confirm'?cancel:ok)).focus();
+      (input||(danger&&kind==='confirm'||kind==='choose'?cancel:ok)).focus();
       if(input)input.select();
     });
     const p=chain.then(run,run);chain=p.catch(()=>{});return p;
@@ -81,6 +83,8 @@ DIALOG_HTML = r"""
   window.uiAlert=(m,o)=>open('alert',m,o);
   window.uiConfirm=(m,o)=>open('confirm',m,o);
   window.uiPrompt=(m,v,o)=>open('prompt',m,Object.assign({value:v},o||{}));
+  // Several answers: resolves to the chosen button's index (0, 1, …), or null for Cancel / Esc.
+  window.uiChoose=(m,choices,o)=>open('choose',m,Object.assign({choices},o||{}));
 })();
 </script>
 """
