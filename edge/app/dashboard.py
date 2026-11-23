@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.17.0"
+APP_VERSION = "V11.18.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -3905,7 +3905,10 @@ def _themed_dialogs(resp):
         html = html[:i] + add + html[i:]
         j = html.rfind("</body>")
         j = len(html) if j == -1 else j
-        tail = pages.dialogs.ALARM_HTML if request.path not in ("/login", "/reset-signin") else ""
+        off = [t["paths"][0] for k, t in TAB_FEATURES.items() if not tab_on(k)]
+        tail = "".join(f'<style>a[href="{p_}"]{{display:none!important}}</style>' for p_ in off)
+        if "/drone-detector" not in off and request.path not in ("/login", "/reset-signin"):
+            tail += pages.dialogs.ALARM_HTML
         if ends:
             tail += pages.dialogs.trial_html(ends, CHOOSE_PLAN_URL)
         html = html[:j] + tail + html[j:]
@@ -5585,6 +5588,48 @@ def _dock_health_worker():
         except Exception as e:  # noqa: BLE001 - keep watching
             print("Dock health check error:", e)
         time.sleep(DOCK_HEALTH_SECONDS)
+
+
+# Tabs that are licence features: off unless the provider switches them on (admin portal → client → Feature access,
+# or ticked on an on-prem licence; the Enterprise plan includes them), and each has a Settings switch on the PC.
+TAB_FEATURES = {
+    "satellite": {"setting": "satellite_tab", "label": "Satellite view", "paths": ("/satellite", "/api/satellite/")},
+    "drone_detector": {"setting": "detector_tab", "label": "Detector drones", "paths": ("/drone-detector", "/api/detector")},
+}
+
+
+def feature_licensed(key):
+    if onprem_mode():
+        return key in set((offline_license.get("payload") or {}).get("features") or [])
+    return cloud_feature_enabled(key)
+
+
+def tab_on(key):
+    """The licence includes the feature and its Settings switch on this PC is on."""
+    return feature_licensed(key) and bool(_load_customer_settings().get(TAB_FEATURES[key]["setting"], True))
+
+
+def tab_off_reason(key):
+    label = TAB_FEATURES[key]["label"]
+    if not feature_licensed(key):
+        return f"{label} isn't included in this PC's licence. Ask your provider to switch it on."
+    return f"{label} is switched off in Settings (an admin can switch it on)."
+
+
+@app.before_request
+def _tab_gate():
+    """Pages and APIs of a tab that is not licensed or switched off answer 'not available' (the alarm check stays quiet)."""
+    path = request.path
+    for key, t in TAB_FEATURES.items():
+        if any(path == p_.rstrip("/") or path.startswith(p_) for p_ in t["paths"]) and not tab_on(key):
+            if path == "/api/detector/alarm":
+                return jsonify({"ok": True, "alarms": [], "intruders_now": 0, "off": True})
+            if path.startswith("/api/"):
+                return jsonify({"ok": False, "error": tab_off_reason(key), "off": True}), 403
+            return Response(hud_page(t["label"], f'''<main class="hud-main narrow"><section class="panel"><div class="panel-body">
+<div class="page-kicker">Not available</div><h1 class="page-title">{t["label"]}</h1><p class="muted">{tab_off_reason(key)}</p>
+<a class="hud-btn" href="/settings" style="text-decoration:none">Settings</a></div></section></main>'''), mimetype="text/html", status=403)
+    return None
 
 
 def dock_allowed():
@@ -9401,6 +9446,8 @@ def load_detector_settings():
 def detector_tick(now=None):
     """One look (every 2 s): drones by position in each detector's range, and each detector camera through YOLO."""
     now = now or time.time()
+    if not tab_on("drone_detector"):
+        return {}
     dets = dronedetect_mod.load_detectors(DETECTORS_FILE)
     cfg = load_detector_settings()
     seen = dronedetect_mod.in_range(dets, _known_drones())
@@ -10207,7 +10254,7 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,"cloud_incidents":False,
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,"cloud_incidents":False,"satellite_tab":True,"detector_tab":True,
                            **_patterns_mod.DEFAULTS}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
@@ -10329,6 +10376,10 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <div class="hud-row"><div><b>Log out and turn off</b><div class="muted">Signs you out and stops everything on this PC, Docker Desktop included, until you sign in to Windows again (or open the program from the desktop icon): then Docker and the system start by themselves. Admins only.</div></div><button class="hud-btn danger" id="logoutBtn" onclick="logoutOff()">Log out and turn off</button></div>
 <div id="offMsg" class="hud-msg"></div>
 </div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">▦ Tabs</div><div class="live">LICENCE + SWITCH</div></div><div class="panel-body">
+<div class="hud-row"><div><b>Satellite tab</b><div class="muted">NASA satellite pictures of your places, fire alerts and public live cameras. <span id="licSat"></span></div></div><input class="toggle" type="checkbox" data-key="satellite_tab" onchange="save()"></div>
+<div class="hud-row"><div><b>Detector drones tab</b><div class="muted">Drone detectors with a range, and the alarm when a drone that isn't yours comes near. <span id="licDet"></span></div></div><input class="toggle" type="checkbox" data-key="detector_tab" onchange="save()"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Camera live feed on the dashboard</b><div class="muted">Off: the main camera's live video is not shown (or streamed) on the dashboard.</div></div><input class="toggle" type="checkbox" data-key="dashboard_camera_feed" onchange="save()"></div>
 </div></section>
@@ -10355,7 +10406,10 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <button class="hud-btn" onclick="location.href='/setup/discover'">Add camera or drone</button>
 </div></section>
 </main>
-<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded'}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.')}
+<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded';
+  const lic=cfg._licensed||{};[['licSat','satellite','satellite_tab'],['licDet','drone_detector','detector_tab']].forEach(([id,k,key])=>{const on=!!lic[k],box=document.querySelector(`[data-key="${key}"]`);
+    document.getElementById(id).innerHTML=on?'<span style="color:#7dffc1">Included in this licence.</span>':'<span style="color:#ff9ea8">Not in this licence: ask your provider to switch it on.</span>';if(box)box.disabled=!on})}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.');
+  if(d.ok&&('satellite_tab' in cfg))document.querySelectorAll('a[href="/satellite"],a[href="/drone-detector"]').forEach(a=>{const k=a.getAttribute('href')==='/satellite'?'satellite_tab':'detector_tab';a.style.setProperty('display',cfg[k]&&(cfg._licensed||{})[k==='satellite_tab'?'satellite':'drone_detector']?'':'none','important')})}
 fetch('/api/cloud/sync').then(r=>r.json()).then(c=>{if(c.onprem){cloudRow.style.display='none';return}
   cloudState.textContent=!c.paired?'This PC is not paired with the portal yet.':c.synced===false?'Last sync failed: '+c.error:c.synced?`Synced ${new Date(c.last*1000).toLocaleTimeString()} · ${c.incidents_sent} incident updates sent`+(c.watching?` · ${c.watching} watching live`:''):''});
 let upd={};
@@ -10396,7 +10450,7 @@ def customer_settings_page():return Response(SETTINGS_PAGE,mimetype="text/html")
 @app.route("/api/customer/settings",methods=["GET","POST"])
 def customer_settings_api():
     global camera_ai_enabled,drone_enabled_runtime,drone_ai_enabled
-    if request.method=="GET":return jsonify(_load_customer_settings())
+    if request.method=="GET":return jsonify({**_load_customer_settings(),"_licensed":{k:feature_licensed(k) for k in TAB_FEATURES}})
     cfg=_save_customer_settings(request.get_json(silent=True) or {})
     try:camera_ai_enabled=bool(cfg["camera_ai"])
     except Exception:pass
