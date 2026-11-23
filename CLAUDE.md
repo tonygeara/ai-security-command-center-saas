@@ -36,9 +36,9 @@ Google Docs connector isn't available in the session, say so and list the change
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (22 November 2026)
+## Where we left off (23 November 2026)
 
-- In pull request: Edge **V11.16.0**: Satellite tab → **Live cameras**: public webcams worldwide from the Windy Webcams
+- Released and approved 23 Nov (PR #40): Edge **V11.16.0**: Satellite tab → **Live cameras**: public webcams worldwide from the Windy Webcams
   API v3 (`/api/satellite/webcams?bbox=n,e,s,w`, admin-set key in `windy_key.json`, sent by the PC as `x-windy-api-key`,
   cached 5 min because free picture links expire after ~10). Markers + list + viewer (Windy live or timelapse player
   in an iframe), Windy credit on every view. Only owner-published webcams, never exposed private CCTV.
@@ -65,7 +65,7 @@ Google Docs connector isn't available in the session, say so and list the change
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.15.0 approved for Normal clients (22 Nov); doumith is on **Normal**.
+- V11.16.0 approved for Normal clients (23 Nov); doumith is on **Normal**.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -114,7 +114,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 22 Nov (V11.15.0 released, V11.16.0 in pull request; 84 features; 31 capabilities, 19
+- Features and Capabilities docs current on 23 Nov (V11.16.0 released and approved; 84 features; 31 capabilities, 19
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
