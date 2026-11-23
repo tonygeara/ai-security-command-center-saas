@@ -1,5 +1,6 @@
 """The Satellite tab: named pins over NASA satellite imagery (GIBS), with a date slider, a view per pin
-(true colour, fires, clouds) and optional NASA FIRMS fire alerts near the pins."""
+(true colour, fires, clouds), optional NASA FIRMS fire alerts near the pins, and public webcams worldwide
+(Windy Webcams: only cameras their owners publish)."""
 BODY = r"""
 <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <style>
@@ -25,6 +26,22 @@ BODY = r"""
 .sat-label{background:rgba(3,16,26,.9);border:1px solid #155879;color:#e9f8ff;font:bold 11px Arial;padding:2px 6px;border-radius:3px;white-space:nowrap}
 .sat-fire{width:10px;height:10px;border-radius:50%;background:#ff5a1f;border:1px solid #ffd23f;box-shadow:0 0 8px #ff5a1f}
 .sat-note{font-size:12px;color:#8ba9b8;margin-top:8px;line-height:1.5}
+.cam-mark{width:22px;height:22px;border-radius:4px;background:#05131d;border:2px solid #26ee89;color:#26ee89;font:bold 11px/18px Arial;text-align:center;box-shadow:0 0 8px rgba(0,0,0,.6)}
+.cam-mark.live{border-color:#ff5d6c;color:#ff5d6c}
+.cam-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;max-height:420px;overflow:auto}
+.cam-item{border:1px solid #153c56;border-radius:4px;background:#05131d;cursor:pointer;overflow:hidden;text-align:left;padding:0;color:#9edfff}
+.cam-item:hover{border-color:#36cfff}
+.cam-item img,.cam-item .noimg{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#020a10}
+.cam-item .noimg{display:flex;align-items:center;justify-content:center;font-size:22px}
+.cam-item span{display:block;padding:4px 6px;font:11px Arial;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cam-item b{color:#ff5d6c;font-size:9px;letter-spacing:1px;margin-right:4px}
+.cam-view{position:fixed;inset:0;z-index:99990;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(1,6,10,.8)}
+.cam-view>div{width:min(1100px,100%);background:#03101a;border:1px solid #0876ad;border-radius:6px;box-shadow:0 0 40px rgba(0,153,255,.22)}
+.cam-view header{display:flex;align-items:center;gap:10px;padding:10px 14px;color:#e9f8ff;font:bold 13px Arial}
+.cam-view header span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cam-view iframe,.cam-view .cam-still{display:block;width:100%;aspect-ratio:16/9;border:0;background:#000}
+.cam-view footer{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 14px;font-size:11px;color:#8ba9b8}
+.cam-credit{font-size:11px;color:#8ba9b8;margin-top:8px}
 @media(max-width:1000px){.sat-grid{grid-template-columns:1fr}#satMap{height:60vh}}
 </style>
 <main class="hud-main">
@@ -36,6 +53,7 @@ BODY = r"""
 <div class="sat-bar">
 <span class="sat-seg" id="satLayer"><button data-v="truecolor">True colour</button><button data-v="fires">Fires</button><button data-v="clouds">Clouds</button></span>
 <span class="sat-seg" id="satSat"><button data-v="viirs" title="NOAA-20 VIIRS, afternoon pass">VIIRS</button><button data-v="modis" title="Terra MODIS, morning pass">MODIS</button></span>
+<span class="sat-seg"><button id="camsBtn" onclick="toggleCams()" title="Public webcams worldwide (Windy)">📹 Live cameras</button></span>
 <label class="sat-date"><span class="muted">Day</span><input type="range" id="satDays" min="0" max="30" step="1" value="1"><b id="satDate">–</b></label>
 </div>
 <div id="satMap"></div>
@@ -46,6 +64,15 @@ BODY = r"""
 <div class="actions" style="margin-bottom:10px"><button class="hud-btn primary" id="addBtn" onclick="startAdd()">＋ Add pin</button><span class="muted" id="addHint" style="display:none">Click the map where the pin goes (Esc cancels).</span></div>
 <div id="pinList"></div>
 <div id="pinMsg" class="hud-msg"></div>
+</div></section>
+<section class="panel" id="camPanel" style="display:none"><div class="panel-head"><div class="panel-title">📹 Live cameras</div><div class="live" id="camState"></div></div><div class="panel-body">
+<div class="muted" id="camInfo">Public webcams in the map area (traffic, city, beach, ski, weather), most watched first. Click one to watch it.</div>
+<div class="cam-list" id="camList" style="margin-top:8px"></div>
+<div class="cam-credit">Webcams provided by <a href="https://www.windy.com/" target="_blank" rel="noopener">Windy.com</a> — <a href="https://www.windy.com/webcams/add" target="_blank" rel="noopener">add a webcam</a></div>
+<details style="margin-top:12px"><summary style="cursor:pointer;color:#5bd9ff;font:bold 12px Arial">Windy key (admins)</summary>
+<div class="muted" style="margin:8px 0">Live cameras need a free Windy Webcams API key: create one at api.windy.com/keys (choose Webcams API). It is kept on this PC only. Only cameras their owners publish are shown, never private CCTV.</div>
+<div class="actions"><input id="windyIn" placeholder="Windy API key" autocomplete="off" style="flex:1;min-width:160px"><button class="hud-btn" onclick="saveWindy()">Save key</button><button class="hud-btn danger" onclick="clearWindy()">Remove</button></div>
+<div id="windyMsg" class="hud-msg"></div></details>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🔥 Fire alerts</div><div class="live" id="fireState"></div></div><div class="panel-body">
 <div class="muted" id="fireInfo">Fires seen by the NOAA-20 satellite within 50 km of each pin, from NASA FIRMS.</div>
@@ -149,5 +176,39 @@ async function load(){let d;try{d=await fetch('/api/satellite/pins',{cache:'no-s
   else{const f=window.mapFocus&&mapFocus.get();if(f)map.setView([f.lat,f.lon],8);else if(d.centre)map.setView(d.centre,8)}
   if(window.addMapSearch)addMapSearch(map);
   loadFires();setInterval(loadFires,10*60*1000)}
-load();
+// ---------- Public webcams (Windy), shown when the Live cameras switch is on ----------
+let camsOn=false,cams=[],camLayer=L.layerGroup().addTo(map),camTimer=null,camAsked='';
+try{camsOn=localStorage.getItem('satCams')==='1'}catch(e){}
+function toggleCams(){camsOn=!camsOn;try{localStorage.setItem('satCams',camsOn?'1':'0')}catch(e){}camsUi();if(camsOn)loadCams();else{camLayer.clearLayers();cams=[]}}
+function camsUi(){$('camsBtn').classList.toggle('on',camsOn);$('camPanel').style.display=camsOn?'':'none'}
+map.on('moveend',()=>{if(!camsOn)return;clearTimeout(camTimer);camTimer=setTimeout(loadCams,600)});
+async function loadCams(){
+  if(map.getZoom()<5){camLayer.clearLayers();cams=[];$('camState').textContent='ZOOM IN';$('camInfo').textContent='Zoom in to a country or a city to see its public webcams.';$('camList').innerHTML='';return}
+  const b=map.getBounds(),bbox=[b.getNorth(),Math.min(180,b.getEast()),b.getSouth(),Math.max(-180,b.getWest())].map(v=>v.toFixed(3)).join(',');
+  if(bbox===camAsked)return;camAsked=bbox;$('camState').textContent='LOADING';
+  let d;try{d=await fetch('/api/satellite/webcams?bbox='+bbox,{cache:'no-store'}).then(r=>r.json())}catch(e){d={ok:false,error:'No answer from the PC.'}}
+  if(!d.key_set){$('camState').textContent='NO KEY';$('camInfo').innerHTML='Add a free Windy key below (admins) to see public webcams.';$('camList').innerHTML='';camAsked='';return}
+  if(d.error){$('camState').textContent='ERROR';$('camInfo').textContent=d.error;camAsked='';return}
+  cams=d.webcams||[];$('camState').textContent=cams.length+(cams.length===50?'+':'')+' IN VIEW';
+  $('camInfo').textContent=cams.length?'Public webcams in the map area, most watched first'+(cams.length===50?' (the first 50; zoom in for others)':'')+'. Click one to watch it.':'No public webcams in this area.';
+  camLayer.clearLayers();
+  cams.forEach((c,i)=>L.marker([c.lat,c.lon],{icon:L.divIcon({className:'',iconSize:[22,22],iconAnchor:[11,11],html:`<div class="cam-mark${c.live?' live':''}">${c.live?'●':'▶'}</div>`})})
+    .bindTooltip(esc(c.title)+(c.live?' · LIVE':'')).on('click',()=>watchCam(i)).addTo(camLayer));
+  $('camList').innerHTML=cams.map((c,i)=>`<button type="button" class="cam-item" data-i="${i}">${c.image?`<img src="${esc(c.image)}" alt="" loading="lazy">`:'<div class="noimg">📹</div>'}<span>${c.live?'<b>LIVE</b>':''}${esc(c.title)}</span></button>`).join('');
+  document.querySelectorAll('.cam-item').forEach(el=>el.onclick=()=>watchCam(+el.dataset.i))}
+function watchCam(i){const c=cams[i];if(!c)return;const src=c.live||c.player;
+  const v=document.createElement('div');v.className='cam-view';
+  v.innerHTML=`<div><header>${c.live?'<b style="color:#ff5d6c">● LIVE</b>':'<b style="color:#26ee89">TIMELAPSE</b>'}<span>${esc(c.title)}${c.city||c.country?' · '+esc([c.city,c.country].filter(Boolean).join(', ')):''}</span><button class="hud-btn">✕ Close</button></header>`
+    +(src?`<iframe src="${esc(src)}" allow="autoplay; fullscreen" allowfullscreen referrerpolicy="no-referrer-when-downgrade"></iframe>`:`<a href="${esc(c.page)}" target="_blank" rel="noopener"><img class="cam-still" src="${esc(c.image)}" alt=""></a>`)
+    +`<footer><span>${c.updated?'Picture updated '+esc(new Date(c.updated).toLocaleString()):''}</span><span>${c.page?`<a href="${esc(c.page)}" target="_blank" rel="noopener">Open on Windy.com ↗</a> · `:''}Webcams provided by <a href="https://www.windy.com/" target="_blank" rel="noopener">Windy.com</a></span></footer></div>`;
+  const close=()=>{v.remove();document.removeEventListener('keydown',esck,true)};const esck=e=>{if(e.key==='Escape'){e.stopPropagation();close()}};
+  v.querySelector('header button').onclick=close;v.addEventListener('mousedown',e=>{if(e.target===v)close()});document.addEventListener('keydown',esck,true);
+  document.body.appendChild(v);map.panTo([c.lat,c.lon])}
+async function windyPost(key){const r=await fetch('/api/satellite/windy-key',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({key})});
+  const d=await r.json().catch(()=>({ok:false}));if(r.status===403)d.error='Only an admin can change the Windy key.';
+  const e=$('windyMsg');e.className='hud-msg '+(d.ok?'ok':'bad');e.textContent=d.ok?(key?'Key saved.':'Key removed.'):(d.error||'Not saved.');if(d.ok){$('windyIn').value='';camAsked='';loadCams()}}
+function saveWindy(){const k=$('windyIn').value.trim();if(!k){$('windyMsg').className='hud-msg bad';$('windyMsg').textContent='Paste the key first.';return}windyPost(k)}
+async function clearWindy(){if(await uiConfirm('Remove the Windy key? Live cameras stop until a key is added again.'))windyPost('')}
+camsUi();
+load().then(()=>{if(camsOn)loadCams()});
 </script>"""

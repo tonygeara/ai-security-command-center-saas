@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.15.0"
+APP_VERSION = "V11.16.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -9214,6 +9214,7 @@ def api_incident_replay(inc_id):
 # ---------- Satellite tab (NASA GIBS imagery + FIRMS fire alerts; satellite.py) ----------
 SATELLITE_PINS_FILE = os.path.join(DATA_FOLDER, "satellite_pins.json")
 FIRMS_KEY_FILE = os.path.join(DATA_FOLDER, "firms_key.json")
+WINDY_KEY_FILE = os.path.join(DATA_FOLDER, "windy_key.json")
 SATELLITE_PAGE = hud_page("Satellite", pages.satellite.BODY, active="satellite")
 
 
@@ -9264,6 +9265,41 @@ def api_satellite_firms_key():
     except (TypeError, ValueError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     audit_record("satellite: FIRMS key " + ("saved" if on else "removed"), target="FIRMS")
+    return jsonify({"ok": True, "key_set": on})
+
+
+def _windy_get(url, params, headers, timeout):
+    r = requests.get(url, params=params, headers={**headers, "User-Agent": "AI-Security-Command-Center"}, timeout=timeout)
+    try:
+        return r.status_code, r.json()
+    except ValueError:
+        return r.status_code, None
+
+
+@app.route("/api/satellite/webcams")
+def api_satellite_webcams():
+    """Public webcams (Windy) in the map area ?bbox=north,east,south,west. The key stays on this PC."""
+    key = satellite_mod.load_key(WINDY_KEY_FILE)
+    if not key:
+        return jsonify({"ok": True, "key_set": False, "webcams": [], "error": ""})
+    try:
+        bbox = [float(v) for v in str(request.args.get("bbox") or "").split(",")]
+        if len(bbox) != 4:
+            raise ValueError("Send bbox=north,east,south,west.")
+        cams, error = satellite_mod.webcams_in(bbox, key, _windy_get)
+    except ValueError as e:
+        return jsonify({"ok": False, "key_set": True, "webcams": [], "error": str(e)}), 400
+    return jsonify({"ok": not error, "key_set": True, "webcams": cams, "error": error})
+
+
+@app.route("/api/satellite/windy-key", methods=["POST"])
+def api_satellite_windy_key():
+    """Admins: save (or, with an empty key, remove) the Windy Webcams API key."""
+    try:
+        on = satellite_mod.save_key(WINDY_KEY_FILE, (request.get_json(silent=True) or {}).get("key"), what="Windy API key")
+    except (TypeError, ValueError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    audit_record("satellite: Windy key " + ("saved" if on else "removed"), target="Windy Webcams")
     return jsonify({"ok": True, "key_set": on})
 
 
