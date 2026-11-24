@@ -1,13 +1,43 @@
 """A tiny MAVLink aircraft for the tests: announces itself like an ArduPilot (or PX4) quadcopter, arms, takes off,
 flies to DO_REPOSITION points, returns to launch, lands, and answers commands with COMMAND_ACK."""
 import math
+import socket
 import threading
 import time
 
-from pymavlink import mavutil
+from pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
 M = 1 / 111320.0
 GUIDED, RTL, LAND, LOITER = 4, 6, 9, 5
+
+
+class _Link:
+    """A MAVLink 2 link over its own UDP socket on an ephemeral port. (pymavlink's udpout binds the destination port on
+    Windows, which clashes with the PC listening on that port when both run on one machine, as in these tests.)"""
+
+    def __init__(self, port, source_system=1, source_component=1):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.setblocking(False)
+        self.dest = ("127.0.0.1", port)
+        self.mav = mavlink2.MAVLink(self, srcSystem=source_system, srcComponent=source_component)
+        self.mav.robust_parsing = True
+        self.pending = []
+
+    def write(self, data):
+        try:
+            self.sock.sendto(data, self.dest)
+        except OSError:
+            pass  # nobody listening yet (Windows reports it on the next call)
+
+    def recv_match(self, blocking=False):
+        while not self.pending:
+            try:
+                data = self.sock.recv(65535)
+            except OSError:
+                return None
+            self.pending.extend(m for m in (self.mav.parse_buffer(data) or []) if m.get_type() != "BAD_DATA")
+        return self.pending.pop(0)
 
 
 class FakeAircraft:
@@ -20,7 +50,7 @@ class FakeAircraft:
         self.landing = False
         self.stop = False
         self.commands = []
-        self.c = mavutil.mavlink_connection(f"udpout:127.0.0.1:{port}", source_system=1, source_component=1)
+        self.c = _Link(port)
 
     def start(self):
         threading.Thread(target=self._run, daemon=True).start()
