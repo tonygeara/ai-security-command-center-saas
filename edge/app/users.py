@@ -19,7 +19,7 @@ ROLE_NAMES = {"viewer": "Viewer: watch only", "operator": "Operator: watch and f
 
 # Paths anyone may open without signing in (the app also calls can-add-source on itself).
 OPEN_PATHS = ("/login", "/logout", "/reset-signin", "/hud.css", "/healthz", "/favicon.ico", "/api/cloud/can-add-source/", "/api/browser/",
-              "/api/remoteid/report")  # Remote ID receivers: checked with their token
+              "/api/remoteid/report", "/api/sensors/report")  # receivers and sensors: checked with their token
 # Read-only pages that still need an admin (they show secrets or manage users).
 ADMIN_ONLY_READ = ("/users", "/api/users", "/api/detector/remoteid-config", "/api/drone/link/pair", "/api/docks/setup", "/audit", "/api/audit")
 # What an operator may change: flying, routes, responses, which live feeds are shown.
