@@ -280,3 +280,123 @@ def test_distance_from_home_limit_is_off_for_now(det, client, fleet, monkeypatch
     assert "from home" not in (d._route_problem({"points": [far], "loop": False, "end": "hover"}, v1) or "")
     monkeypatch.setitem(d.DRONE_LIMITS, "max_distance_m", 500)
     assert "from home (limit 500 m)" in d._route_problem({"points": [far], "loop": False, "end": "hover"}, v1)
+
+
+# ---------- acoustic and passive RF sensors ----------
+def _sense(d, client, msg, token=None):
+    tok = token if token is not None else d.load_detector_settings()["remoteid_token"]
+    return client.post("/api/sensors/report", json=msg, headers={"X-Sensor-Token": tok})
+
+
+def _toward(a, b):
+    from geo import _bearing_deg
+    return round(_bearing_deg(a["lat"], a["lon"], b["lat"], b["lon"]) % 360, 1)
+
+
+def test_acoustic_and_rf_sensors_raise_the_alarm_and_locate_the_drone(det, client):
+    d = det
+    d.SENSORS.hits.clear()
+    north, east, drone = offset(300, -100), offset(250, 300), offset(450, 100)
+    r = sites(client, {"name": "North mast", "lat": north["lat"], "lon": north["lon"], "range_m": 800, "sensor": "acoustic"},
+              {"name": "East mast", "lat": east["lat"], "lon": east["lon"], "range_m": 1500, "sensor": "rf"},
+              {"name": "Gate", "lat": HOME[0], "lon": HOME[1], "range_m": 600})
+    ids = {x["name"]: x["id"] for x in r["detectors"]}
+    assert {x["name"]: x["sensor"] for x in r["detectors"]} == {"North mast": "acoustic", "East mast": "rf", "Gate": ""}
+    assert client.post("/api/detector/sites", json={"detectors": [{"name": "X", "lat": 1, "lon": 1, "sensor": "laser"}]}).status_code == 400
+    msg = {"detections": [{"sensor": "North mast", "detected": True, "confidence": 82, "bearing": _toward(north, drone), "type": "quadcopter"}]}
+    assert _sense(d, client, msg, token="nope").status_code == 401
+    assert _sense(d, client, msg).get_json() == {"ok": True, "accepted": 1}
+    d.detector_tick()
+    (a,) = client.get("/api/detector/alarm").get_json()["alarms"]
+    assert a["kind"] == "acoustic" and "North mast: acoustic sensor hears a drone (quadcopter, confidence 82%)" in a["text"]
+    st = client.get("/api/detector").get_json()
+    assert st["sensors"]["hearing"] == 1 and not any(x.get("estimated") for x in st["drones"])  # one direction: not located yet
+    # The RF sensor (by its id) hears it too: the two directions cross where the drone is.
+    rf = {"sensor": ids["East mast"], "confidence": 0.9, "bearing": _toward(east, drone), "protocol": "OcuSync", "freq_mhz": 2440, "rssi_dbm": -61}
+    assert _sense(d, client, rf).get_json()["accepted"] == 1
+    d.detector_tick()
+    alarms = client.get("/api/detector/alarm").get_json()["alarms"]
+    rf_alarm = next(x for x in alarms if x["kind"] == "rf")
+    assert "RF sensor picks up a drone's radio (OcuSync, 2.44 GHz, -61 dBm, confidence 90%)" in rf_alarm["text"]
+    assert "Located at" in rf_alarm["text"] and "North mast and East mast cross" in rf_alarm["text"]
+    st = client.get("/api/detector").get_json()
+    (fix,) = [x for x in st["drones"] if x.get("estimated")]
+    assert d._distance_m(fix["lat"], fix["lon"], drone["lat"], drone["lon"]) < 5 and fix["intruder"] and fix["method"] == "cross"
+    assert any(x["slot"] == fix["slot"] for x in st["seen"][ids["Gate"]])  # located inside the Gate detector's circle
+    assert len(client.get("/api/detector/alarm").get_json()["alarms"]) == 2  # no third alarm for the located drone
+    # Heard again a few seconds later: no new alarm (it alerts again only after a quiet minute).
+    _sense(d, client, msg)
+    d.detector_tick()
+    assert len(client.get("/api/detector/alarm").get_json()["alarms"]) == 2
+    client.post("/api/detector/alarm/ack")
+    d.SENSORS.hits.clear()
+
+
+def test_sensor_details_low_confidence_unknown_names_and_one_sensor_distance(det, client):
+    d = det
+    d.SENSORS.hits.clear()
+    mast = offset(0, 0)
+    sites(client, {"name": "Mast", "lat": mast["lat"], "lon": mast["lon"], "range_m": 1000, "sensor": "rf"})
+    client.post("/api/detector/settings", json={"sensor_min_conf": 0.7})
+    assert _sense(d, client, {"sensor": "Mast", "confidence": 0.5, "bearing": 90}).get_json()["accepted"] == 1
+    d.detector_tick()
+    assert not client.get("/api/detector/alarm").get_json()["alarms"]  # below the alarm confidence
+    # A distance from one sensor is enough to place it.
+    _sense(d, client, {"sensor": "mast", "confidence": 0.95, "bearing": 90, "distance_m": 400})
+    d.detector_tick()
+    st = client.get("/api/detector").get_json()
+    (fix,) = [x for x in st["drones"] if x.get("estimated")]
+    assert abs(d._distance_m(mast["lat"], mast["lon"], fix["lat"], fix["lon"]) - 400) < 3 and fix["method"] == "distance"
+    # A report for a sensor that isn't on the map is listed so the admin can name a detector the same.
+    assert _sense(d, client, {"sensor": "Roof"}).get_json()["accepted"] == 0
+    assert "Roof" in client.get("/api/detector").get_json()["sensors"]["unknown_sensors"]
+    # Not hearing anything any more: the direction and the located drone go away.
+    _sense(d, client, {"sensor": "Mast", "detected": False})
+    st = client.get("/api/detector").get_json()
+    assert st["sensors"]["hearing"] == 0 and not any(x.get("estimated") for x in st["drones"])
+    # Sensor messages and Remote ID messages can arrive together, on the Remote ID address too.
+    both = [{"sensor": "Mast", "bearing": 10}, {"id": "RID-9", "lat": mast["lat"], "lon": mast["lon"]}]
+    assert _rid(d, client, both).get_json()["accepted"] == 2
+    client.post("/api/detector/settings", json={"sensor_min_conf": 0.6})
+    client.post("/api/detector/alarm/ack")
+    d.SENSORS.hits.clear()
+    d.REMOTE_ID.tracks.clear()
+    import users
+    assert users.allowed("", "POST", "/api/sensors/report") or "/api/sensors/report" in users.OPEN_PATHS
+
+
+def test_sensors_hearing_our_own_drone_do_not_locate_an_intruder(det, client, fleet):
+    d = det
+    d.SENSORS.hits.clear()
+    if os.path.exists(d.MY_DRONES_FILE):
+        os.remove(d.MY_DRONES_FILE)
+    (v1,) = fleet(1)
+    a, b = offset(-200, -200), offset(-200, 200)
+    sites(client, {"name": "SW", "lat": a["lat"], "lon": a["lon"], "range_m": 800, "sensor": "acoustic"},
+          {"name": "SE", "lat": b["lat"], "lon": b["lon"], "range_m": 800, "sensor": "acoustic"})
+    t = d.get_link(v1)["telemetry"]
+    here = {"lat": t["lat"], "lon": t["lon"]}
+    _sense(d, client, [{"sensor": "SW", "bearing": _toward(a, here)}, {"sensor": "SE", "bearing": _toward(b, here)}])
+    assert not any(x.get("estimated") for x in d._known_drones())  # where our own drone is: it's ours
+    client.post("/api/detector/alarm/ack")
+    d.SENSORS.hits.clear()
+
+
+def test_sensor_hearing_our_flying_drone_does_not_raise_the_alarm(det, client, monkeypatch):
+    d = det
+    d.SENSORS.hits.clear()
+    mast, ours = offset(0, 0), offset(300, 0)
+    sites(client, {"name": "Mast", "lat": mast["lat"], "lon": mast["lon"], "range_m": 800, "sensor": "acoustic"})
+    mine = {"slot": "drone", "label": "Drone", "lat": ours["lat"], "lon": ours["lon"], "alt": 30, "flying": True,
+            "virtual": False, "mine": True, "intruder": False}
+    real = d._known_drones
+    monkeypatch.setattr(d, "_known_drones", lambda: [mine] + [x for x in real() if x["slot"] != "drone"])
+    _sense(d, client, {"sensor": "Mast", "bearing": _toward(mast, ours) + 5})
+    d.detector_tick()
+    assert not client.get("/api/detector/alarm").get_json()["alarms"]  # it's ours
+    _sense(d, client, {"sensor": "Mast", "bearing": (_toward(mast, ours) + 90) % 360})
+    d.detector_tick()
+    (a,) = client.get("/api/detector/alarm").get_json()["alarms"]  # another direction: an intruder
+    assert a["kind"] == "acoustic"
+    client.post("/api/detector/alarm/ack")
+    d.SENSORS.hits.clear()

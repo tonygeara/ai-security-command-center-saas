@@ -1,6 +1,6 @@
 """Detector drones tab: drone detectors pinned on the map, each with a detection range.
 
-A detector sees drones in two ways:
+A detector sees drones in these ways:
   * Camera AI (YOLO): the PC checks the detector's camera picture every few seconds with a YOLO model trained on drones
     (an ONNX file an admin uploads: YOLOv5 / YOLOv8 / YOLO11 exports work). Run by OpenCV, no extra software.
   * Position: drones whose position the system knows (real and virtual) are detected when they come within the
@@ -20,6 +20,7 @@ import numpy as np
 from geo import _bearing_deg, _distance_m
 
 MAX_DETECTORS = 50
+SENSOR_KINDS = ("", "acoustic", "rf")  # "": an ordinary detector (camera / position); or an acoustic or RF sensor
 MIN_RANGE_M, MAX_RANGE_M = 20, 10000
 YOLO_SIZE = 640
 _lock = threading.Lock()
@@ -57,11 +58,14 @@ def clean_detector(d, cameras=()):
     cam = str(d.get("camera") or "")
     if cam and cam not in cameras:
         raise ValueError(f"Detector “{name}”: camera “{cam}” doesn't exist.")
+    sensor = str(d.get("sensor") or "")
+    if sensor not in SENSOR_KINDS:
+        raise ValueError(f"Detector “{name}”: unknown sensor type “{sensor}”.")
     did = str(d.get("id") or "")
     if not re.fullmatch(r"[a-f0-9]{12}", did):
         did = uuid.uuid4().hex[:12]
     return {"id": did, "name": name, "lat": round(lat, 6), "lon": round(lon, 6), "range_m": rng, "camera": cam,
-            "enabled": d.get("enabled") is not False}
+            "sensor": sensor, "enabled": d.get("enabled") is not False}
 
 
 def load_detectors(path):
@@ -88,7 +92,7 @@ def save_detectors(path, detectors, cameras):
 
 
 DEFAULT_SETTINGS = {"telegram": True, "min_score": 0.45, "classes": ["drone"],
-                    "remoteid_udp": False, "remoteid_port": 47911, "remoteid_token": ""}
+                    "remoteid_udp": False, "remoteid_port": 47911, "remoteid_token": "", "sensor_min_conf": 0.6}
 
 
 def load_settings(path):
@@ -109,6 +113,7 @@ def clean_settings(s):
     return {"telegram": bool(s.get("telegram")), "remoteid_udp": bool(s.get("remoteid_udp")),
             "remoteid_port": max(1024, min(65535, int(float(s.get("remoteid_port") or 47911)))), "remoteid_token": token,
             "min_score": max(0.1, min(0.95, float(s.get("min_score") or 0.45))),
+            "sensor_min_conf": max(0.1, min(0.99, float(s.get("sensor_min_conf") or 0.6))),
             "classes": [c for c in classes if c] or ["drone"]}
 
 
@@ -346,3 +351,171 @@ class RemoteIdTracks:
             return {"sources": [{"source": s, "ago_s": round(t - v["at"]), "count": v["count"]}
                                 for s, v in sorted(self.sources.items(), key=lambda x: -x[1]["at"])[:10]],
                     "heard": sum(1 for v in self.tracks.values() if t - v["seen"] <= REMOTEID_MAX_AGE_S)}
+
+
+# ---------- acoustic and passive RF sensors ----------
+# Each sensor is a detector of type "acoustic" or "rf" pinned on the map. The sensor (or a small computer next to it)
+# sends what it hears to this PC as JSON, the same way as Remote ID receivers (same UDP port, or HTTP POST with the
+# receiver token):
+#   {"sensor": "<detector name or id>", "detected": true, "confidence": 0.82, "bearing": 210,
+#    "type": "quadcopter", "protocol": "OcuSync", "freq_mhz": 2440, "rssi_dbm": -61, "distance_m": 400}
+# Only "sensor" is required; "bearing" (degrees from north, where the sound or signal comes from) lets the PC draw the
+# direction, and two sensors' directions crossing give the drone's estimated position. "distance_m" (if the sensor
+# estimates it) gives a position from one sensor alone.
+SENSOR_MAX_AGE_S = 8          # a sensor that hasn't reported a drone for this long hears nothing now
+SENSOR_FIX_MAX_AGE_S = 5      # bearings combined into a position must be this recent
+SENSOR_FIX_MERGE_M = 60       # estimated positions closer than this are one drone
+
+
+def parse_sensor_report(msg):
+    """One acoustic / RF sensor report → dict, or None if it isn't one."""
+    if not isinstance(msg, dict):
+        return None
+    sensor = msg.get("sensor", msg.get("sensor_id", msg.get("sensor_name")))
+    if sensor in (None, ""):
+        return None
+    sensor = re.sub(r"[\x00-\x1f<>]", "", str(sensor)).strip()[:40]
+    kind = str(msg.get("kind") or msg.get("sensor_type") or "").lower()
+    kind = "acoustic" if kind in ("acoustic", "audio", "sound", "microphone") else "rf" if kind in ("rf", "radio") else ""
+    conf = _num(msg.get("confidence", msg.get("score", msg.get("probability"))))
+    if conf is not None and conf > 1:
+        conf /= 100.0  # sent as a percentage
+    detected = msg.get("detected", msg.get("drone", True))
+    detected = detected if isinstance(detected, bool) else str(detected).lower() not in ("0", "false", "no", "")
+    bearing = _num(msg.get("bearing", msg.get("azimuth", msg.get("direction", msg.get("doa")))))
+    dist = _num(msg.get("distance_m", msg.get("distance", msg.get("range_m"))))
+    out = {"sensor": sensor, "kind": kind, "detected": detected,
+           "confidence": round(max(0.0, min(1.0, conf if conf is not None else 1.0)), 3),
+           "bearing": round(bearing % 360, 1) if bearing is not None else None,
+           "distance_m": round(dist) if dist is not None and 0 < dist <= 20000 else None,
+           "drone_type": re.sub(r"[\x00-\x1f<>]", "", str(msg.get("type") or msg.get("drone_type") or msg.get("label") or "")).strip()[:40],
+           "protocol": re.sub(r"[\x00-\x1f<>]", "", str(msg.get("protocol") or msg.get("link") or "")).strip()[:40]}
+    f, r = _num(msg.get("freq_mhz", msg.get("frequency_mhz"))), _num(msg.get("rssi_dbm", msg.get("rssi")))
+    if f is not None and 1 <= f <= 100000:
+        out["freq_mhz"] = round(f, 1)
+    if r is not None and -150 <= r <= 30:
+        out["rssi_dbm"] = round(r, 1)
+    return out
+
+
+def split_payload(data):
+    """A message from a receiver or a sensor → (sensor reports, Remote ID reports)."""
+    if isinstance(data, dict):
+        for k in ("detections", "sensors", "drones", "messages", "reports", "data"):
+            if isinstance(data.get(k), list):
+                data = data[k]
+                break
+    items = (data if isinstance(data, list) else [data])[:200]
+    sensors = [r for r in (parse_sensor_report(x) for x in items) if r]
+    rid = [r for r in (parse_remoteid(x) for x in items if not parse_sensor_report(x)) if r]
+    return sensors, rid
+
+
+class SensorHits:
+    """What each acoustic / RF sensor hears now (its latest report)."""
+
+    def __init__(self, now=time.time):
+        self.now, self.lock, self.hits, self.sources, self.unknown = now, threading.Lock(), {}, {}, {}
+
+    def update(self, reports, source, detectors):
+        """Match each report to its sensor (detector id or name); returns how many were matched."""
+        t, n = self.now(), 0
+        by_id = {d["id"]: d for d in detectors}
+        by_name = {d["name"].casefold(): d for d in detectors}
+        with self.lock:
+            for r in reports:
+                d = by_id.get(r["sensor"]) or by_name.get(r["sensor"].casefold())
+                if not d:
+                    self.unknown[r["sensor"]] = t
+                    continue
+                self.hits[d["id"]] = {**r, "detector": d["id"], "kind": d.get("sensor") or r["kind"] or "acoustic",
+                                      "seen": t, "source": source}
+                n += 1
+            self.sources[source] = {"at": t, "count": len(reports)}
+            for k in [k for k, v in self.unknown.items() if t - v > 600]:
+                self.unknown.pop(k, None)
+        return n
+
+    def live(self, max_age=SENSOR_MAX_AGE_S):
+        """Sensors hearing a drone now: [hit]."""
+        t = self.now()
+        with self.lock:
+            return [dict(v, age_s=round(t - v["seen"], 1)) for v in self.hits.values()
+                    if v["detected"] and t - v["seen"] <= max_age]
+
+    def status(self):
+        t = self.now()
+        with self.lock:
+            return {"sources": [{"source": s, "ago_s": round(t - v["at"]), "count": v["count"]}
+                                for s, v in sorted(self.sources.items(), key=lambda x: -x[1]["at"])[:10]],
+                    "hearing": sum(1 for v in self.hits.values() if v["detected"] and t - v["seen"] <= SENSOR_MAX_AGE_S),
+                    "unknown_sensors": sorted(self.unknown)[:10]}
+
+
+_M_PER_DEG = 111320.0
+
+
+def _offset(lat, lon, bearing, dist):
+    """The point dist metres from (lat, lon) towards bearing (degrees from north)."""
+    b = math.radians(bearing)
+    return (lat + dist * math.cos(b) / _M_PER_DEG,
+            lon + dist * math.sin(b) / (_M_PER_DEG * math.cos(math.radians(lat))))
+
+
+def _cross(a, b):
+    """Where two sensors' direction lines cross, in front of both: (lat, lon, distance from a, from b) or None."""
+    lat0 = a["lat"]
+    k = _M_PER_DEG * math.cos(math.radians(lat0))
+    ax, ay = 0.0, 0.0
+    bx, by = (b["lon"] - a["lon"]) * k, (b["lat"] - a["lat"]) * _M_PER_DEG
+    da = (math.sin(math.radians(a["bearing"])), math.cos(math.radians(a["bearing"])))
+    db = (math.sin(math.radians(b["bearing"])), math.cos(math.radians(b["bearing"])))
+    den = da[0] * db[1] - da[1] * db[0]
+    if abs(den) < math.sin(math.radians(8)):  # nearly parallel: no useful crossing
+        return None
+    ta = ((bx - ax) * db[1] - (by - ay) * db[0]) / den
+    tb = ((bx - ax) * da[1] - (by - ay) * da[0]) / den
+    if ta <= 0 or tb <= 0:
+        return None
+    return a["lat"] + ta * da[1] / _M_PER_DEG, a["lon"] + ta * da[0] / k, ta, tb
+
+
+def locate(hits, detectors):
+    """Estimated drone positions from the sensors hearing a drone now:
+    two sensors' directions crossing within both ranges, or one sensor with a direction and a distance.
+    → [{"lat", "lon", "sensors": [names], "kinds": [...], "method": "cross" | "distance", "confidence"}]."""
+    by_id = {d["id"]: d for d in detectors if d["enabled"] and d.get("sensor")}
+    pts = []
+    for h in hits:
+        d = by_id.get(h["detector"])
+        if d and h.get("bearing") is not None:
+            pts.append({**h, "lat": d["lat"], "lon": d["lon"], "range_m": d["range_m"], "name": d["name"]})
+    fixes = []
+    fresh = [p for p in pts if p.get("age_s", 0) <= SENSOR_FIX_MAX_AGE_S]
+    for i, a in enumerate(fresh):
+        for b in fresh[i + 1:]:
+            c = _cross(a, b)
+            if c and c[2] <= a["range_m"] * 1.1 and c[3] <= b["range_m"] * 1.1:
+                fixes.append({"lat": c[0], "lon": c[1], "sensors": [a["name"], b["name"]], "kinds": sorted({a["kind"], b["kind"]}),
+                              "method": "cross", "confidence": round(min(a["confidence"], b["confidence"]), 2)})
+    for p in pts:
+        if p.get("distance_m") and p["distance_m"] <= p["range_m"] * 1.1 and not any(p["name"] in f["sensors"] for f in fixes):
+            lat, lon = _offset(p["lat"], p["lon"], p["bearing"], p["distance_m"])
+            fixes.append({"lat": lat, "lon": lon, "sensors": [p["name"]], "kinds": [p["kind"]], "method": "distance",
+                          "confidence": p["confidence"]})
+    merged = []
+    for f in fixes:
+        m = next((x for x in merged if _distance_m(x["lat"], x["lon"], f["lat"], f["lon"]) <= SENSOR_FIX_MERGE_M), None)
+        if m:
+            n = m.get("_n", 1)
+            m["lat"], m["lon"] = (m["lat"] * n + f["lat"]) / (n + 1), (m["lon"] * n + f["lon"]) / (n + 1)
+            m["_n"] = n + 1
+            m["sensors"] = sorted(set(m["sensors"]) | set(f["sensors"]))
+            m["kinds"] = sorted(set(m["kinds"]) | set(f["kinds"]))
+            m["method"] = "cross" if "cross" in (m["method"], f["method"]) else m["method"]
+        else:
+            merged.append(dict(f))
+    for m in merged:
+        m.pop("_n", None)
+        m["lat"], m["lon"] = round(m["lat"], 7), round(m["lon"], 7)
+    return merged

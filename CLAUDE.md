@@ -49,6 +49,15 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.20.0**: **acoustic and passive RF drone sensors** on Detector drones. A detector's `sensor`
+  is "" / "acoustic" / "rf" (`dronedetect.SENSOR_KINDS`); sensors report JSON (`{"sensor": name or id, "detected",
+  "confidence", "bearing", "distance_m", "type", "protocol", "freq_mhz", "rssi_dbm"}`) on the Remote ID UDP port or HTTP
+  `/api/sensors/report` (open path, same token, `X-Sensor-Token`); `dronedetect.split_payload` separates sensor and
+  Remote ID messages; `SensorHits` keeps each sensor's latest report (8 s); `locate()` crosses two sensors' bearings
+  (within both ranges, not near-parallel) or uses one sensor's distance → drones `fix:<n>` (estimated, no alarm of their
+  own); a sensor that starts hearing (quiet 60 s before, confidence ≥ `sensor_min_conf` 0.6) raises the alarm (kind
+  acoustic / rf) unless its bearing points (±12°) at one of our flying drones in range. Test sender
+  `edge/tools/sensor_send.py`. Listening only, no jamming. Not yet tried with real sensors.
 - Released and approved 24 Nov (PRs #46, #47; release `edge-v11.19.0`, the first build failed on a Windows-only test port clash fixed in
   `tests/fake_mavlink.py`, then rebuilt by hand): Edge **V11.19.0**: **PX4 / ArduPilot drones over MAVLink** (`mavlink_bridge.py`, pymavlink; each
   `drone-m<N>` slot is a `MavlinkDrone` linked to the PC like a Drone Link phone; saved in `mavlink_drones.json`;
@@ -158,7 +167,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 24 Nov (V11.19.0 released and approved 24 Nov; 86 features; 31 capabilities, 20
+- Features and Capabilities docs current on 24 Nov (V11.19.0 released and approved 24 Nov, V11.20.0 in pull request; 87 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.

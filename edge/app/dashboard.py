@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.19.0"
+APP_VERSION = "V11.20.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -9605,7 +9605,10 @@ DETECTOR_CAMERA_EVERY_S = 3      # how often each detector's camera picture is c
 DETECTOR_REALERT_S = 60          # the same drone at the same detector alerts again only after this long out of range
 DETECTOR_YOLO = dronedetect_mod.Yolo(DETECTOR_MODEL_FILE)
 REMOTE_ID = dronedetect_mod.RemoteIdTracks()
-_detector = {"inside": {}, "left": {}, "cam_at": {}, "cam_alert": {}, "last_cam": {}, "events": [], "photos": {}, "alarms": []}
+SENSORS = dronedetect_mod.SensorHits()  # acoustic and passive RF sensors
+SENSOR_OWN_DRONE_DEG = 12  # a sensor hearing a drone in the direction of one of our flying drones is hearing ours
+_detector = {"inside": {}, "left": {}, "cam_at": {}, "cam_alert": {}, "last_cam": {}, "events": [], "photos": {}, "alarms": [],
+             "sensor_last": {}}
 _detector_lock = threading.RLock()
 
 
@@ -9663,7 +9666,19 @@ def _known_drones():
         if r.get("op_lat") is not None:
             x["operator"] = {"lat": r["op_lat"], "lon": r["op_lon"]}
         out.append(x)
+    # Acoustic / RF sensors: where two sensors' directions cross (or one gives a distance), an estimated drone.
+    for n, f in enumerate(_sensor_fixes(), 1):
+        if any(x["mine"] and _distance_m(x["lat"], x["lon"], f["lat"], f["lon"]) <= dronedetect_mod.SENSOR_FIX_MERGE_M for x in linked):
+            continue  # one of our own flying drones, heard by our sensors
+        how = " + ".join("acoustic" if k == "acoustic" else "RF" for k in f["kinds"])
+        out.append({"slot": f"fix:{n}", "label": f"Drone located by {how}", "lat": f["lat"], "lon": f["lon"], "alt": 0,
+                    "flying": True, "virtual": False, "estimated": True, "mine": False, "intruder": True,
+                    "sensors": f["sensors"], "method": f["method"], "confidence": f["confidence"]})
     return out
+
+
+def _sensor_fixes():
+    return dronedetect_mod.locate(SENSORS.live(), dronedetect_mod.load_detectors(DETECTORS_FILE))
 
 
 def _detector_event(det, kind, text, drone=None, photo=None, extra=None):
@@ -9676,7 +9691,7 @@ def _detector_event(det, kind, text, drone=None, photo=None, extra=None):
             _detector["photos"][ev["id"]] = photo
             for k in list(_detector["photos"])[:-30]:
                 _detector["photos"].pop(k, None)
-    if kind in ("position", "camera", "remote_id"):
+    if kind in ("position", "camera", "remote_id", "acoustic", "rf"):
         with _detector_lock:
             _detector["alarms"].append({"id": ev["id"], "at": ev["at"], "text": text, "detector": det["name"], "kind": kind,
                                         "photo": bool(photo), "acked": False})
@@ -9712,6 +9727,8 @@ def detector_tick(now=None):
                 key = (did, x["slot"])
                 first = key not in _detector["inside"]
                 _detector["inside"][key] = now
+                if x.get("estimated"):
+                    continue  # located by sensors: their own alarm went off already
                 if first and x["intruder"] and now - _detector["left"].get(key, 0) > DETECTOR_REALERT_S:
                     d = by_id[did]
                     pilot = ""
@@ -9728,6 +9745,29 @@ def detector_tick(now=None):
         for key in [k for k in _detector["inside"] if k not in current]:
             _detector["inside"].pop(key, None)
             _detector["left"][key] = now
+    # Acoustic and RF sensors: a sensor that starts hearing a drone (after a quiet minute) raises the alarm, unless the
+    # direction it hears points at one of our own flying drones within its range (it's hearing ours).
+    fixes, ours = None, None
+    for h in SENSORS.live():
+        d = by_id.get(h["detector"])
+        if not d or not d["enabled"] or not d.get("sensor") or h["confidence"] < cfg["sensor_min_conf"]:
+            continue
+        if h.get("bearing") is not None:
+            if ours is None:
+                ours = [x for x in _known_drones() if x["mine"] and x["flying"]]
+            if any(_distance_m(d["lat"], d["lon"], x["lat"], x["lon"]) <= d["range_m"]
+                   and abs(_wrap180(_bearing_deg(d["lat"], d["lon"], x["lat"], x["lon"]) - h["bearing"])) <= SENSOR_OWN_DRONE_DEG
+                   for x in ours):
+                continue
+        with _detector_lock:
+            quiet = now - _detector["sensor_last"].get(d["id"], 0) > DETECTOR_REALERT_S
+            _detector["sensor_last"][d["id"]] = now
+        if not quiet:
+            continue
+        if fixes is None:
+            fixes = _sensor_fixes()
+        _detector_event(d, d["sensor"], _sensor_text(d, h, fixes),
+                        extra={"sensor": {k: h.get(k) for k in ("confidence", "bearing", "distance_m", "drone_type", "protocol", "freq_mhz", "rssi_dbm")}})
     if not DETECTOR_YOLO.installed():
         return seen
     for d in dets:
@@ -9747,6 +9787,29 @@ def detector_tick(now=None):
                             f"(YOLO {best['score']:.0%}), within about {d['range_m']} m.", photo=jpeg,
                             extra={"boxes": found[:10], "camera": d["camera"]})
     return seen
+
+
+def _sensor_text(d, h, fixes):
+    """The alarm sentence for a sensor that hears a drone."""
+    what = "acoustic sensor hears a drone" if d["sensor"] == "acoustic" else "RF sensor picks up a drone's radio"
+    extra = [h["drone_type"]] if h.get("drone_type") else []
+    if d["sensor"] == "rf":
+        if h.get("protocol"):
+            extra.append(h["protocol"])
+        if h.get("freq_mhz"):
+            extra.append(f"{h['freq_mhz'] / 1000:.2f} GHz" if h["freq_mhz"] >= 1000 else f"{h['freq_mhz']:.0f} MHz")
+        if h.get("rssi_dbm") is not None:
+            extra.append(f"{h['rssi_dbm']:.0f} dBm")
+    extra.append(f"confidence {h['confidence']:.0%}")
+    text = f"{d['name']}: {what} ({', '.join(extra)})"
+    if h.get("bearing") is not None:
+        text += f", from bearing {h['bearing']:.0f}°" + (f", about {h['distance_m']} m away" if h.get("distance_m") else "")
+    text += "."
+    fix = next((f for f in fixes if d["name"] in f["sensors"]), None)
+    if fix:
+        text += f" Located at {fix['lat']:.5f}, {fix['lon']:.5f}" + (
+            f", where {' and '.join(fix['sensors'])} cross." if fix["method"] == "cross" else ".")
+    return text
 
 
 def _detector_worker():
@@ -9783,6 +9846,7 @@ def api_detector():
     return jsonify({"ok": True, "detectors": dets, "settings": cfg, "drones": drones, "seen": seen, "events": events, "fleet": fleet,
                     "camera_checks": last_cam, "cameras": _detector_cameras(), "centre": list(centre) if centre else None,
                     "remote_id": {**REMOTE_ID.status(), "udp": _remoteid_udp["bound"], "udp_error": _remoteid_udp["error"]},
+                    "sensors": {**SENSORS.status(), "hits": SENSORS.live()},
                     "model": {"installed": DETECTOR_YOLO.installed(), "error": DETECTOR_YOLO.error if DETECTOR_YOLO.installed() else "",
                               "size_mb": round(os.path.getsize(DETECTOR_MODEL_FILE) / 1e6, 1) if DETECTOR_YOLO.installed() else 0}})
 
@@ -9851,24 +9915,28 @@ _remoteid_udp = {"bound": None, "error": ""}
 
 
 def _remoteid_report(data, source):
-    reports = dronedetect_mod.parse_remoteid_payload(data)
+    """A message from a Remote ID receiver or an acoustic / RF sensor: how many reports were accepted (a sensor report
+    counts once it matches a detector on the map)."""
+    sensors, reports = dronedetect_mod.split_payload(data)
     if reports:
         REMOTE_ID.update(reports, source)
-    return reports
+    matched = SENSORS.update(sensors, source, dronedetect_mod.load_detectors(DETECTORS_FILE)) if sensors else 0
+    return len(reports) + matched
 
 
 @app.route("/api/remoteid/report", methods=["POST"])
+@app.route("/api/sensors/report", methods=["POST"])
 def api_remoteid_report():
-    """Remote ID receivers on the network (no sign-in): JSON report(s) with the receiver token
-    (header X-RemoteID-Token or ?token=). Shown on the Detector drones tab within 2 seconds."""
+    """Remote ID receivers and acoustic / RF sensors on the network (no sign-in): JSON report(s) with the receiver token
+    (header X-RemoteID-Token or X-Sensor-Token, or ?token=). Shown on the Detector drones tab within 2 seconds."""
     import hmac
-    token = request.headers.get("X-RemoteID-Token") or request.args.get("token") or ""
+    token = request.headers.get("X-RemoteID-Token") or request.headers.get("X-Sensor-Token") or request.args.get("token") or ""
     if not hmac.compare_digest(str(token), load_detector_settings()["remoteid_token"]):
         return jsonify({"ok": False, "error": "Wrong or missing receiver token."}), 401
     if not tab_on("drone_detector"):
         return jsonify({"ok": False, "error": tab_off_reason("drone_detector")}), 403
-    reports = _remoteid_report(request.get_json(silent=True), "http " + (request.remote_addr or "?"))
-    return jsonify({"ok": True, "accepted": len(reports)})
+    accepted = _remoteid_report(request.get_json(silent=True), "http " + (request.remote_addr or "?"))
+    return jsonify({"ok": True, "accepted": accepted})
 
 
 @app.route("/api/detector/remoteid-config", methods=["GET", "POST"])
@@ -9879,7 +9947,7 @@ def api_detector_remoteid_config():
         audit_record("drone detector: new Remote ID receiver token", target="Remote ID")
     cfg = load_detector_settings()
     return jsonify({"ok": True, "token": cfg["remoteid_token"], "udp": cfg["remoteid_udp"], "port": cfg["remoteid_port"],
-                    "http_path": "/api/remoteid/report"})
+                    "http_path": "/api/remoteid/report", "sensor_path": "/api/sensors/report"})
 
 
 def _remoteid_udp_worker():
