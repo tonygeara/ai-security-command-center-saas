@@ -65,3 +65,33 @@ def test_telegram_send_drone_button_uses_nearest(d, client, fleet):
     r = d.dispatch_drone("front", by="telegram")
     assert r["ok"] and r["drone"] == v2
     d.recall_drone("test")
+
+
+def test_backup_drone_with_each_response(d, client, fleet):
+    """Drone tab switch: with each response, the next ready drone flies to the spot as a backup and goes home with it."""
+    v1, v2 = fleet(2)
+    d._virtual_cfg["demo_auto"] = True
+    cam = offset(40, 0)
+    try:
+        client.post("/api/response/settings", json={"camera_locations": {"front": cam}, "min_battery": 20, "response_backup": True})
+        assert client.get("/api/response/settings").get_json()["settings"]["response_backup"] is True
+        r = client.post("/api/response/dispatch", json={"camera": "front"}).get_json()
+        assert r["ok"] and "Backup:" in r["message"], r
+        primary = r["drone"]
+        backup = d.drone_response["backup"]
+        assert backup in (v1, v2) and backup != primary
+        run = d.run_of(backup)
+        assert run and run["name"] == "Backup for front" and run["route"]["alt"] == d.load_response_settings()["altitude_m"] + 10
+        assert wait_until(lambda: d.virtual_drones[backup].flying and d.virtual_drones[backup].alt > 5, 40)
+        # Recall: both go home.
+        assert client.post("/api/response/recall").get_json()["ok"]
+        assert "backup" not in d.drone_response
+        assert wait_until(lambda: d.run_of(backup) is None, 15)
+        assert wait_until(lambda: d.virtual_drones[backup].mode in ("GO_HOME", "AUTO_LANDING") or not d.virtual_drones[backup].flying, 20)
+        # Switch off: no backup.
+        d.drone_response.update(active=False, phase="", routing=False)
+        client.post("/api/response/settings", json={"response_backup": False})
+        assert wait_until(lambda: not d.virtual_drones[v1].flying and not d.virtual_drones[v2].flying, 120)
+    finally:
+        client.post("/api/response/settings", json={"response_backup": False})
+        d._virtual_cfg["demo_auto"] = False

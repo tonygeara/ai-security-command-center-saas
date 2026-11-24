@@ -87,24 +87,36 @@ def save_detectors(path, detectors, cameras):
     return clean
 
 
-DEFAULT_SETTINGS = {"telegram": True, "min_score": 0.45, "classes": ["drone"]}
+DEFAULT_SETTINGS = {"telegram": True, "min_score": 0.45, "classes": ["drone"],
+                    "remoteid_udp": False, "remoteid_port": 47911, "remoteid_token": ""}
 
 
 def load_settings(path):
-    s = {**DEFAULT_SETTINGS, **(_read(path, {}) or {})}
-    return clean_settings(s)
+    raw = _read(path, {}) or {}
+    s = clean_settings({**DEFAULT_SETTINGS, **raw})
+    if s["remoteid_token"] != raw.get("remoteid_token"):  # keep the token made for this PC
+        with _lock:
+            _write(path, s)
+    return s
 
 
 def clean_settings(s):
     classes = s.get("classes") if isinstance(s.get("classes"), list) else str(s.get("classes") or "drone").split(",")
     classes = [re.sub(r"[^\w \-]", "", str(c)).strip()[:30] for c in classes][:80]
-    return {"telegram": bool(s.get("telegram")),
+    token = str(s.get("remoteid_token") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{24,64}", token):
+        token = uuid.uuid4().hex + uuid.uuid4().hex[:8]  # the receivers' token (made once, kept)
+    return {"telegram": bool(s.get("telegram")), "remoteid_udp": bool(s.get("remoteid_udp")),
+            "remoteid_port": max(1024, min(65535, int(float(s.get("remoteid_port") or 47911)))), "remoteid_token": token,
             "min_score": max(0.1, min(0.95, float(s.get("min_score") or 0.45))),
             "classes": [c for c in classes if c] or ["drone"]}
 
 
 def save_settings(path, s):
-    s = clean_settings({**load_settings(path), **(s or {})})
+    s = clean_settings({**load_settings(path), **{k: v for k, v in (s or {}).items() if k != "remoteid_token" or v == "new"}})
+    if (s or {}).get("remoteid_token") == "new":
+        s["remoteid_token"] = ""
+        s = clean_settings(s)
     with _lock:
         _write(path, s)
     return s
@@ -231,3 +243,106 @@ class Yolo:
             if len(classes) == 1 or label.lower() in ("drone", "uav", "quadcopter", "multirotor"):
                 found.append({"label": label, "score": round(score, 2), "box": box})
         return found
+
+
+# ---------- Remote ID (drones broadcasting their ID, position and pilot position: ASTM F3411 / OpenDroneID) ----------
+# A Remote ID receiver on the site network (an ESP32 / Wi-Fi + Bluetooth OpenDroneID receiver, a phone app relay, or a
+# commercial sensor) sends what it hears to this PC as JSON: by UDP (port set in the Detector drones tab) or by HTTP POST
+# to /api/remoteid/report with the receiver token. Flat and OpenDroneID-style nested messages are both understood.
+REMOTEID_MAX_AGE_S = 20       # a drone not heard for this long is no longer shown
+REMOTEID_SAME_DRONE_M = 40    # a broadcast this close to one of the site's own linked drones is that drone
+
+
+def _flat(obj, prefix=""):
+    out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            key = re.sub(r"[^a-z0-9]+", "_", str(k).lower()).strip("_")
+            out.update(_flat(v, f"{prefix}{key}." if isinstance(v, dict) else f"{prefix}{key}") if isinstance(v, dict)
+                       else {f"{prefix}{key}": v})
+    return out
+
+
+def _num(v):
+    try:
+        f = float(v)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_remoteid(msg):
+    """One report → {"id", "lat", "lon", "alt", "speed", "heading", "op_lat", "op_lon", "ua_type"} or None."""
+    if not isinstance(msg, dict):
+        return None
+    f = _flat(msg)
+    op_sections = ("system", "operator", "pilot")
+
+    def pick(names, want_op=False):
+        for k, v in f.items():
+            last = k.rsplit(".", 1)[-1]
+            section = k.rsplit(".", 1)[0] if "." in k else ""
+            is_op = any(w in section for w in op_sections) or last.startswith(("operator", "pilot"))
+            if last in names and is_op == want_op and v not in (None, ""):
+                return v
+        return None
+
+    rid = pick(("uas_id", "basic_id", "id", "serial_number", "serialnumber", "uasid", "id_or_mac")) or pick(("mac", "mac_address"))
+    lat, lon = _num(pick(("lat", "latitude"))), _num(pick(("lon", "lng", "long", "longitude")))
+    op_lat = _num(pick(("operator_lat", "operator_latitude", "pilot_lat", "pilot_latitude", "lat", "latitude"), True))
+    op_lon = _num(pick(("operator_lon", "operator_lng", "operator_longitude", "pilot_lon", "pilot_lng", "pilot_longitude",
+                        "lon", "lng", "long", "longitude"), True))
+    if rid is None or lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+        return None
+    rid = re.sub(r"[^\w\-.:]", "", str(rid))[:40]
+    if not rid:
+        return None
+    alt = _num(pick(("alt", "altitude", "height", "alt_geo", "geodetic_altitude", "altitude_geo", "height_agl", "alt_baro",
+                     "pressure_altitude", "altitudegeo")))
+    out = {"id": rid, "lat": round(lat, 7), "lon": round(lon, 7), "alt": round(alt, 1) if alt is not None else None,
+           "speed": _num(pick(("speed", "speed_horizontal", "speedhorizontal", "ground_speed"))),
+           "heading": _num(pick(("heading", "direction", "track", "course"))),
+           "ua_type": str(pick(("ua_type", "uatype", "type")) or "")[:30]}
+    if op_lat is not None and op_lon is not None and -90 <= op_lat <= 90 and -180 <= op_lon <= 180 and (op_lat, op_lon) != (0, 0):
+        out.update(op_lat=round(op_lat, 7), op_lon=round(op_lon, 7))
+    return out
+
+
+def parse_remoteid_payload(data):
+    """A receiver's message: one report, a list, or {"drones": [...]} / {"messages": [...]}. → [reports]."""
+    if isinstance(data, dict):
+        for k in ("drones", "messages", "reports", "data"):
+            if isinstance(data.get(k), list):
+                data = data[k]
+                break
+    items = data if isinstance(data, list) else [data]
+    return [r for r in (parse_remoteid(x) for x in items[:200]) if r]
+
+
+class RemoteIdTracks:
+    """The drones heard by Remote ID receivers lately (newest report per ID)."""
+
+    def __init__(self, now=time.time):
+        self.now, self.lock, self.tracks, self.sources = now, threading.Lock(), {}, {}
+
+    def update(self, reports, source):
+        t = self.now()
+        with self.lock:
+            for r in reports:
+                old = self.tracks.get(r["id"], {})
+                self.tracks[r["id"]] = {**old, **{k: v for k, v in r.items() if v is not None}, "seen": t, "source": source}
+            self.sources[source] = {"at": t, "count": len(reports)}
+            for k in [k for k, v in self.tracks.items() if t - v["seen"] > 600]:
+                self.tracks.pop(k, None)
+
+    def live(self):
+        t = self.now()
+        with self.lock:
+            return [dict(v) for v in self.tracks.values() if t - v["seen"] <= REMOTEID_MAX_AGE_S]
+
+    def status(self):
+        t = self.now()
+        with self.lock:
+            return {"sources": [{"source": s, "ago_s": round(t - v["at"]), "count": v["count"]}
+                                for s, v in sorted(self.sources.items(), key=lambda x: -x[1]["at"])[:10]],
+                    "heard": sum(1 for v in self.tracks.values() if t - v["seen"] <= REMOTEID_MAX_AGE_S)}

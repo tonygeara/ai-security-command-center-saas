@@ -135,7 +135,7 @@ function drawSite(){siteLayer.clearLayers();const p=(data.site||{}).pos;
   if(p)L.circleMarker(p,{radius:7,color:'#fff',fillColor:'#25c7ff',fillOpacity:1,weight:2}).bindTooltip('Site ('+esc(data.site.from)+')').addTo(siteLayer);
   const c=data.settings.rf.controller;
   if(c)L.circleMarker([c.lat,c.lon],{radius:6,color:'#111',fillColor:'#26ee89',fillOpacity:1,weight:2}).bindTooltip('Controller (pilot)').addTo(siteLayer);
-  if(p)L.circle(p,{radius:data.max_distance_m,color:'#25c7ff',weight:1,fill:false,dashArray:'6 6'}).bindTooltip('Drone range from home').addTo(siteLayer);
+  if(p&&data.max_distance_m)L.circle(p,{radius:data.max_distance_m,color:'#25c7ff',weight:1,fill:false,dashArray:'6 6'}).bindTooltip('Drone range from home').addTo(siteLayer);
   if(p&&!fitted){fitted=true;map.setView(p,15)}}
 function fmt(v,u,d){return v==null?'–':(+v).toFixed(d||0)+u}
 function render(){const c=data.conditions,v=$('fsVerdict');

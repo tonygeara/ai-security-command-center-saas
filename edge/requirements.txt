@@ -6,3 +6,4 @@ opencv-python>=4.11,<5
 PyYAML>=6.0,<7
 cryptography>=42,<47
 segno>=1.6,<2
+pymavlink>=2.4.40,<3

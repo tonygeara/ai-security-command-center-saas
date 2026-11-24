@@ -38,6 +38,24 @@ Google Docs connector isn't available in the session, say so and list the change
 
 ## Where we left off (23 November 2026)
 
+- **TO PUT BACK: the drones' 500 m distance-from-home limit**, switched off for now on the owner's request (23 Nov,
+  V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
+  page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
+  for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.19.0**: **PX4 / ArduPilot drones over MAVLink** (`mavlink_bridge.py`, pymavlink; each
+  `drone-m<N>` slot is a `MavlinkDrone` linked to the PC like a Drone Link phone; saved in `mavlink_drones.json`;
+  `/api/mavlink` add/list, `/api/mavlink/<slot>` DELETE, `/api/mavlink/scan` for "Others"; admins only, licence drone
+  limit). **Add a drone** page (`/drone-add`, `pages/drone_add.py`, the Drone page's + Add drone opens it): DJI, PX4,
+  ArduPilot, MAVLink/MAVSDK, DJI Dock, Virtual ready; Azur, Asylon, Nightingale, Percepto, Sunflower, Autel, FlytBase,
+  ROS 2 "on request" (`/api/drone/integration-request` → demo-request edge function); "Others" last (scan). Tests use
+  `edge/tests/fake_mavlink.py`. Not yet tried with a real PX4/ArduPilot drone. Also **Remote ID** on Detector drones (`dronedetect.parse_remoteid` / `RemoteIdTracks`):
+  receivers send JSON by UDP (switch + port, default 47911, site-network senders only) or HTTP POST
+  `/api/remoteid/report` with `X-RemoteID-Token` (open path, token in `drone_detector_settings.json`, admins see it via
+  `/api/detector/remoteid-config`, never in settings answers). Remote ID drones = drones `rid:<id>`; one within 40 m of a
+  linked drone of ours is that drone; alarm text gives the pilot's position, map shows the pilot. Test sender
+  `edge/tools/remoteid_send.py`. **Backup drone switch** (`response_backup`, Drone tab → Drone responses): each response
+  also sends the next ready drone (one-stop route "Backup for <camera>", 25 m to the side, +10 m), released home by
+  `_release_response_backup` on recall or when the response ends. And the 500 m limit off (above).
 - Released and approved 23 Nov (PR #44): Edge **V11.18.1**: Detector drones page fixes: range / on-off / delete weren't saved and renames showed
   the old name (2-s refresh left handlers on stale objects; now looked up by id, list redraw paused only while dragging a
   slider or a select is open). Drag detectors and drones on the map: virtual drone → `uiChoose` Fly there (route to the
@@ -132,7 +150,7 @@ Google Docs connector isn't available in the session, say so and list the change
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 23 Nov (V11.18.1 released and approved; 85 features; 31 capabilities, 19
+- Features and Capabilities docs current on 23 Nov (V11.18.1 released and approved, V11.19.0 with MAVLink drones in pull request; 86 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
