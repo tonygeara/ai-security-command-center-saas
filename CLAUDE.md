@@ -16,6 +16,13 @@ Edit the existing docs in place with the Google Docs connector (same links); nev
 files. Update the version line, the totals and the "in pull request" / "not merged yet" markers. If the
 Google Docs connector isn't available in the session, say so and list the changes the docs need.
 
+## Keep this file up to date (standing instruction from the owner)
+
+After every change that is merged, released or approved, update "Where we left off" below in the same piece of work:
+move the item to "Released and approved <date>", update the approved version, the docs totals and the date heading.
+Then get CLAUDE.md onto main without asking: open a pull request with only the CLAUDE.md change and merge it (a
+CLAUDE.md-only change builds no installer). Never wait for the owner to ask for it.
+
 ## Repository layout
 
 - `edge/`: the Windows edge app (Python/Flask dashboard, launcher, installer). Tests: `edge/tests` (pytest).
