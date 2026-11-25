@@ -21,13 +21,22 @@ export default function Home(){return <main className="flightLanding" id="top">
     <p className="flightLead">Monitor for unfamiliar drones using configured detectors and camera-based AI. Map detector coverage, distinguish your registered fleet from unknown drones, and review detections in the command centre.</p>
     <p className="flightLead">When the system detects an unknown drone in a monitored area, it can alert operators in the dashboard and through Telegram.</p>
   </div>
-  <figure className="dockIntegrationVideo">
-    <video controls playsInline preload="none" poster="/videos/drone-detection.jpg" aria-label="Illustrative drone detection demo">
-      <source src="/videos/drone-detection.mp4" type="video/mp4"/>
-      Your browser does not support embedded video. <a href="/videos/drone-detection.mp4">Download the drone detection video</a>
-    </video>
-    <figcaption className="droneDetectionCaption">Illustrative drone detection demo</figcaption>
-  </figure>
+  <div className="droneDetectionVideos">
+    <figure className="dockIntegrationVideo">
+      <video controls playsInline preload="none" poster="/videos/drone-detection.jpg" aria-label="Illustrative drone detection demo">
+        <source src="/videos/drone-detection.mp4" type="video/mp4"/>
+        Your browser does not support embedded video. <a href="/videos/drone-detection.mp4">Download the drone detection video</a>
+      </video>
+      <figcaption className="droneDetectionCaption">Illustrative drone detection demo</figcaption>
+    </figure>
+    <figure className="dockIntegrationVideo">
+      <video controls playsInline preload="none" poster="/videos/drone-detection-second-demo.jpg" aria-label="Illustrative drone detection demo 2">
+        <source src="/videos/drone-detection-second-demo.mp4" type="video/mp4"/>
+        Your browser does not support embedded video. <a href="/videos/drone-detection-second-demo.mp4">Download the second drone detection demo</a>
+      </video>
+      <figcaption className="droneDetectionCaption">Illustrative drone detection demo 2</figcaption>
+    </figure>
+  </div>
 </section>
 <section className="flightSection dockIntegration" id="dji-dock-4" aria-labelledby="dock-integration-title">
   <div className="dockIntegrationIntro">

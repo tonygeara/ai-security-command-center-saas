@@ -18,3 +18,9 @@
   font-size: 14px;
   background: #102437;
 }
+
+.droneDetectionVideos {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
