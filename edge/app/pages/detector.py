@@ -9,9 +9,10 @@ BODY = r"""
 .dt-det{border:1px solid #153c56;border-radius:4px;background:#05131d;padding:9px 10px;margin-bottom:8px}
 .dt-det.alarm{border-color:#a3303f;box-shadow:0 0 0 1px #a3303f inset}
 .dt-det.off{opacity:.6}
-.dt-det h4{margin:0;display:flex;align-items:center;gap:8px;font:bold 13px Arial;color:#e9f8ff}
-.dt-det h4 span{flex:1;cursor:pointer}
-.dt-det h4 button{background:none;border:1px solid #155879;color:#9edfff;border-radius:3px;padding:2px 7px;cursor:pointer;font:11px Arial}
+.dt-ic{border:1px solid #a3303f;border-radius:4px;background:#05131d;padding:9px 10px;margin-bottom:6px}
+.dt-det h4,.dt-ic h4{margin:0;display:flex;align-items:center;gap:8px;font:bold 13px Arial;color:#e9f8ff}
+.dt-det h4 span,.dt-ic h4 span{flex:1;cursor:pointer}
+.dt-det h4 button,.dt-ic h4 button{background:none;border:1px solid #155879;color:#9edfff;border-radius:3px;padding:2px 7px;cursor:pointer;font:11px Arial}
 .dt-row{display:flex;gap:8px;align-items:center;margin-top:7px;flex-wrap:wrap;font-size:12px;color:#9edfff}
 .dt-row input[type=range]{flex:1;min-width:120px}
 .dt-row b{color:#fff;min-width:64px;text-align:right;font-variant-numeric:tabular-nums}
@@ -51,6 +52,16 @@ BODY = r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">✈ My drones</div><div class="live" id="mineCount"></div></div><div class="panel-body">
 <div class="muted" style="font-size:12px;margin-bottom:6px">Your drones never raise the alarm. A drone added later (real or virtual) is unknown until you mark it as yours; a removed drone leaves this list.</div>
 <div id="mineList"></div></div></section>
+<section class="panel"><div class="panel-head"><div class="panel-title">🛫 Send drones to an unknown drone</div><div class="live" id="icState">–</div></div><div class="panel-body">
+<div class="muted" style="font-size:12px">When a detector sees an unknown drone, your drones fly to it, hold a set distance from it at a set height with their cameras on it, and follow it while it moves. They come home when it hasn't been seen for a minute, after 15 minutes, or when you press Recall. Flights use the usual checks (no-fly zones, weather, battery).</div>
+<div class="hud-row"><div><b>Send automatically</b><div class="muted">Off: use "Send drones now" when the alarm goes off.</div></div><input class="toggle" type="checkbox" id="icAuto" onchange="saveSettings()"></div>
+<div style="font-size:12px;color:#9edfff;margin-top:6px">Drones to send <span class="muted">(none ticked: the nearest ready drone)</span></div>
+<div id="icDrones" class="dt-row" style="gap:12px"></div>
+<div class="dt-row"><span>Height</span><input id="icAlt" type="number" min="20" max="120" step="5" style="width:70px" onchange="saveSettings()"><span>m</span><span style="margin-left:10px">Hold</span><input id="icStand" type="number" min="10" max="300" step="5" style="width:70px" onchange="saveSettings()"><span>m from it</span></div>
+<div id="icActive" style="margin-top:8px"></div>
+<div class="actions" style="margin-top:8px"><button class="hud-btn primary" onclick="sendNow()">Send drones now</button><button class="hud-btn danger" onclick="recall('all')">Recall all</button></div>
+<div id="icMsg" class="hud-msg"></div>
+</div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🛸 Detections</div><div class="live" id="dtEvCount"></div></div><div class="panel-body">
 <div id="dtEvents" style="max-height:300px;overflow:auto"></div></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">🎙 Acoustic and RF sensors</div><div class="live" id="snState">–</div></div><div class="panel-body">
@@ -182,7 +193,7 @@ function renderList(){
     el.querySelector('[data-act=kind]').onchange=e=>{d.sensor=e.target.value;save(SENSOR_NAME[d.sensor]+'.')};
     el.querySelector('[data-act=cam]').onchange=e=>{d.camera=e.target.value;save(d.camera?'Camera '+d.camera+' checked by YOLO.':'Camera removed.')}})}
 function renderEvents(){const ev=data.events||[];$('dtEvCount').textContent=ev.length?ev.length+' RECENT':'NONE';
-  $('dtEvents').innerHTML=ev.length?ev.map(e=>`<div class="dt-ev"><small>${new Date(e.at*1000).toLocaleTimeString()}</small><span style="flex:1">${e.kind==='camera'?'📷':e.kind==='remote_id'?'🛰':e.kind==='acoustic'?'🎙':e.kind==='rf'?'📶':'📡'} ${esc(e.text)}</span>${e.photo?`<a href="/api/detector/photo/${e.id}" target="_blank" rel="noopener">Picture</a>`:''}</div>`).join(''):'<div class="muted">No detections yet.</div>'}
+  $('dtEvents').innerHTML=ev.length?ev.map(e=>`<div class="dt-ev"><small>${new Date(e.at*1000).toLocaleTimeString()}</small><span style="flex:1">${e.kind==='camera'?'📷':e.kind==='remote_id'?'🛰':e.kind==='acoustic'?'🎙':e.kind==='rf'?'📶':e.kind==='intercept'?'🛫':'📡'} ${esc(e.text)}</span>${e.photo?`<a href="/api/detector/photo/${e.id}" target="_blank" rel="noopener">Picture</a>`:''}</div>`).join(''):'<div class="muted">No detections yet.</div>'}
 function save(okText){editing=Date.now();clearTimeout(saveT);saveT=setTimeout(async()=>{
   const d=await fetch('/api/detector/sites',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({detectors:dets})}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer from the PC.'}));
   if(d.ok){dets=d.detectors;msg('dtMsg',okText,true)}else msg('dtMsg',d.error||'Not saved.',false);editing=0;await load()},250)}
@@ -194,7 +205,8 @@ map.on('click',async e=>{if(!adding)return;startAdd();
   dets.push({name:name.trim(),lat:+e.latlng.lat.toFixed(6),lon:+e.latlng.lng.toFixed(6),range_m:Math.max(20,Math.min(10000,parseInt(r)||500)),camera:'',enabled:true});
   save('Detector added.')});
 async function saveSettings(){const d=await fetch('/api/detector/settings',{method:'POST',headers:{'content-type':'application/json'},
-  body:JSON.stringify({remoteid_udp:$('ridUdp').checked,remoteid_port:+$('ridPort').value||47911,telegram:$('setTg').checked,classes:$('setClasses').value||'drone',min_score:+$('setScore').value||0.45,sensor_min_conf:+$('snConf').value||0.6})}).then(r=>r.json()).catch(()=>({ok:false}));
+  body:JSON.stringify({remoteid_udp:$('ridUdp').checked,remoteid_port:+$('ridPort').value||47911,telegram:$('setTg').checked,classes:$('setClasses').value||'drone',min_score:+$('setScore').value||0.45,sensor_min_conf:+$('snConf').value||0.6,intercept_auto:$('icAuto').checked,
+  intercept_drones:[...document.querySelectorAll('#icDrones input:checked')].map(x=>x.value),intercept_alt_m:+$('icAlt').value||50,intercept_standoff_m:+$('icStand').value||40})}).then(r=>r.json()).catch(()=>({ok:false}));
   msg('setMsg',d.ok?'Saved.':(d.error||'Only operators and admins can change this.'),d.ok);load()}
 async function uploadModel(){const f=$('modelFile').files[0];if(!f){msg('setMsg','Choose the .onnx file first.',false);return}
   msg('setMsg','Uploading and checking the model…');const fd=new FormData();fd.append('model',f);
@@ -206,7 +218,8 @@ async function load(){let d;try{d=await fetch('/api/detector',{cache:'no-store'}
   data=d;if(Date.now()-editing>1500)dets=d.detectors;
   const alarms=dets.filter(x=>alarmOf(x.id)).length;
   $('dtState').innerHTML=alarms?`<i class="dot bad"></i>${alarms} DETECTOR${alarms>1?'S':''} SEE AN INTRUDER`:`<i class="dot good"></i>${dets.filter(x=>x.enabled).length} WATCHING · NO INTRUDER`;
-  if(document.activeElement?.tagName!=='INPUT'){$('ridUdp').checked=d.settings.remoteid_udp;$('ridPort').value=d.settings.remoteid_port;$('setTg').checked=d.settings.telegram;$('setClasses').value=d.settings.classes.join(', ');$('setScore').value=d.settings.min_score;$('snConf').value=d.settings.sensor_min_conf}
+  if(document.activeElement?.tagName!=='INPUT'){$('ridUdp').checked=d.settings.remoteid_udp;$('ridPort').value=d.settings.remoteid_port;$('setTg').checked=d.settings.telegram;$('setClasses').value=d.settings.classes.join(', ');$('setScore').value=d.settings.min_score;$('snConf').value=d.settings.sensor_min_conf;
+    $('icAuto').checked=d.settings.intercept_auto;$('icAlt').value=d.settings.intercept_alt_m;$('icStand').value=d.settings.intercept_standoff_m;renderIcDrones()}
   $('modelState').textContent=d.model.installed?(d.model.error?'⚠ '+d.model.error:`Installed (${d.model.size_mb} MB): detectors with a camera are checked every 3 s.`):'No model: detectors see drones by position only.';
   $('modelState').style.color=d.model.installed&&!d.model.error?'#7dffc1':d.model.error?'#ff9ea8':'';
   // First look: frame every detector's circle and every drone.
@@ -222,7 +235,18 @@ async function load(){let d;try{d=await fetch('/api/detector',{cache:'no-store'}
   const sn=d.sensors||{};$('snState').textContent=sn.hearing?sn.hearing+' HEARING NOW':dets.some(x=>x.sensor)?'LISTENING':'NO SENSOR YET';
   $('snSources').innerHTML=(sn.unknown_sensors||[]).length?'⚠ Reports for sensors that aren\'t on the map: '+sn.unknown_sensors.map(esc).join(', ')+' (name a detector the same, or send its id).':'';
   $('ridUdpState').textContent=rid.udp_error?'⚠ '+rid.udp_error:rid.udp?'Listening on '+rid.udp:'';
-  drawMap(busy);if(!busy)renderList();renderEvents();renderMine()}
+  renderIntercept();drawMap(busy);if(!busy)renderList();renderEvents();renderMine()}
+function renderIcDrones(){const ours=(data.fleet||[]).filter(x=>x.mine&&!String(x.slot).includes(':')),pick=data.settings.intercept_drones||[];
+  $('icDrones').innerHTML=ours.length?ours.map(x=>`<label style="display:flex;gap:5px;align-items:center;text-transform:none;letter-spacing:0;margin:0"><input type="checkbox" value="${esc(x.slot)}" ${pick.includes(x.slot)?'checked':''} onchange="saveSettings()">${esc(x.label)}${x.virtual?' <span class="muted">(virtual)</span>':''}</label>`).join(''):'<span class="muted">No drones of yours yet.</span>'}
+function renderIntercept(){const ic=data.intercept||[],intr=(data.drones||[]).some(x=>x.intruder);
+  $('icState').textContent=ic.length?ic.reduce((n,t)=>n+t.drones.length,0)+' DRONE(S) OUT':data.settings.intercept_auto?'AUTOMATIC':'BY HAND';
+  $('icActive').innerHTML=ic.map(t=>`<div class="dt-ic"><h4><span>🛫 ${t.drones.map(x=>esc(x.label)).join(', ')} → ${esc(t.label)}</span><button onclick="recall('${esc(t.target)}')">Recall</button></h4>
+    <div class="muted" style="font-size:11px;margin-top:4px">For ${Math.round(t.for_s/60)} min · ${t.seen_s<5?'seen now':'last seen '+t.seen_s+' s ago'} · sent ${esc(t.by)}</div></div>`).join('')}
+async function sendNow(){const r=await fetch('/api/detector/intercept',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({target:'all'})});
+  const d=await r.json().catch(()=>({}));msg('icMsg',d.ok?d.message:(r.status===403?'Only operators and admins can send drones.':d.error||'Not sent.'),!!d.ok);load()}
+async function recall(t){if(t==='all'&&!(data.intercept||[]).length){msg('icMsg','No drone is out.',false);return}
+  const r=await fetch('/api/detector/intercept',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({target:t})});
+  const d=await r.json().catch(()=>({}));msg('icMsg',d.ok?'Returning home.':(r.status===403?'Only operators and admins can recall drones.':d.error||'Not recalled.'),!!d.ok);load()}
 async function showRid(){const r=await fetch('/api/detector/remoteid-config',{cache:'no-store'});const d=await r.json().catch(()=>({}));
   $('ridConf').innerHTML=r.ok?`<div class="dt-rid">POST ${esc(location.origin)}${esc(d.http_path)} (Remote ID)<br>POST ${esc(location.origin)}${esc(d.sensor_path||'/api/sensors/report')} (acoustic / RF sensors)<br>X-RemoteID-Token: ${esc(d.token)}${d.udp?'<br>UDP: this PC, port '+d.port:''}</div>`:'<div class="hud-msg bad">Only an admin can see the receiver token.</div>'}
 async function newRidToken(){if(!await uiConfirm('Make a new receiver token? Receivers using the old one stop being accepted until they get the new one.'))return;

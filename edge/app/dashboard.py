@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.20.1"
+APP_VERSION = "V11.21.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -9768,6 +9768,22 @@ def detector_tick(now=None):
             fixes = _sensor_fixes()
         _detector_event(d, d["sensor"], _sensor_text(d, h, fixes),
                         extra={"sensor": {k: h.get(k) for k in ("confidence", "bearing", "distance_m", "drone_type", "protocol", "freq_mhz", "rssi_dbm")}})
+    # Our drones sent to the unknown drones seen now (automatically, if switched on), following them, and home again.
+    intruders = {}
+    for did, xs in seen.items():
+        for x in xs:
+            if x["intruder"] and by_id[did]["enabled"]:
+                intruders.setdefault(_intercept_key(x), (x["label"], x["lat"], x["lon"], by_id[did]))
+    with _detector_lock:
+        for did, at in _detector["cam_alert"].items():
+            if now - at <= INTERCEPT_LOST_S and did in by_id and now - _detector["last_cam"].get(did, {}).get("at", 0) < 10 \
+                    and _detector["last_cam"].get(did, {}).get("count"):
+                d = by_id[did]
+                intruders.setdefault("cam:" + did, (f"drone seen by camera {d['camera']}", d["lat"], d["lon"], d))
+    try:
+        intercept_tick(intruders, now, cfg)
+    except Exception as e:
+        print("Drone auto-send error:", e)
     if not DETECTOR_YOLO.installed():
         return seen
     for d in dets:
@@ -9786,7 +9802,171 @@ def detector_tick(now=None):
             _detector_event(d, "camera", f"{d['name']}: camera {d['camera']} sees {len(found)} drone{'s' if len(found) > 1 else ''} "
                             f"(YOLO {best['score']:.0%}), within about {d['range_m']} m.", photo=jpeg,
                             extra={"boxes": found[:10], "camera": d["camera"]})
+            if cfg["intercept_auto"]:  # its position isn't known: our drones go to the detector and look from there
+                intercept_start("cam:" + d["id"], f"drone seen by camera {d['camera']}", d["lat"], d["lon"], by="auto-send", det=d)
     return seen
+
+
+# ---------- Send our drones to an unknown drone (Detector drones → "Send drones to an unknown drone") ----------
+# The chosen drones (or, with none chosen, the nearest ready drone) fly to the unknown drone, hold a set distance from it
+# on their own side, at a set height, and follow it while it moves. They go home when it hasn't been seen for a minute,
+# after 15 minutes, or when someone presses Recall. Automatic when switched on; "Send drones now" sends them by hand.
+INTERCEPT_LOST_S = 60         # the unknown drone not seen for this long: our drones go home
+INTERCEPT_MAX_S = 900         # never longer than this
+INTERCEPT_FOLLOW_M = 40       # the unknown drone moved this far: our drones move with it…
+INTERCEPT_FOLLOW_EVERY_S = 10  # …at most this often
+INTERCEPT_STACK_M = 5         # each further drone flies this much higher, so ours keep apart
+INTERCEPT_RETRY_S = 30        # no drone could go: try again after this long
+INTERCEPT_SAME_FIX_M = 150    # a sensor fix this close to the one being watched is the same drone
+INTERCEPT_ROUTE = "Watch "    # route name prefix of these flights
+_intercept = {}               # target key -> {"label", "lat", "lon", "drones": {slot: {...}}, "started", "seen", "by", "tried"}
+_intercept_lock = threading.RLock()
+
+
+def _intercept_candidates(cfg, exclude=()):
+    """The drones that may be sent, in the order to try, and whether they were chosen in the settings."""
+    mine = my_drones()
+    busy = {s for t in _intercept.values() for s in t["drones"]}
+    chosen = [s for s in cfg["intercept_drones"] if s in drone_slots()]
+    pool = chosen or [s for s in drone_slots() if s in mine and (not is_virtual(s) or _virtual_cfg.get("demo_auto"))]
+    return [s for s in pool if s not in busy and s not in exclude and s in mine and s not in _sources_over_limit()], bool(chosen)
+
+
+def _standoff(t, slot, cfg):
+    """Where our drone holds: the set distance from the unknown drone, on the side our drone comes from."""
+    tel = get_link(slot)["telemetry"]
+    if tel.get("lat") is None:
+        return {"lat": t["lat"] + cfg["intercept_standoff_m"] / 111320.0, "lon": t["lon"]}
+    dist = _distance_m(t["lat"], t["lon"], tel["lat"], tel["lon"])
+    if dist <= cfg["intercept_standoff_m"]:
+        return {"lat": tel["lat"], "lon": tel["lon"]}
+    b = _bearing_deg(t["lat"], t["lon"], tel["lat"], tel["lon"])
+    lat, lon = dronedetect_mod._offset(t["lat"], t["lon"], b, cfg["intercept_standoff_m"])
+    return {"lat": round(lat, 7), "lon": round(lon, 7)}
+
+
+def _intercept_fly(t, slot, n, cfg, by):
+    pt = _standoff(t, slot, cfg)
+    alt = min(float(DRONE_LIMITS["max_altitude_m"]), float(cfg["intercept_alt_m"]) + n * INTERCEPT_STACK_M)
+    r = fly_route(INTERCEPT_ROUTE + t["label"], {"points": [pt], "alt": alt, "speed": load_response_settings()["speed_ms"],
+                                                  "pause": 0, "end": "hover", "loop": False, "lost_link": "home"},
+                  by=by, drone=slot)
+    if r.get("ok"):
+        t["drones"][slot] = {"lat": t["lat"], "lon": t["lon"], "at": time.time(), "alt": alt}
+    return r
+
+
+def intercept_start(key, label, lat, lon, by="auto", det=None):
+    """Send our drones to the unknown drone `key` at lat, lon. Returns a message for the operator."""
+    cfg = load_detector_settings()
+    with _intercept_lock:
+        t = _intercept.get(key)
+        if t and t["drones"]:
+            t.update(lat=lat, lon=lon, seen=time.time())
+            return f"Already watching {label} with {', '.join(drone_label(s) for s in t['drones'])}."
+        t = t or {"label": label, "lat": lat, "lon": lon, "drones": {}, "started": time.time(), "seen": time.time(), "by": by}
+        t.update(lat=lat, lon=lon, seen=time.time(), tried=time.time())
+        cands, chosen = _intercept_candidates(cfg, exclude={key})
+        cands.sort(key=lambda s: _distance_m(lat, lon, get_link(s)["telemetry"].get("lat") or 90, get_link(s)["telemetry"].get("lon") or 0))
+        errors = []
+        for s in cands:
+            r = _intercept_fly(t, s, len(t["drones"]), cfg, by)
+            if not r.get("ok"):
+                errors.append(f"{drone_label(s)}: {r.get('error')}")
+            elif not chosen:
+                break  # none chosen in the settings: the nearest ready drone is enough
+        _intercept[key] = t
+    if not t["drones"]:
+        msg = f"No drone could be sent to {label}" + (": " + "; ".join(errors[:3]) if errors else ": no drone of yours is free.")
+    else:
+        names = ", ".join(drone_label(s) for s in t["drones"])
+        msg = f"{names} {'is' if len(t['drones']) == 1 else 'are'} flying to watch {label}, holding {cfg['intercept_standoff_m']} m from it."
+        for s in t["drones"]:
+            _drone_event(f"Sent to watch {label} ({by})", s)
+    if det:
+        _detector_event(det, "intercept", f"{det['name']}: {msg}")
+    else:
+        audit_record("drone detector: drones sent", target=label, detail={"message": msg, "by": by})
+    return msg
+
+
+def intercept_release(key, why):
+    with _intercept_lock:
+        t = _intercept.pop(key, None)
+    if not t:
+        return
+    for s in t["drones"]:
+        run = run_of(s)
+        if run is not None and str(run.get("name", "")).startswith(INTERCEPT_ROUTE):
+            run["stop_home"] = True  # the route thread sends it home as it stops
+            run["stop"] = True
+        else:
+            _go_home_safe(s, f"stopped watching {t['label']}")
+        _drone_event(f"Returning home: stopped watching {t['label']} ({why})", s)
+    if t["drones"]:
+        audit_record("drone detector: drones recalled", target=t["label"], detail={"why": why}, source="system")
+        if load_detector_settings()["telegram"] and telegram_ready():
+            send_telegram(f"🏠 {', '.join(drone_label(s) for s in t['drones'])} returning home: {why}.")
+
+
+def _intercept_key(x):
+    """A stable key for an unknown drone: sensor fixes are renumbered every look, so match them by place."""
+    if not str(x["slot"]).startswith("fix:"):
+        return x["slot"]
+    with _intercept_lock:
+        for k, t in _intercept.items():
+            if k.startswith("fix@") and _distance_m(t["lat"], t["lon"], x["lat"], x["lon"]) <= INTERCEPT_SAME_FIX_M:
+                return k
+    return f"fix@{time.time():.3f}"
+
+
+def intercept_tick(intruders, now, cfg):
+    """intruders: {key: (label, lat, lon, detector)} seen now. Start (if automatic), follow and release."""
+    for key, (label, lat, lon, det) in intruders.items():
+        with _intercept_lock:
+            t = _intercept.get(key)
+            if t:
+                t.update(lat=lat, lon=lon, seen=now)
+        if cfg["intercept_auto"] and (not t or (not t["drones"] and now - t.get("tried", 0) > INTERCEPT_RETRY_S)):
+            intercept_start(key, label, lat, lon, by="auto-send", det=det)
+    with _intercept_lock:
+        items = list(_intercept.items())
+    for key, t in items:
+        if not t["drones"]:
+            if key not in intruders and now - t["seen"] > INTERCEPT_LOST_S:
+                with _intercept_lock:
+                    _intercept.pop(key, None)
+            continue
+        if now - t["seen"] > INTERCEPT_LOST_S:
+            intercept_release(key, f"{t['label']} not seen for {INTERCEPT_LOST_S} s")
+            continue
+        if now - t["started"] > INTERCEPT_MAX_S:
+            intercept_release(key, f"watched for {INTERCEPT_MAX_S // 60} minutes")
+            continue
+        for n, (s, sent) in enumerate(list(t["drones"].items())):
+            if _distance_m(sent["lat"], sent["lon"], t["lat"], t["lon"]) < INTERCEPT_FOLLOW_M or now - sent["at"] < INTERCEPT_FOLLOW_EVERY_S:
+                continue
+            run = run_of(s)
+            if run is not None:
+                if str(run.get("name", "")).startswith(INTERCEPT_ROUTE):
+                    run["stop"] = True  # it hovers; it flies to the new place on the next look
+                continue
+            with _intercept_lock:
+                t["drones"].pop(s, None)
+            r = _intercept_fly(t, s, n, cfg, "follow")
+            if r.get("ok"):
+                _drone_event(f"Following {t['label']}: it moved", s)
+            else:
+                _drone_event(f"Can't follow {t['label']}: {r.get('error')}", s)
+                t["drones"][s] = {**sent, "at": now}  # still ours to bring home; try again later
+
+
+def intercept_status():
+    now = time.time()
+    with _intercept_lock:
+        return [{"target": k, "label": t["label"], "lat": t["lat"], "lon": t["lon"], "by": t["by"],
+                 "drones": [{"slot": s, "label": drone_label(s)} for s in t["drones"]],
+                 "for_s": round(now - t["started"]), "seen_s": round(now - t["seen"])} for k, t in _intercept.items() if t["drones"]]
 
 
 def _sensor_text(d, h, fixes):
@@ -9847,6 +10027,7 @@ def api_detector():
                     "camera_checks": last_cam, "cameras": _detector_cameras(), "centre": list(centre) if centre else None,
                     "remote_id": {**REMOTE_ID.status(), "udp": _remoteid_udp["bound"], "udp_error": _remoteid_udp["error"]},
                     "sensors": {**SENSORS.status(), "hits": SENSORS.live()},
+                    "intercept": intercept_status(),
                     "model": {"installed": DETECTOR_YOLO.installed(), "error": DETECTOR_YOLO.error if DETECTOR_YOLO.installed() else "",
                               "size_mb": round(os.path.getsize(DETECTOR_MODEL_FILE) / 1e6, 1) if DETECTOR_YOLO.installed() else 0}})
 
@@ -9888,6 +10069,35 @@ def api_detector_mine():
     audit_record("drone detector: " + ("marked as ours" if data.get("mine") else "marked as not ours"),
                  target=("Remote ID " + slot[4:]) if slot.startswith("rid:") else drone_label(slot))
     return jsonify({"ok": True})
+
+
+@app.route("/api/detector/intercept", methods=["POST", "DELETE"])
+def api_detector_intercept():
+    """Operators, admins. POST {"target": key or "all"}: send drones now to the unknown drone(s) seen now.
+    DELETE {"target": key or "all"}: recall the drones watching them."""
+    data = request.get_json(silent=True) or {}
+    want = str(data.get("target") or "all")
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    if request.method == "DELETE":
+        keys = [k for k in list(_intercept) if want in ("all", k)]
+        for k in keys:
+            intercept_release(k, f"recalled by {who}")
+        return jsonify({"ok": True, "recalled": len(keys)})
+    if not tab_on("drone_detector"):
+        return jsonify({"ok": False, "error": tab_off_reason("drone_detector")}), 403
+    dets = dronedetect_mod.load_detectors(DETECTORS_FILE)
+    by_id = {d["id"]: d for d in dets}
+    targets = {}
+    for did, xs in dronedetect_mod.in_range(dets, _known_drones()).items():
+        for x in xs:
+            if x["intruder"] and by_id[did]["enabled"]:
+                targets.setdefault(_intercept_key(x), (x["label"], x["lat"], x["lon"], by_id[did]))
+    if want != "all":
+        targets = {k: v for k, v in targets.items() if k == want}
+    if not targets:
+        return jsonify({"ok": False, "error": "No unknown drone with a known position is in a detector's range now."}), 409
+    msgs = [intercept_start(k, v[0], v[1], v[2], by=who, det=v[3]) for k, v in targets.items()]
+    return jsonify({"ok": True, "message": " ".join(msgs), "intercept": intercept_status()})
 
 
 @app.route("/api/detector/alarm")
