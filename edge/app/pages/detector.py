@@ -22,7 +22,7 @@ BODY = r"""
 .dt-ev{display:flex;gap:8px;padding:6px 0;border-bottom:1px solid #0f2a3b;font-size:12px;color:#cfeeff}
 .dt-ev small{color:#6d8b9d;white-space:nowrap}
 .dt-ev a{white-space:nowrap}
-.dt-pin{width:26px;height:26px;border-radius:50%;background:#05131d;border:2px solid #36cfff;color:#5bd9ff;font:bold 13px/22px Arial;text-align:center;box-shadow:0 0 10px rgba(54,207,255,.5)}
+.dt-pin{width:26px;height:26px;border-radius:50%;background:#031a0e;border:2px solid #29ff7a;color:#29ff7a;font:bold 13px/22px Arial;text-align:center;box-shadow:0 0 10px rgba(41,255,122,.55)}
 .dt-pin.acoustic{border-color:#ffb547;color:#ffb547;box-shadow:0 0 10px rgba(255,181,71,.5)}
 .dt-pin.rf{border-color:#c18bff;color:#c18bff;box-shadow:0 0 10px rgba(193,139,255,.5)}
 .dt-pin.alarm{border-color:#ff5d6c;color:#ff5d6c;box-shadow:0 0 14px #ff5d6c;animation:dtBlink 1s infinite}
@@ -42,7 +42,7 @@ BODY = r"""
 <div class="actions"><span class="state" id="dtState"><i class="dot warn"></i>LOADING</span></div></div>
 <div class="dt-grid">
 <section class="panel"><div class="panel-body"><div id="dtMap"></div>
-<div class="muted" style="margin-top:8px;font-size:12px">Circles: each detector's range (⌖ detector · 🎙 acoustic sensor · 📶 RF sensor). Orange / purple lines: the direction a sensor hears a drone from; a blinking dashed dot: a drone located where directions cross. Red dot: unknown drone · green dot: one of your drones. Drag a detector to move it; drag a drone to send it there (a virtual drone can also be put there at once).</div></div></section>
+<div class="muted" style="margin-top:8px;font-size:12px">Radar circles: each detector's range, sweeping green, red while it sees an unknown drone (⌖ detector · 🎙 acoustic sensor · 📶 RF sensor). Orange / purple lines: the direction a sensor hears a drone from; a blinking dashed dot: a drone located where directions cross. Red dot: unknown drone · green dot: one of your drones. Drag a detector to move it; drag a drone to send it there (a virtual drone can also be put there at once).</div></div></section>
 <div>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌖ Detectors</div><div class="live" id="dtCount"></div></div><div class="panel-body">
 <div class="actions" style="margin-bottom:10px"><button class="hud-btn primary" id="dtAdd" onclick="startAdd()">＋ Add detector</button><span class="muted" id="dtHint" style="display:none">Click the map where the detector is (Esc cancels).</span></div>
@@ -88,7 +88,26 @@ const fmtM=m=>m>=1000?(m/1000).toFixed(m%1000?1:0)+' km':m+' m';
 let data={detectors:[],seen:{},drones:[],events:[],cameras:[]},dets=[],adding=false,saveT=null,fitted=false,editing=0,dragDrone=null,dragMoved=false;
 const map=L.map('dtMap',{maxZoom:20}).setView([33.9,35.5],15);
 L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:20,maxNativeZoom:19}).addTo(map);
-const detLayer=L.layerGroup().addTo(map),droneLayer=L.layerGroup().addTo(map),hearLayer=L.layerGroup().addTo(map);
+const radarLayer=L.layerGroup().addTo(map),detLayer=L.layerGroup().addTo(map),droneLayer=L.layerGroup().addTo(map),hearLayer=L.layerGroup().addTo(map);
+// Radar look: green range rings and cross-lines, and a sweep turning once every 4 s (red while the detector sees an intruder).
+const RADAR_GREEN='#29ff7a',RADAR_RED='#ff3b4e',SWEEP_MS=4000,SWEEP_DEG=40,SWEEP_STEPS=8;
+let radars=[];  // [{d, al, wedges: [polygon...], line}]
+function geoAt(lat,lon,deg,m){const b=deg*Math.PI/180;return [lat+m*Math.cos(b)/111320,lon+m*Math.sin(b)/(111320*Math.cos(lat*Math.PI/180))]}
+function wedge(d,a0,a1){const pts=[[d.lat,d.lon]];for(let a=a0;a<=a1+0.01;a+=Math.max(1,(a1-a0)/6))pts.push(geoAt(d.lat,d.lon,a,d.range_m));return pts}
+function drawRadar(d,al){const col=al?RADAR_RED:RADAR_GREEN,on=d.enabled;
+  L.circle([d.lat,d.lon],{radius:d.range_m,color:col,weight:2,opacity:on?.95:.4,fillColor:col,fillOpacity:on?.06:.02,dashArray:on?null:'6 6',interactive:false}).addTo(radarLayer);
+  if(!on)return;
+  [1/3,2/3].forEach(f=>L.circle([d.lat,d.lon],{radius:d.range_m*f,color:col,weight:1,opacity:.45,fill:false,interactive:false}).addTo(radarLayer));
+  [0,90].forEach(a=>L.polyline([geoAt(d.lat,d.lon,a,d.range_m),geoAt(d.lat,d.lon,a+180,d.range_m)],{color:col,weight:1,opacity:.3,interactive:false}).addTo(radarLayer));
+  const r={d,al,wedges:[],line:L.polyline([[d.lat,d.lon],[d.lat,d.lon]],{color:col,weight:2,opacity:.9,interactive:false}).addTo(radarLayer)};
+  for(let i=0;i<SWEEP_STEPS;i++)r.wedges.push(L.polygon([[d.lat,d.lon]],{stroke:false,fillColor:col,fillOpacity:.32*(1-i/SWEEP_STEPS),interactive:false}).addTo(radarLayer));
+  radars.push(r)}
+let sweepT=0;
+function sweep(t){requestAnimationFrame(sweep);if(t-sweepT<50||document.hidden)return;sweepT=t;  // about 20 frames a second
+  const a=(t%SWEEP_MS)/SWEEP_MS*360,step=SWEEP_DEG/SWEEP_STEPS;
+  radars.forEach(r=>{r.line.setLatLngs([[r.d.lat,r.d.lon],geoAt(r.d.lat,r.d.lon,a,r.d.range_m)]);
+    r.wedges.forEach((w,i)=>w.setLatLngs(wedge(r.d,a-(i+1)*step,a-i*step)))})}
+requestAnimationFrame(sweep);
 const SENSOR_ICON={'':'⌖',acoustic:'🎙',rf:'📶'},SENSOR_NAME={'':'Detector (camera / position)',acoustic:'Acoustic sensor',rf:'RF sensor (passive)'};
 function hits(){return (data.sensors&&data.sensors.hits)||[]}
 function hitOf(id){return hits().find(h=>h.detector===id)}
@@ -101,9 +120,9 @@ function drawHearing(){hearLayer.clearLayers();
     const col=d.sensor==='rf'?'#c18bff':'#ffb547';
     L.polyline([[d.lat,d.lon],[lat,lon]],{color:col,weight:3,opacity:.9}).bindTooltip(`${esc(d.name)} hears a drone from ${Math.round(h.bearing)}° (${Math.round(h.confidence*100)}%)`).addTo(hearLayer);
     L.polygon([[d.lat,d.lon],...[-6,6].map(w=>{const bb=(h.bearing+w)*Math.PI/180;return [d.lat+len*Math.cos(bb)/111320,d.lon+len*Math.sin(bb)/(111320*Math.cos(d.lat*Math.PI/180))]})],{color:col,weight:0,fillOpacity:.12}).addTo(hearLayer)})}
-function drawMap(keepDets){if(!keepDets){detLayer.clearLayers();
+function drawMap(keepDets){if(!keepDets){detLayer.clearLayers();radarLayer.clearLayers();radars=[];
   dets.forEach(d=>{const al=alarmOf(d.id);
-    L.circle([d.lat,d.lon],{radius:d.range_m,color:al?'#ff5d6c':'#36cfff',weight:2,fillOpacity:d.enabled?.08:.02,dashArray:d.enabled?null:'6 6'}).addTo(detLayer);
+    drawRadar(d,al);
     L.marker([d.lat,d.lon],{draggable:true,icon:L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div class="dt-pin ${d.sensor||''}${al?' alarm':''}">${SENSOR_ICON[d.sensor||'']}</div>`})})
       .bindTooltip(esc(d.name)+' · '+fmtM(d.range_m),{permanent:true,direction:'top',offset:[0,-14],className:'dt-label'})
       .on('dragstart',()=>{editing=Date.now()+600000})
