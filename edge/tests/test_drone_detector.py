@@ -401,3 +401,109 @@ def test_sensor_hearing_our_flying_drone_does_not_raise_the_alarm(det, client, m
     assert a["kind"] == "acoustic"
     client.post("/api/detector/alarm/ack")
     d.SENSORS.hits.clear()
+
+
+# ---------- sending our drones to an unknown drone ----------
+def _unknown_virtual(d, client, at):
+    """A virtual drone added after the detectors (so not ours), put at `at` at once."""
+    before = set(d.virtual_drones)
+    assert client.post("/api/virtual-drones", json={"lat": at["lat"], "lon": at["lon"]}).get_json()["ok"]
+    (slot,) = set(d.virtual_drones) - before
+    assert wait_until(lambda: d.get_link(slot)["telemetry"].get("lat"), 15)
+    return slot
+
+
+def test_chosen_drones_fly_to_an_unknown_drone_follow_it_and_come_home(det, client, fleet, monkeypatch):
+    d = det
+    d._intercept.clear()
+    if os.path.exists(d.MY_DRONES_FILE):
+        os.remove(d.MY_DRONES_FILE)
+    v1, v2 = fleet(2)
+    spot = offset(150, 0)
+    sites(client, {"name": "Field", "lat": spot["lat"], "lon": spot["lon"], "range_m": 120})
+    r = client.post("/api/detector/settings", json={"intercept_auto": True, "intercept_drones": [v1, v2, "nope"],
+                                                    "intercept_alt_m": 45, "intercept_standoff_m": 30}).get_json()
+    assert r["settings"]["intercept_drones"] == [v1, v2, "nope"] and r["settings"]["intercept_alt_m"] == 45
+    x = _unknown_virtual(d, client, spot)
+    d.detector_tick()
+    st = client.get("/api/detector").get_json()
+    (t,) = st["intercept"]
+    assert t["target"] == x and {y["slot"] for y in t["drones"]} == {v1, v2} and t["by"] == "auto-send"
+    for s in (v1, v2):
+        run = d.run_of(s)
+        assert run and run["name"].startswith("Watch ") and run["route"]["end"] == "hover"
+        p = run["route"]["points"][0]
+        assert 25 <= d._distance_m(p["lat"], p["lon"], spot["lat"], spot["lon"]) <= 35  # holds 30 m from it, on its own side
+    assert {d.run_of(v1)["route"]["alt"], d.run_of(v2)["route"]["alt"]} == {45, 50}  # one 5 m higher than the other
+    assert any(e["kind"] == "intercept" and "flying to watch" in e["text"] for e in st["events"])
+    # It moves 80 m: ours follow it (once they're there or hovering).
+    assert wait_until(lambda: not d.run_of(v1) and not d.run_of(v2), 90), "didn't arrive"
+    moved = offset(150, 80)
+    client.post(f"/api/virtual-drones/{x}", json={"action": "move", "lat": moved["lat"], "lon": moved["lon"]})
+    sites(client, {"name": "Field", "lat": spot["lat"], "lon": spot["lon"], "range_m": 300})
+    assert wait_until(lambda: abs((d.get_link(x)["telemetry"].get("lon") or 0) - moved["lon"]) < 1e-6, 10)
+    monkeypatch.setattr(d, "INTERCEPT_FOLLOW_EVERY_S", 0)
+    d.detector_tick()
+    p = d.run_of(v1)["route"]["points"][0]
+    assert d._distance_m(p["lat"], p["lon"], moved["lat"], moved["lon"]) <= 35
+    # Gone for a while: they come home.
+    client.delete(f"/api/virtual-drones/{x}")
+    monkeypatch.setattr(d, "INTERCEPT_LOST_S", 0)
+    time.sleep(0.2)
+    d.detector_tick()
+    assert not client.get("/api/detector").get_json()["intercept"]
+    assert wait_until(lambda: not d.run_of(v1) and not d.run_of(v2), 30)
+    assert wait_until(lambda: d.get_link(v1)["telemetry"].get("flight_mode") in ("GO_HOME", "AUTO_LANDING") or
+                      not d.get_link(v1)["telemetry"].get("flying"), 30)
+    client.post("/api/detector/settings", json={"intercept_auto": False, "intercept_drones": []})
+    client.post("/api/detector/alarm/ack")
+
+
+def test_send_drones_now_by_hand_and_recall(det, client, fleet):
+    d = det
+    d._intercept.clear()
+    if os.path.exists(d.MY_DRONES_FILE):
+        os.remove(d.MY_DRONES_FILE)
+    (v1,) = fleet(1)
+    spot = offset(0, 120)
+    sites(client, {"name": "East", "lat": spot["lat"], "lon": spot["lon"], "range_m": 100})
+    client.post("/api/detector/settings", json={"intercept_auto": False, "intercept_drones": [v1]})
+    assert client.post("/api/detector/intercept", json={}).status_code == 409  # nothing to send them to
+    x = _unknown_virtual(d, client, spot)
+    d.detector_tick()
+    assert not client.get("/api/detector").get_json()["intercept"]  # not automatic: nobody sent
+    r = client.post("/api/detector/intercept", json={"target": "all"}).get_json()
+    assert r["ok"] and "flying to watch" in r["message"] and r["intercept"][0]["drones"][0]["slot"] == v1
+    assert "Already watching" in client.post("/api/detector/intercept", json={}).get_json()["message"]
+    assert client.delete("/api/detector/intercept", json={"target": "all"}).get_json()["recalled"] == 1
+    assert not client.get("/api/detector").get_json()["intercept"]
+    run = d.run_of(v1)
+    assert run is None or run.get("stop_home")
+    import users
+    assert users.allowed("operator", "POST", "/api/detector/intercept") and not users.allowed("viewer", "POST", "/api/detector/intercept")
+    client.delete(f"/api/virtual-drones/{x}")
+    client.post("/api/detector/settings", json={"intercept_drones": []})
+    client.post("/api/detector/alarm/ack")
+
+
+def test_no_drone_chosen_sends_the_nearest_ready_one_and_never_the_unknown_drone(det, client, fleet):
+    d = det
+    d._intercept.clear()
+    if os.path.exists(d.MY_DRONES_FILE):
+        os.remove(d.MY_DRONES_FILE)
+    v1, v2 = fleet(2)
+    d._virtual_cfg["demo_auto"] = True  # virtual drones may be picked when none is chosen
+    try:
+        far = offset(-200, 0)
+        sites(client, {"name": "South", "lat": far["lat"], "lon": far["lon"], "range_m": 100})
+        client.post("/api/detector/settings", json={"intercept_auto": True, "intercept_drones": []})
+        x = _unknown_virtual(d, client, far)
+        d.detector_tick()
+        (t,) = client.get("/api/detector").get_json()["intercept"]
+        assert len(t["drones"]) == 1 and t["drones"][0]["slot"] in (v1, v2) and t["drones"][0]["slot"] != x
+        client.delete("/api/detector/intercept", json={"target": "all"})
+        client.delete(f"/api/virtual-drones/{x}")
+    finally:
+        d._virtual_cfg["demo_auto"] = False
+        client.post("/api/detector/settings", json={"intercept_auto": False})
+        client.post("/api/detector/alarm/ack")

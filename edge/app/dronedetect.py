@@ -92,7 +92,10 @@ def save_detectors(path, detectors, cameras):
 
 
 DEFAULT_SETTINGS = {"telegram": True, "min_score": 0.45, "classes": ["drone"],
-                    "remoteid_udp": False, "remoteid_port": 47911, "remoteid_token": "", "sensor_min_conf": 0.6}
+                    "remoteid_udp": False, "remoteid_port": 47911, "remoteid_token": "", "sensor_min_conf": 0.6,
+                    # Send our drones to an unknown drone: automatically or not, which drones (none chosen: the nearest
+                    # ready one), their height and how far from the unknown drone they hold.
+                    "intercept_auto": False, "intercept_drones": [], "intercept_alt_m": 50, "intercept_standoff_m": 40}
 
 
 def load_settings(path):
@@ -114,6 +117,12 @@ def clean_settings(s):
             "remoteid_port": max(1024, min(65535, int(float(s.get("remoteid_port") or 47911)))), "remoteid_token": token,
             "min_score": max(0.1, min(0.95, float(s.get("min_score") or 0.45))),
             "sensor_min_conf": max(0.1, min(0.99, float(s.get("sensor_min_conf") or 0.6))),
+            "intercept_auto": bool(s.get("intercept_auto")),
+            "intercept_drones": list(dict.fromkeys(re.sub(r"[^\w\-:.]", "", str(x))[:40] for x in
+                                                   (s.get("intercept_drones") if isinstance(s.get("intercept_drones"), list) else [])
+                                                   if str(x).strip()))[:20],
+            "intercept_alt_m": max(20, min(120, int(float(s.get("intercept_alt_m") or 50)))),
+            "intercept_standoff_m": max(10, min(300, int(float(s.get("intercept_standoff_m") or 40)))),
             "classes": [c for c in classes if c] or ["drone"]}
 
 
