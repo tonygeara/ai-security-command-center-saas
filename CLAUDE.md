@@ -43,12 +43,16 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (24 November 2026)
+## Where we left off (25 November 2026)
 
 - **TO PUT BACK: the drones' 500 m distance-from-home limit**, switched off for now on the owner's request (23 Nov,
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.20.1**: Detector drones map drawn like a live radar (`pages/detector.py`: `drawRadar`, `sweep`;
+  `radarLayer` under the pins): radar-green circle (`RADAR_GREEN` #29ff7a) with rings at 1/3 and 2/3 and cross-lines, a
+  sweep wedge turning every `SWEEP_MS` 4 s (40° fading trail, ~20 fps, paused when the tab is hidden); red (`RADAR_RED`)
+  while the detector sees an intruder; switched-off detectors dashed, no sweep. Pins green (acoustic orange, RF purple).
 - Released and approved 24 Nov (PR #49, release `edge-v11.20.0`): Edge **V11.20.0**: **acoustic and passive RF drone sensors** on Detector drones. A detector's `sensor`
   is "" / "acoustic" / "rf" (`dronedetect.SENSOR_KINDS`); sensors report JSON (`{"sensor": name or id, "detected",
   "confidence", "bearing", "distance_m", "type", "protocol", "freq_mhz", "rssi_dbm"}`) on the Remote ID UDP port or HTTP
@@ -167,7 +171,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 24 Nov (V11.20.0 released and approved 24 Nov; 87 features; 31 capabilities, 20
+- Features and Capabilities docs current on 24 Nov (V11.20.0 released and approved 24 Nov, V11.20.1 in pull request; 87 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.

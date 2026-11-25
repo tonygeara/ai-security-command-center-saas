@@ -30,6 +30,7 @@ def sites(client, *dets):
 def test_page_nav_and_checks(det, client):
     html = client.get("/drone-detector").get_data(as_text=True)
     assert "Detector drones" in html and 'href="/drone-detector"' in html
+    assert "function drawRadar" in html and "SWEEP_MS" in html  # radar-style circles with a turning sweep
     p = {"name": "Gate", "lat": HOME[0], "lon": HOME[1], "range_m": 300}
     assert sites(client, p)["detectors"][0]["range_m"] == 300
     assert client.post("/api/detector/sites", json={"detectors": [{**p, "range_m": 5}]}).status_code == 400
