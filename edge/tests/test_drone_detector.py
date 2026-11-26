@@ -429,6 +429,10 @@ def test_chosen_drones_fly_to_an_unknown_drone_follow_it_and_come_home(det, clie
     st = client.get("/api/detector").get_json()
     (t,) = st["intercept"]
     assert t["target"] == x and {y["slot"] for y in t["drones"]} == {v1, v2} and t["by"] == "auto-send"
+    for y in t["drones"]:  # how far each of ours still is from it (the map draws a line with this distance)
+        assert y["lat"] is not None and abs(y["distance_m"] - d._distance_m(y["lat"], y["lon"], t["lat"], t["lon"])) <= 1
+    html = client.get("/drone-detector").get_data(as_text=True)
+    assert "function drawChase" in html and "dt-dist" in html
     for s in (v1, v2):
         run = d.run_of(s)
         assert run and run["name"].startswith("Watch ") and run["route"]["end"] == "hover"
