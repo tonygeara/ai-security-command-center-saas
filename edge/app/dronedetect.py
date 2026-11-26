@@ -35,12 +35,24 @@ def _read(path, default):
         return default
 
 
+def _replace(src, dst):
+    """os.replace, retried briefly: on Windows it is refused while another thread or program (a reader of the same file,
+    antivirus, backup) has the file open for a moment."""
+    for attempt in range(20):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def _write(path, data):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 def clean_detector(d, cameras=()):
