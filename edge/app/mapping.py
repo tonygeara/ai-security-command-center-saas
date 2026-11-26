@@ -156,11 +156,23 @@ def survey_dir(root, sid):
     return os.path.join(root, sid)
 
 
+def _replace(src, dst):
+    """os.replace, retried briefly: on Windows it is refused while another thread or program (a reader of the same file,
+    antivirus, backup) has the file open for a moment."""
+    for attempt in range(20):
+        try:
+            return os.replace(src, dst)
+        except PermissionError:
+            if os.name != "nt" or attempt == 19:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 def _write_json(path, data):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=1)
-    os.replace(tmp, path)
+    _replace(tmp, path)
 
 
 def load(root, sid):
