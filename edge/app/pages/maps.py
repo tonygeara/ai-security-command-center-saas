@@ -79,7 +79,27 @@ function initMap(){map=L.map('mpMap',{maxZoom:22}).setView([20,0],2);
   L.control.layers({'Satellite':sat,'Street map':osm}).addTo(map);if(window.addMapSearch&&addMapSearch(map))centred=true;
   drawLayer=L.layerGroup().addTo(map);planLayer=L.layerGroup().addTo(map);selLayer=L.layerGroup().addTo(map);
   map.on('click',e=>{if(!drawing)return;corners.push([e.latlng.lat,e.latlng.lng]);drawArea();replan()});
-  fetch('/api/drone/links').then(r=>r.json()).then(d=>{const t=(d.drones||[]).find(x=>x.lat);if(t&&!centred){centred=true;map.setView([t.lat,t.lon],17)}}).catch(()=>{})}
+  droneLayer=L.layerGroup().addTo(map);loadDrones();setInterval(loadDrones,2000)}
+// Every drone, live (and pinned ones that aren't sending their position). Inside the Drone page (3D MAP switch) the
+// page's own drone is the big one; the map centres on it the first time.
+const ME=new URLSearchParams(location.search).get('drone')||'';
+let droneLayer=null,drones=[],pins={};
+async function loadDrones(){try{const [d,p]=await Promise.all([fetch('/api/drone/links',{cache:'no-store'}).then(r=>r.json()),
+    fetch('/api/drone/pin',{cache:'no-store'}).then(r=>r.json()).catch(()=>({}))]);
+  drones=d.drones||[];pins=p.pins||{};drawDrones();
+  if(!centred){const t=drones.find(x=>x.drone===ME&&x.lat)||drones.find(x=>x.lat),pin=pins[ME]||Object.values(pins)[0];
+    if(t){centred=true;map.setView([t.lat,t.lon],17)}else if(pin){centred=true;map.setView([pin.lat,pin.lon],17)}}}catch(e){}}
+function drawDrones(){if(!droneLayer)return;droneLayer.clearLayers();
+  drones.forEach(x=>{const me=x.drone===ME,live=x.lat&&x.lon,pin=pins[x.drone];if(!live&&!pin)return;
+    const ll=live?[x.lat,x.lon]:[pin.lat,pin.lon],sz=me?30:22,col=me?'#25c7ff':'#ffb23c';
+    const html=live?`<div style="transform:rotate(${x.heading||0}deg);color:${col};font-size:${sz-4}px;line-height:${sz}px;text-align:center;text-shadow:0 0 6px #000">▲</div>`
+      :`<div style="width:${sz-4}px;height:${sz-4}px;border-radius:50%;border:2px dashed #ffcf7a;background:rgba(5,19,29,.85);color:#ffcf7a;font:bold 12px/${sz-8}px Arial;text-align:center">✈</div>`;
+    L.marker(ll,{interactive:true,zIndexOffset:me?1000:500,icon:L.divIcon({className:'',iconSize:[sz,sz],iconAnchor:[sz/2,sz/2],html})})
+      .bindTooltip(`${esc(x.label)}${live?(x.altitude!=null?' · '+Math.round(x.altitude)+' m':'')+(x.flying?' · flying':''):' · pinned (not live)'}`,{permanent:me,direction:'right',offset:[sz/2,0]}).addTo(droneLayer)})}
+function focusDrone(slot){const x=drones.find(d=>d.drone===slot),pin=pins[slot];
+  if(x&&x.lat){map.setView([x.lat,x.lon],Math.max(map.getZoom(),17));return true}
+  if(pin){map.setView([pin.lat,pin.lon],Math.max(map.getZoom(),17));return true}return false}
+window.focusDrone=focusDrone;
 function startDraw(){drawing=true;corners=[];drawArea();replan();$('mpHint').textContent='CLICK THE CORNERS OF THE AREA TO MAP';$('mpDrawBtn').textContent='Drawing…'}
 function undoCorner(){corners.pop();drawArea();replan()}
 function clearDraw(){drawing=false;corners=[];plan=null;drawArea();planLayer.clearLayers();$('mpPlan').innerHTML='';msg('mpPlanMsg','');$('mpSaveBtn').disabled=true;

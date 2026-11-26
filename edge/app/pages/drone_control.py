@@ -362,7 +362,8 @@ async function pinAt(lat,lon,moved){pinning=false;$('pinBtn').textContent='📍 
   const r=await fetch('/api/drone/pin',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({lat:+lat.toFixed(7),lon:+lon.toFixed(7)})});
   const d=await r.json().catch(()=>({}));if(d.ok){pin=d.pin;drawPin();mmsg(moved?'Pin moved.':'Drone pinned here. Its live position replaces the pin once it is connected.',true)}
   else{mmsg(r.status===403?'Only operators and admins can pin drones.':d.error||'Not saved.',false);drawPin()}}
-function findDrone(){ensureMap();const live=liveFix();
+function findDrone(){if($('m3dOn').checked)try{if($('m3d').contentWindow.focusDrone(DRONE)){mmsg('');return}}catch(e){}
+  ensureMap();const live=liveFix();
   if(live){map.setView(live,Math.max(map.getZoom(),17));mmsg('')}
   else if(pin){map.setView([pin.lat,pin.lon],Math.max(map.getZoom(),17));mmsg('No live position: showing where it is pinned.')}
   else mmsg(st.phone_connected?'The drone has no GPS position yet. Use 📍 Pin drone to place it by hand.':'This drone is not connected. Use 📍 Pin drone to place it on the map, or pair it first.',false)}
@@ -485,7 +486,7 @@ function storeSet(k,v){try{localStorage.setItem(k,v)}catch(e){}}
 function goFocus(m){const f=window.mapFocus&&mapFocus.get();if(f&&m)m.setView([f.lat,f.lon],f.zoom||m.getZoom())}
 function toggle3d(on){$('m3dOn').checked=on;storeSet('m3d-on',on?'1':'0');
   if(on&&$('l4dOn').checked)toggle4d(false);
-  const f=$('m3d');if(on&&!f.src)f.src='/maps-embed';else if(on)try{goFocus(f.contentWindow.map)}catch(e){}
+  const f=$('m3d');if(on&&!f.src)f.src='/maps-embed?drone='+encodeURIComponent(DRONE);else if(on)try{f.contentWindow.focusDrone(DRONE)||goFocus(f.contentWindow.map)}catch(e){}
   f.style.display=on?'block':'none';$('dcMap').style.display=on||$('l4dOn').checked?'none':'';
   if(!on&&map&&!$('l4dOn').checked)setTimeout(()=>{map.invalidateSize();goFocus(map)},50)}
 if(storeGet('m3d-on')==='1')setTimeout(()=>toggle3d(true),300);
