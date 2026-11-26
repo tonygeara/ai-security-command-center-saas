@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.21.0"
+APP_VERSION = "V11.22.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -376,7 +376,28 @@ def _alert_to_telegram(m):
 PIPELINE.subscribe("alert", _alert_to_telegram)
 
 
+# Settings → "Telegram: intruder warnings only" (on by default): Telegram gets only warnings that an intruder was
+# detected (unknown person or vehicle, a confirmed intrusion, an unknown drone), questions that need an answer, and
+# replies to what you ask the bot. Everything else (known faces and plates, drone, route and patrol notices, reports,
+# dock and system notices) stays on the dashboard and in the logs.
+INTRUDER_ALERT_KINDS = {"unknown_face", "unknown_vehicle", "verified_alarm"}
+_tg_reply = threading.local()  # set while answering a message or button press from the owner's chat
+
+
+def telegram_intruders_only():
+    try:
+        return bool(_load_customer_settings().get("telegram_intruders_only", True))
+    except Exception:
+        return True
+
+
+def _telegram_allowed(warning=False, question=False):
+    return warning or question or getattr(_tg_reply, "on", False) or not telegram_intruders_only()
+
+
 def queue_telegram_alert(kind, text, key, snapshot_bytes=None, buttons=None):
+    if not _telegram_allowed(warning=kind in INTRUDER_ALERT_KINDS):
+        return False
     config = load_telegram_config()
     if not telegram_ready(config):
         return False
@@ -6682,9 +6703,53 @@ def drone_control_page():
     user = getattr(g, "user", None)
     admin = user is None or user.get("role") == "admin"  # sign-in off: whoever is at the PC is the admin
     return (page.replace('data-live-camera="drone"', f'data-live-camera="{slot}"')
-            .replace("const DRONE='drone';", f"const DRONE={json.dumps(slot)};const IS_ADMIN={json.dumps(admin)};")
+            .replace("const DRONE='drone';", f"const DRONE={json.dumps(slot)};const IS_ADMIN={json.dumps(admin)};"
+                     f"const IS_VIRTUAL={json.dumps(is_virtual(slot))};")
             .replace("<title>", f"<title>{drone_label(slot)} · ", 1)
             .replace('<h1 class="page-title">Drone Control</h1>', f'<h1 class="page-title">Drone Control · {drone_label(slot)}</h1>', 1))
+
+
+# A drone pinned on the Drone page map: where it is parked when it isn't sending its own position (not paired yet, off),
+# so it shows on the map and routes can be planned from there. Its live GPS always wins when it has one.
+DRONE_PINS_FILE = os.path.join(DATA_FOLDER, "drone_pins.json")
+
+
+def load_drone_pins():
+    try:
+        with open(DRONE_PINS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@app.route("/api/drone/pin", methods=["GET", "POST"])
+def api_drone_pin():
+    """GET: this drone's pin (and every drone's). POST {"lat", "lon"} pins it there; {"clear": true} removes the pin."""
+    slot = request.args.get("drone") or DRONE_CAMERA_NAME
+    if slot not in drone_slots():
+        return jsonify({"ok": False, "error": "Unknown drone."}), 404
+    pins = load_drone_pins()
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        if data.get("clear"):
+            pins.pop(slot, None)
+        else:
+            try:
+                lat, lon = float(data["lat"]), float(data["lon"])
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180) or (lat == 0 and lon == 0):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                return jsonify({"ok": False, "error": "Click the map where the drone is."}), 400
+            pins[slot] = {"lat": round(lat, 7), "lon": round(lon, 7), "at": time.time()}
+        tmp = DRONE_PINS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(pins, f, indent=2)
+        _replace_file(tmp, DRONE_PINS_FILE)
+        audit_record("drone: " + ("pin removed" if data.get("clear") else "pinned on the map"), target=drone_label(slot),
+                     detail=pins.get(slot) or {})
+    return jsonify({"ok": True, "pin": pins.get(slot), "pins": {k: {**v, "label": drone_label(k)} for k, v in pins.items()
+                                                               if k in drone_slots()}})
 
 
 DRONE_CONTROL_PAGE = hud_page("Drone Control", pages.drone_control.BODY, active="drone", head=pages.live4d.IMPORTMAP)
@@ -7205,9 +7270,9 @@ def auto_dispatch_check(camera, label, object_id="", stationary=False):
             tel, loc = get_link(r["drone"])["telemetry"], cfg["camera_locations"][camera]
             far = f", {int(_distance_m(tel['lat'], tel['lon'], loc['lat'], loc['lon']))} m away" if tel.get("lat") else ""
             send_telegram(f"🚨 {what} seen by {camera}. {drone_label(r['drone'])} (nearest ready drone{far}) is flying there now.",
-                          _camera_snapshot(camera), [[{"text": "🏠 Recall drone", "callback_data": "home"}]])
+                          _camera_snapshot(camera), [[{"text": "🏠 Recall drone", "callback_data": "home"}]], warning=True)
         else:
-            send_telegram(f"🚨 {what} seen by {camera}, but no drone could be sent: {r['error']}")
+            send_telegram(f"🚨 {what} seen by {camera}, but no drone could be sent: {r['error']}", warning=True)
         return r
     except Exception as e:
         print("Auto-dispatch error:", e)
@@ -7362,13 +7427,19 @@ def _tg(method, **data):
         return None
 
 
-def send_telegram(text, photo=None, buttons=None):
-    """Assistant replies and drone notices (not subject to detection-alert mute/cooldown)."""
+def send_telegram(text, photo=None, buttons=None, warning=False):
+    """Assistant replies and drone notices (not subject to detection-alert mute/cooldown). With "intruder warnings only"
+    on, only intruder warnings (warning=True), questions (buttons) and replies to the owner are sent."""
+    if not _telegram_allowed(warning=warning, question=bool(buttons)):
+        return None
     chat = str(load_telegram_config().get("chat_id") or "").strip()
     extra = {"reply_markup": json.dumps({"inline_keyboard": buttons})} if buttons else {}
     if photo:
         return _tg("sendPhoto", chat_id=chat, caption=text[:1000], files={"photo": ("snapshot.jpg", photo, "image/jpeg")}, **extra)
     return _tg("sendMessage", chat_id=chat, text=text[:4000], **extra)
+
+
+_send_telegram_real = send_telegram  # the tests swap send_telegram for a recorder; they check the filter on this one
 
 
 def alert_buttons(camera):
@@ -7677,6 +7748,7 @@ def telegram_assistant_worker():
             offset = max(offset, upd["update_id"] + 1)
             try:
                 _audit_actor.source = "telegram"
+                _tg_reply.on = True  # answers to the owner always go out
                 if "callback_query" in upd:
                     cq = upd["callback_query"]
                     _tg("answerCallbackQuery", callback_query_id=cq["id"])
@@ -7696,6 +7768,8 @@ def telegram_assistant_worker():
             except Exception as e:
                 print("Telegram assistant error:", e)
                 send_telegram("Sorry, something went wrong answering that.")
+            finally:
+                _tg_reply.on = False
 
 
 def _briefing_worker():
@@ -7964,7 +8038,7 @@ def _patrol_photo(run, slot, why):
 def send_telegram_album(photos, caption=""):
     """Up to 10 photos in one Telegram message (photos: list of jpg bytes)."""
     photos = photos[:10]
-    if not photos:
+    if not photos or not _telegram_allowed():
         return None
     if len(photos) == 1:
         return send_telegram(caption, photos[0])
@@ -8988,6 +9062,9 @@ def _site_location():
     locs = list(load_response_settings()["camera_locations"].values())
     if locs:
         return (locs[0]["lat"], locs[0]["lon"]), "camera location"
+    pins = list(load_drone_pins().values())
+    if pins:
+        return (pins[0]["lat"], pins[0]["lon"]), "pinned drone"
     return None, ""
 
 
@@ -9704,7 +9781,8 @@ def _detector_event(det, kind, text, drone=None, photo=None, extra=None):
     PIPELINE.publish("drone_detected", detector=det["id"], via=kind, text=text)
     audit_record("drone detector: " + kind, target=det["name"], detail={"text": text}, source="system")
     if load_detector_settings()["telegram"] and telegram_ready():
-        send_telegram("🛸 " + text, photo) if photo else send_telegram("🛸 " + text)
+        warn = kind in ("position", "camera", "remote_id", "acoustic", "rf")  # an unknown drone: an intruder warning
+        send_telegram("🛸 " + text, photo, warning=warn) if photo else send_telegram("🛸 " + text, warning=warn)
     return ev
 
 
@@ -10876,7 +10954,7 @@ load();
 
 
 CUSTOMER_SETTINGS_FILE = Path(BASE_FOLDER) / "customer_settings.json"
-DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,"cloud_incidents":False,"satellite_tab":True,"detector_tab":True,
+DEFAULT_CUSTOMER_SETTINGS={"camera_ai":True,"face_ai":True,"lpr":True,"drone_runtime":False,"drone_ai":False,"drone_tracking":False,"gps_dispatch":False,"camera_latitude":None,"camera_longitude":None,"gps_safety_radius_m":120,"require_dispatch_confirmation":True,"dashboard_camera_feed":False,"stop_with_browser":False,"cloud_incidents":False,"satellite_tab":True,"detector_tab":True,"telegram_intruders_only":True,
                            **_patterns_mod.DEFAULTS}
 def _load_customer_settings():
     try:return {**DEFAULT_CUSTOMER_SETTINGS,**json.loads(CUSTOMER_SETTINGS_FILE.read_text(encoding="utf-8"))}
@@ -10993,6 +11071,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⏻ System</div></div><div class="panel-body">
 <div class="hud-row" id="cloudRow"><div><b>Phone access</b><div class="muted">Off: nothing leaves this PC. On: incidents (unknown faces and plates, drone responses) with one snapshot each go to your portal account, and the portal can ask for live pictures of a camera while you watch on your phone. Cloud edition only.</div><div class="muted" id="cloudState"></div></div><input class="toggle" type="checkbox" data-key="cloud_incidents" onchange="save()"></div>
+<div class="hud-row"><div><b>Telegram: intruder warnings only</b><div class="muted">On: Telegram gets only a warning when an intruder is detected (unknown person or vehicle, a confirmed intrusion, an unknown drone), questions that need your answer, and replies to what you ask the bot. Off: also known faces and plates, drone, route and patrol updates, reports and system notices.</div></div><input class="toggle" type="checkbox" data-key="telegram_intruders_only" onchange="save()"></div>
 <div class="hud-row"><div><b>Stop the system when the browser closes</b><div class="muted">Off (recommended): cameras, alerts and drones keep guarding after you close the browser; the program starts by itself when you sign in to Windows.</div></div><input class="toggle" type="checkbox" data-key="stop_with_browser" onchange="save()"></div>
 <div class="hud-row"><div><b>Shut down</b><div class="muted">Stops the dashboard, cameras' AI and drone services until the program is started again. Admins only.</div></div><button class="hud-btn danger" id="offBtn" onclick="shutdown()">Shut down system</button></div>
 <div class="hud-row"><div><b>Log out and turn off</b><div class="muted">Signs you out and stops everything on this PC, Docker Desktop included, until you sign in to Windows again (or open the program from the desktop icon): then Docker and the system start by themselves. Admins only.</div></div><button class="hud-btn danger" id="logoutBtn" onclick="logoutOff()">Log out and turn off</button></div>
