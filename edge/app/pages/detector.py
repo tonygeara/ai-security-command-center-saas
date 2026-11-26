@@ -33,6 +33,9 @@ BODY = r"""
 .dt-drone.estimated{background:#e0283e;border-style:dashed;animation:dtBlink 1s infinite}
 .dt-hear{margin-top:6px;font-size:12px;color:#ffd08a}
 .dt-label{background:rgba(3,16,26,.9);border:1px solid #155879;color:#e9f8ff;font:bold 11px Arial;padding:2px 6px;border-radius:3px;white-space:nowrap}
+.dt-dist{background:rgba(3,16,26,.88);border:1px solid #2d6a8a;color:#cfeeff;font:bold 11px Arial;padding:1px 5px;border-radius:3px;box-shadow:none}
+.dt-dist.bad{border-color:#a3303f;color:#ffb3bb}.dt-dist.ours{border-color:#1d7fae;color:#7fdcff}
+.dt-dist::before{display:none}
 .dt-pilot{width:18px;height:18px;border-radius:50%;background:#7a3cff;border:2px solid #fff;color:#fff;font:bold 10px/14px Arial;text-align:center}
 .dt-rid{font:11px monospace;color:#cfeeff;background:#020a10;border:1px solid #155879;border-radius:3px;padding:6px 8px;word-break:break-all;margin-top:6px}
 @media(max-width:1000px){.dt-grid{grid-template-columns:1fr}#dtMap{height:60vh}}
@@ -103,6 +106,15 @@ const radarLayer=L.layerGroup().addTo(map),detLayer=L.layerGroup().addTo(map),dr
 // Radar look: green range rings and cross-lines, and a sweep turning once every 4 s (red while the detector sees an intruder).
 const RADAR_GREEN='#29ff7a',RADAR_RED='#ff3b4e',SWEEP_MS=4000,SWEEP_DEG=40,SWEEP_STEPS=8;
 let radars=[];  // [{d, al, wedges: [polygon...], line}]
+// Our drones sent to an unknown drone: a line from each to it, with how far it still has to go.
+const chaseLayer=L.layerGroup().addTo(map);
+function drawChase(){chaseLayer.clearLayers();
+  let n=0;(data.intercept||[]).forEach(t=>t.drones.forEach(o=>{if(o.lat==null)return;
+    L.polyline([[o.lat,o.lon],[t.lat,t.lon]],{color:'#25c7ff',weight:2.5,opacity:.9,dashArray:'10 6'}).addTo(chaseLayer);
+    // The label sits beside our drone (two drones' lines run side by side, so mid-line labels would overlap).
+    const left=n++%2===0;
+    L.circleMarker([o.lat,o.lon],{radius:5,color:'#25c7ff',fillColor:'#25c7ff',fillOpacity:1,weight:1}).addTo(chaseLayer)
+      .bindTooltip(`${esc(o.label)} · ${fmtM(o.distance_m)}`,{permanent:true,direction:left?'left':'right',offset:[left?-8:8,0],className:'dt-dist ours'})}))}
 function geoAt(lat,lon,deg,m){const b=deg*Math.PI/180;return [lat+m*Math.cos(b)/111320,lon+m*Math.sin(b)/(111320*Math.cos(lat*Math.PI/180))]}
 function wedge(d,a0,a1){const pts=[[d.lat,d.lon]];for(let a=a0;a<=a1+0.01;a+=Math.max(1,(a1-a0)/6))pts.push(geoAt(d.lat,d.lon,a,d.range_m));return pts}
 function drawRadar(d,al){const col=al?RADAR_RED:RADAR_GREEN,on=d.enabled;
@@ -140,9 +152,12 @@ function drawMap(keepDets){if(!keepDets){detLayer.clearLayers();radarLayer.clear
       .on('dragend',e=>{const ll=e.target.getLatLng(),o=dets.find(x=>x.id===d.id)||d;o.lat=+ll.lat.toFixed(6);o.lon=+ll.lng.toFixed(6);save('Moved.')}).addTo(detLayer)})}
   drawHearing();
   if(dragDrone)return;  // don't redraw the drones while one is being dragged
+  drawChase();
   droneLayer.clearLayers();
   (data.drones||[]).forEach(x=>{const lines=dets.filter(d=>(data.seen[d.id]||[]).some(s=>s.slot===x.slot));
-    lines.forEach(d=>L.polyline([[d.lat,d.lon],[x.lat,x.lon]],{color:x.intruder?'#ff5d6c':'#26ee89',weight:1.5,dashArray:'4 4'}).addTo(droneLayer));
+    lines.forEach(d=>{const ln=L.polyline([[d.lat,d.lon],[x.lat,x.lon]],{color:x.intruder?'#ff5d6c':'#26ee89',weight:1.5,dashArray:'4 4'}).addTo(droneLayer);
+      // How far the drone is from the detector, on the line.
+      const s=(data.seen[d.id]||[]).find(y=>y.slot===x.slot);if(s)ln.bindTooltip(fmtM(s.distance_m),{permanent:true,direction:'center',className:'dt-dist'+(x.intruder?' bad':'')})});
     if(x.operator){L.polyline([[x.lat,x.lon],[x.operator.lat,x.operator.lon]],{color:'#a98bff',weight:1.5,dashArray:'2 6'}).addTo(droneLayer);
       L.marker([x.operator.lat,x.operator.lon],{icon:L.divIcon({className:'',iconSize:[18,18],iconAnchor:[9,9],html:'<div class="dt-pilot">👤</div>'})})
         .bindTooltip('Pilot of '+esc(x.label)).addTo(droneLayer)}
@@ -241,6 +256,7 @@ function renderIcDrones(){const ours=(data.fleet||[]).filter(x=>x.mine&&!String(
 function renderIntercept(){const ic=data.intercept||[],intr=(data.drones||[]).some(x=>x.intruder);
   $('icState').textContent=ic.length?ic.reduce((n,t)=>n+t.drones.length,0)+' DRONE(S) OUT':data.settings.intercept_auto?'AUTOMATIC':'BY HAND';
   $('icActive').innerHTML=ic.map(t=>`<div class="dt-ic"><h4><span>🛫 ${t.drones.map(x=>esc(x.label)).join(', ')} → ${esc(t.label)}</span><button onclick="recall('${esc(t.target)}')">Recall</button></h4>
+    <div style="font-size:12px;margin-top:4px;color:#7fdcff">${t.drones.map(x=>esc(x.label)+': '+(x.distance_m==null?'no position':fmtM(x.distance_m)+' to go'+(x.alt!=null?' · '+Math.round(x.alt)+' m high':''))).join(' · ')}</div>
     <div class="muted" style="font-size:11px;margin-top:4px">For ${Math.round(t.for_s/60)} min · ${t.seen_s<5?'seen now':'last seen '+t.seen_s+' s ago'} · sent ${esc(t.by)}</div></div>`).join('')}
 async function sendNow(){const r=await fetch('/api/detector/intercept',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({target:'all'})});
   const d=await r.json().catch(()=>({}));msg('icMsg',d.ok?d.message:(r.status===403?'Only operators and admins can send drones.':d.error||'Not sent.'),!!d.ok);load()}

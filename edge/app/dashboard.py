@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.22.1"
+APP_VERSION = "V11.22.2"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -10042,9 +10042,20 @@ def intercept_tick(intruders, now, cfg):
 def intercept_status():
     now = time.time()
     with _intercept_lock:
-        return [{"target": k, "label": t["label"], "lat": t["lat"], "lon": t["lon"], "by": t["by"],
-                 "drones": [{"slot": s, "label": drone_label(s)} for s in t["drones"]],
-                 "for_s": round(now - t["started"]), "seen_s": round(now - t["seen"])} for k, t in _intercept.items() if t["drones"]]
+        items = [(k, dict(t), list(t["drones"])) for k, t in _intercept.items() if t["drones"]]
+    out = []
+    for k, t, slots in items:
+        drones = []
+        for s in slots:
+            tel = get_link(s)["telemetry"]
+            live = link_fresh(s, 5) and tel.get("lat") is not None
+            drones.append({"slot": s, "label": drone_label(s), "lat": tel.get("lat") if live else None,
+                           "lon": tel.get("lon") if live else None, "alt": tel.get("altitude") if live else None,
+                           # how far our drone still is from the unknown drone (straight line, metres)
+                           "distance_m": round(_distance_m(tel["lat"], tel["lon"], t["lat"], t["lon"])) if live else None})
+        out.append({"target": k, "label": t["label"], "lat": t["lat"], "lon": t["lon"], "by": t["by"], "drones": drones,
+                    "for_s": round(now - t["started"]), "seen_s": round(now - t["seen"])})
+    return out
 
 
 def _sensor_text(d, h, fixes):
