@@ -15,7 +15,7 @@ BODY = r"""
 .dc-tel div{background:#05131d;border:1px solid #153c56;border-radius:4px;padding:8px 10px}
 .dc-tel small{display:block;color:#6d8b9d;font-size:9px;letter-spacing:1.5px;text-transform:uppercase}
 .dc-tel b{color:#e9f8ff;font-size:15px}
-#dcMap{height:260px;border:1px solid #155879;border-radius:5px;background:#020a10}
+#dcMap{height:360px;border:1px solid #155879;border-radius:5px;background:#020a10}
 .nf-chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #7a2935;background:rgba(125,12,28,.18);color:#ffb3bb;border-radius:12px;padding:2px 4px 2px 10px;font-size:12px}
 .nf-chip button{background:none;border:0;color:#ff7b86;cursor:pointer;font-weight:bold;padding:0 6px}
 .nf-chip button.armed{background:#7a1020;color:#fff;border-radius:10px}
@@ -112,9 +112,12 @@ BODY = r"""
 <div class="dc-hud"><span>ALT <b id="hAlt">–</b> m</span><span>DIST <b id="hDist">–</b> m</span><span>SPD <b id="hSpd">–</b> m/s</span><span>BAT <b id="hBat">–</b>%</span><span>GPS <b id="hGps">–</b></span><span>SIGNAL <b id="hSig">–</b></span></div></div>
 <div class="muted" id="patrolInfo" style="display:none;padding:8px 12px;font-size:12px"></div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">⌖ Map</div><div class="actions" style="align-items:center;gap:10px"><div class="live" id="mapState"></div>
+<button class="hud-btn" style="min-height:28px;font-size:11px" onclick="findDrone()" title="Centre the map on this drone">⌖ Find drone</button>
+<button class="hud-btn" style="min-height:28px;font-size:11px" id="pinBtn" onclick="pinMode()" title="Click the map where this drone is parked (for a drone that isn't sending its position)">📍 Pin drone</button>
 <label class="l4d-switch" title="Plan, fly and view 3D site maps"><input type="checkbox" class="toggle" id="m3dOn" onchange="toggle3d(this.checked)"> 3D MAP</label>
 <label class="l4d-switch" title="Watch every drone fly in 3D, live"><input type="checkbox" class="toggle" id="l4dOn" onchange="toggle4d(this.checked)"> 4D LIVE</label></div></div>
-<div class="panel-body"><div id="dcMap"></div><iframe id="m3d" title="3D site maps"></iframe><div id="l4d"></div><div id="l4dBar"></div><div class="muted" id="coords" style="margin-top:8px"></div></div></section>
+<div class="panel-body"><div id="dcMap"></div><iframe id="m3d" title="3D site maps"></iframe><div id="l4d"></div><div id="l4dBar"></div><div class="muted" id="coords" style="margin-top:8px"></div>
+<div class="muted" style="margin-top:4px;font-size:12px">Click the map to add route stops. Drag the drone to move it: a virtual drone flies or is put there, a real one flies there after a warning, a pinned drone moves its pin. <span id="pinInfo"></span></div><div id="mapMsg" class="hud-msg"></div></div></section>
 </div>
 <div>
 <section class="panel"><div class="panel-head"><div class="panel-title">◉ Flight</div><div class="live" id="modeState"></div></div>
@@ -331,12 +334,49 @@ document.addEventListener('keydown',e=>{if(e.target.tagName==='INPUT'&&e.target.
   if(['KeyW','KeyA','KeyS','KeyD','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code)){e.preventDefault();
     if(control||dkCtl)keys.add(e.code);else msg('Click “Keyboard control: OFF” to turn it ON first — then W/A/S/D and the arrow keys fly the drone.',false)}});
 document.addEventListener('keyup',e=>keys.delete(e.code));
-function initMap(lat,lon){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],18);
+function initMap(lat,lon,zoom){if(map||typeof L==='undefined')return;map=L.map('dcMap',{zoomControl:true}).setView([lat,lon],zoom||18);
   L.tileLayer('/tiles/osm/{z}/{x}/{y}',{maxZoom:20,attribution:'© OpenStreetMap'}).addTo(map);window.addMapSearch&&addMapSearch(map);
   trail=L.polyline([],{color:'#36cfff',weight:2}).addTo(map);
   map.on('click',e=>mapClick(e.latlng.lat,e.latlng.lng));drawNofly()}
 // A click on the flat map or on the ground in 4D live: a zone corner while drawing a zone, a camera's place, else a route stop.
-function mapClick(lat,lon){dkGoto?dockMapClick(lat,lon):nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
+function mapClick(lat,lon){pinning?pinAt(lat,lon):dkGoto?dockMapClick(lat,lon):nfPts?nfAdd(lat,lon):locFor?saveCamLoc(lat,lon):addPoint(lat,lon)}
+// The map always shows: at the drone, else its pin, the site, the last place looked at, or the whole world (then search).
+let pin=null,pMark=null,pinning=false,centredOnDrone=false,dragging=false;
+function mmsg(t,ok){const e=$('mapMsg');if(!e)return;e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
+function ensureMap(centre){if(map)return;const t=st.telemetry||{},f=window.mapFocus&&mapFocus.get();
+  if(t.lat&&t.lon)initMap(t.lat,t.lon);else if(pin)initMap(pin.lat,pin.lon);else if(centre)initMap(centre[0],centre[1],17);
+  else if(f)initMap(f.lat,f.lon,16);else initMap(20,0,2);
+  if(map&&!(t.lat||pin||centre||f))mmsg('Search an address or press Locate me, then 📍 Pin drone to show where this drone is.')}
+async function loadPin(){try{const d=await fetch('/api/drone/pin',{cache:'no-store'}).then(r=>r.json());pin=d.pin||null;drawPin()}catch(e){}}
+function liveFix(){const t=st.telemetry||{};return st.telemetry_fresh&&t.lat&&t.lon?[t.lat,t.lon]:null}
+function drawPin(){if(!map)ensureMap();if(!map)return;const live=liveFix();
+  $('pinInfo').textContent=pin?(live?'Pinned spot kept for when it is offline.':'Shown at its pinned spot (no live position).'):'';
+  if(!pin||live){if(pMark){pMark.remove();pMark=null}return}
+  if(!pMark){pMark=L.marker([pin.lat,pin.lon],{draggable:true,icon:L.divIcon({className:'',iconSize:[30,30],iconAnchor:[15,15],
+      html:'<div style="width:26px;height:26px;border-radius:50%;border:2px dashed #ffcf7a;background:rgba(5,19,29,.85);color:#ffcf7a;font:bold 14px/22px Arial;text-align:center">✈</div>'})})
+    .bindTooltip('📍 '+(droneNames[DRONE]||'This drone')+' (pinned, not live) · drag to move').addTo(map);
+    pMark.on('dragend',e=>{const ll=e.target.getLatLng();pinAt(ll.lat,ll.lng,true)})}
+  pMark.setLatLng([pin.lat,pin.lon])}
+function pinMode(){pinning=!pinning;$('pinBtn').textContent=pinning?'Cancel pin':'📍 Pin drone';mmsg(pinning?'Click the map where this drone is.':'')}
+async function pinAt(lat,lon,moved){pinning=false;$('pinBtn').textContent='📍 Pin drone';
+  const r=await fetch('/api/drone/pin',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({lat:+lat.toFixed(7),lon:+lon.toFixed(7)})});
+  const d=await r.json().catch(()=>({}));if(d.ok){pin=d.pin;drawPin();mmsg(moved?'Pin moved.':'Drone pinned here. Its live position replaces the pin once it is connected.',true)}
+  else{mmsg(r.status===403?'Only operators and admins can pin drones.':d.error||'Not saved.',false);drawPin()}}
+function findDrone(){ensureMap();const live=liveFix();
+  if(live){map.setView(live,Math.max(map.getZoom(),17));mmsg('')}
+  else if(pin){map.setView([pin.lat,pin.lon],Math.max(map.getZoom(),17));mmsg('No live position: showing where it is pinned.')}
+  else mmsg(st.phone_connected?'The drone has no GPS position yet. Use 📍 Pin drone to place it by hand.':'This drone is not connected. Use 📍 Pin drone to place it on the map, or pair it first.',false)}
+// Drag the live drone: a virtual one flies there or is put there; a real one flies there after a REAL FLIGHT warning.
+async function dropDrone(ll){const t=st.telemetry||{},lat=+ll.lat.toFixed(6),lon=+ll.lng.toFixed(6),far=Math.round(distM(t.lat,t.lon,lat,lon)),name=droneNames[DRONE]||'The drone';
+  try{let how;
+    if(IS_VIRTUAL)how=await uiChoose(`Send ${name} (virtual) ${far} m to ${lat.toFixed(5)}, ${lon.toFixed(5)}?`,['Fly there','Move there now'],{title:'Virtual drone'});
+    else how=await uiConfirm(`REAL FLIGHT: ${name} takes off if it is on the ground and flies ${far} m to ${lat.toFixed(5)}, ${lon.toFixed(5)} at ${+$('rtAlt').value||30} m, then hovers there.\n\nThe usual checks apply (no-fly zones, weather, battery). Keep it in sight.`,{title:'Fly the drone there',ok:'Fly there',danger:true})?0:null;
+    if(how===null)return;let r,d;
+    if(how===1){r=await fetch('/api/virtual-drones/'+encodeURIComponent(DRONE),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'move',lat,lon})});d=await r.json().catch(()=>({}));
+      mmsg(r.ok&&d.ok!==false?name+' moved.':(r.status===403?'Only operators and admins can move drones.':d.error||'Not moved.'),r.ok&&d.ok!==false)}
+    else{r=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Moved on the map',points:[{lat,lon}],alt:+$('rtAlt').value||30,speed:+$('rtSpeed').value||5,pause:0,end:'hover'})});
+      d=await r.json().catch(()=>({}));mmsg(d.ok?name+' is flying there.':(r.status===403?'Only operators and admins can fly drones.':d.error||'Not sent.'),!!d.ok)}
+  }finally{dragging=false;const t2=st.telemetry||{};if(dMark&&t2.lat)dMark.setLatLng([t2.lat,t2.lon])}}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
 function drone_icon(hdg){return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="transform:rotate(${hdg||0}deg);color:#25c7ff;font-size:24px;line-height:26px;text-align:center;text-shadow:0 0 6px #000">▲</div>`})}
@@ -350,7 +390,11 @@ function render(){const t=st.telemetry||{};const on=st.phone_connected,fresh=st.
   $('hSig').textContent=t.signal==null?'–':t.signal+'%';$('tHdg').textContent=t.heading==null?'–':Math.round((t.heading+360)%360)+'°';$('tMode').textContent=t.flight_mode||'–';
   $('tCtl').textContent=t.control||'–';$('confirmLand').style.display=t.landing_confirm_needed?'':'none';
   if(control&&t.control&&t.control!=='PC'){control=false;$('ctlBtn').textContent='Keyboard control: OFF';$('ctlBtn').classList.remove('dc-ctl-on');msg(/LANDING|GO_HOME/.test(t.flight_mode||'')?'Keyboard control ended: the drone is landing / returning home by itself.':'The pilot took control on the remote controller.',false)}
-  if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];dMark=dMark||L.marker(p).addTo(map);dMark.setLatLng(p).setIcon(drone_icon(t.heading));
+  if(t.lat&&t.lon){initMap(t.lat,t.lon);if(map){const p=[t.lat,t.lon];
+    if(!dMark){dMark=L.marker(p,{draggable:true}).bindTooltip(()=>(droneNames[DRONE]||'This drone')+' · drag to send it somewhere').addTo(map);
+      dMark.on('dragstart',()=>{dragging=true}).on('dragend',e=>dropDrone(e.target.getLatLng()))}
+    if(!centredOnDrone){centredOnDrone=true;map.setView(p,Math.max(map.getZoom(),17))}
+    if(!dragging)dMark.setLatLng(p);dMark.setIcon(drone_icon(t.heading));if(pMark)drawPin();
     trail.addLatLng(p);if(t.home_lat&&t.home_lon){hMark=hMark||L.circleMarker([t.home_lat,t.home_lon],{radius:7,color:'#2aea88'}).bindTooltip('Home').addTo(map);hMark.setLatLng([t.home_lat,t.home_lon]);
       // The range ring: every route stop must be inside it.
       if(isFinite(rMax))rCircle=rCircle||L.circle([t.home_lat,t.home_lon],{radius:rMax,color:'#36cfff',weight:1.5,dashArray:'8 6',fillColor:'#36cfff',fillOpacity:.04,interactive:false}).addTo(map);
@@ -383,7 +427,7 @@ async function loadNofly(){try{const d=await fetch('/api/nofly?drone='+encodeURI
   if(d.max_distance_m)document.querySelectorAll('.nf-range').forEach(e=>e.textContent=d.max_distance_m);
   else $('nfRangeNote').textContent='There is no distance limit from the home point at the moment.';
   if(d.map_cache)$('mapCache').textContent='Offline map: '+d.map_cache.tiles+' tiles saved ('+d.map_cache.mb+' MB). Pan and zoom round the site once while online to save it for use without internet.';
-  if(!map&&d.centre)initMap(d.centre[0],d.centre[1]);drawNofly()}catch(e){}}
+  if(!map)ensureMap(d.centre);drawNofly();drawPin()}catch(e){ensureMap()}}
 function drawNofly(){
   $('nfList').innerHTML=nfZones.length?nfZones.map(z=>`<span class="nf-chip">⛔ ${esc(z.name)}<button type="button" class="${nfArm===z.id?'armed':''}" title="Delete this zone" onclick="nfDel('${esc(z.id)}')">${nfArm===z.id?'Delete?':'✕'}</button></span>`).join(''):'<span class="muted">No zones yet.</span>';
   if(!map||typeof L==='undefined')return;nfLayers.forEach(l=>map.removeLayer(l));
@@ -402,12 +446,12 @@ async function nfSave(){if(!nfPts||nfPts.length<3){nfmsg('Place at least 3 corne
 async function nfDel(id){if(nfArm!==id){nfArm=id;drawNofly();setTimeout(()=>{if(nfArm===id){nfArm='';drawNofly()}},4000);return}
   nfArm='';const d=await fetch('/api/nofly',{method:'DELETE',headers:{'content-type':'application/json'},body:JSON.stringify({id})}).then(r=>r.json());
   if(d.ok){nfZones=d.zones;nfmsg('Zone deleted.',true)}drawNofly()}
-loadNofly();setInterval(loadNofly,15000);
+loadPin().then(loadNofly);setInterval(loadNofly,15000);setTimeout(()=>ensureMap(),4000);
 function rtmsg(t,ok){const e=$('routeMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 function addPoint(lat,lon){if(route.length>=25){rtmsg('25 stops maximum.',false);return}route.push({lat,lon});drawRoute()}
 function undoPoint(){route.pop();drawRoute()}
 function clearRoute(){route=[];drawRoute()}
-function homePos(){const t=st.telemetry||{};return t.home_lat?[t.home_lat,t.home_lon]:(t.lat?[t.lat,t.lon]:null)}
+function homePos(){const t=st.telemetry||{};return t.home_lat?[t.home_lat,t.home_lon]:(t.lat?[t.lat,t.lon]:(pin?[pin.lat,pin.lon]:null))}
 function routeInfo(){const h=homePos();let len=0,far=[];
   route.forEach((p,i)=>{const prev=i?route[i-1]:(h?{lat:h[0],lon:h[1]}:null);if(prev)len+=distM(prev.lat,prev.lon,p.lat,p.lon);
     if(h&&distM(h[0],h[1],p.lat,p.lon)>rMax)far.push(i+1)});

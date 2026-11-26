@@ -43,12 +43,21 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (25 November 2026)
+## Where we left off (26 November 2026)
 
 - **TO PUT BACK: the drones' 500 m distance-from-home limit**, switched off for now on the owner's request (23 Nov,
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.22.0**: (1) **Telegram: intruder warnings only** (customer setting `telegram_intruders_only`,
+  default **on**, Settings → System): `_telegram_allowed()` gates `send_telegram` (new `warning=` arg), `queue_telegram_alert`
+  (passes only `INTRUDER_ALERT_KINDS` unknown_face / unknown_vehicle / verified_alarm) and `send_telegram_album`; always
+  sent: warnings (`warning=True`: unknown-drone detector alarms, "person seen, drone sent"), questions (messages with
+  buttons) and replies to the owner (`_tg_reply.on` set in the Telegram poller). `_send_telegram_real` kept for tests.
+  (2) **Drone page map** (`pages/drone_control.py`): `ensureMap()` always shows the map (drone → pin → site → last view →
+  world); **Find drone**; **Pin drone** (`/api/drone/pin`, `drone_pins.json`, dashed marker, routes measured from it, also a
+  `_site_location` fallback); drag the drone (`dropDrone`: virtual → fly / move now, real → REAL FLIGHT fly there, pin →
+  move pin); map 360 px; `IS_VIRTUAL` injected by `drone_control_page`.
 - Released and approved 25 Nov (PR #53, release `edge-v11.21.0`): Edge **V11.21.0**: **send drones to an unknown drone** (Detector drones panel "Send drones to an unknown
   drone"; `dashboard.py`: `intercept_start` / `intercept_tick` / `intercept_release` / `intercept_status`, `_intercept`;
   settings `intercept_auto`, `intercept_drones` (none: nearest ready drone of ours), `intercept_alt_m` 50,
@@ -179,7 +188,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 25 Nov (V11.21.0 released and approved 25 Nov; 88 features; 31 capabilities, 20
+- Features and Capabilities docs current on 26 Nov (V11.21.0 released and approved 25 Nov, V11.22.0 in pull request; 89 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
