@@ -56,3 +56,12 @@ def test_drone_pin_shows_a_drone_with_no_position(d, client):
     assert users.allowed("operator", "POST", "/api/drone/pin") and not users.allowed("viewer", "POST", "/api/drone/pin")
     html = client.get("/drone-control").get_data(as_text=True)
     assert "findDrone()" in html and "pinMode()" in html and "function ensureMap" in html and "const IS_VIRTUAL=false" in html
+
+
+def test_3d_map_view_shows_the_drones(client):
+    """The Drone page's 3D MAP switch embeds the 3D maps tool: it draws every drone live (and pinned ones), highlights
+    the page's own drone and Find drone centres it there too."""
+    html = client.get("/maps-embed?drone=drone").get_data(as_text=True)
+    assert "function loadDrones" in html and "setInterval(loadDrones,2000)" in html and "window.focusDrone=focusDrone" in html
+    dc = client.get("/drone-control").get_data(as_text=True)
+    assert "/maps-embed?drone='+encodeURIComponent(DRONE)" in dc and "contentWindow.focusDrone(DRONE)" in dc

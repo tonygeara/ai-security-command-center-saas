@@ -49,6 +49,10 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.22.1**: drones on the Drone page's **3D MAP** view (`pages/maps.py`, embedded as
+  `/maps-embed?drone=<slot>`): `loadDrones()` every 2 s from `/api/drone/links` + `/api/drone/pin` draws every live drone
+  (page's own drone big and blue with a permanent label, others orange) and pinned drones (dashed); `focusDrone(slot)`
+  used by the parent's Find drone and when the 3D view is switched on. The full /maps page shows them too.
 - Released and approved 26 Nov (PR #55, release `edge-v11.22.0`): Edge **V11.22.0**: (1) **Telegram: intruder warnings only** (customer setting `telegram_intruders_only`,
   default **on**, Settings → System): `_telegram_allowed()` gates `send_telegram` (new `warning=` arg), `queue_telegram_alert`
   (passes only `INTRUDER_ALERT_KINDS` unknown_face / unknown_vehicle / verified_alarm) and `send_telegram_album`; always
@@ -188,7 +192,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 26 Nov (V11.22.0 released and approved 26 Nov; 89 features; 31 capabilities, 20
+- Features and Capabilities docs current on 26 Nov (V11.22.0 released and approved 26 Nov, V11.22.1 in pull request; 89 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
