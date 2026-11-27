@@ -49,7 +49,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
-- In pull request: Edge **V11.23.0**: **Fleet** tab (`/fleet`, `pages/fleet.py` BODY, nav "Fleet") and a **Fleet card on
+- Released and approved 27 Nov (PR #61, release `edge-v11.23.0`): Edge **V11.23.0**: **Fleet** tab (`/fleet`, `pages/fleet.py` BODY, nav "Fleet") and a **Fleet card on
   the Dashboard** (`pages/fleet.py` CARD, injected at `<!--FLEET_CARD-->` in `pages/main_page.py`). `/api/fleet`
   (`_fleet_drone`): per drone job (patrol / response / watching / backup / standby / flying / ready / offline), job text,
   target with `distance_m` (route stop: the run counts stops from 1, so stop = `index - 1`; response camera; intruder), live
@@ -159,7 +159,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.22.2 approved for Normal clients (27 Nov); doumith is on **Normal**.
+- V11.23.0 approved for Normal clients (27 Nov); doumith is on **Normal**.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -208,7 +208,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 27 Nov (V11.22.2 released and approved 27 Nov; 89 features; 31 capabilities, 20
+- Features and Capabilities docs current on 27 Nov (V11.23.0 released and approved 27 Nov; 90 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
