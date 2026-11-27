@@ -85,6 +85,14 @@ DIALOG_HTML = r"""
   window.uiPrompt=(m,v,o)=>open('prompt',m,Object.assign({value:v},o||{}));
   // Several answers: resolves to the chosen button's index (0, 1, …), or null for Cancel / Esc.
   window.uiChoose=(m,choices,o)=>open('choose',m,Object.assign({choices},o||{}));
+  // Ask before flying when only the weather stops a flight (crewed aircraft nearby never can be overridden).
+  window.uiWeatherOk=d=>open('confirm','⚠ '+(d.error||'The weather does not permit flying.')+'\n\nFly anyway despite the weather? You are responsible for the flight.',
+    {title:'Weather warning',ok:'Fly anyway',danger:true});
+  // POST a route flight; if only the weather blocks it, ask and send it again with ignore_weather. Resolves to {r, d}.
+  window.uiFly=async(url,body)=>{const send=b=>fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(b)});
+    let r=await send(body),d=await r.json().catch(()=>({}));
+    if(!d.ok&&d.weather_override&&await window.uiWeatherOk(d)){r=await send(Object.assign({},body,{ignore_weather:true}));d=await r.json().catch(()=>({}))}
+    return {r,d}};
 })();
 </script>
 """

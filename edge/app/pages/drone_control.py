@@ -308,7 +308,7 @@ let st={},control=false,map=null,dMark=null,hMark=null,trail=null,keys=new Set()
 function msg(t,ok){const e=$('cmdMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function cmd(c,args,confirmText){if(confirmText&&!await uiConfirm(confirmText))return;msg(c.replace('_',' ')+'…');
   try{const r=await fetch('/api/drone/command',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({cmd:c,args:args||{}})});const d=await r.json();
-    if(!d.ok&&d.can_force&&await uiConfirm('⚠ '+d.error+'\n\nTake off anyway? You are responsible for the flight.'))return cmd(c,{...(args||{}),force:true});
+    if(!d.ok&&d.can_force&&await uiWeatherOk(d))return cmd(c,{...(args||{}),force:true});
     msg(d.ok?c.replace(/_/g,' ')+': done':d.error||'Failed',d.ok);return d.ok}catch(e){msg('Lost contact with the system',false)}}
 function takeoff(){const sim=(st.telemetry||{}).simulator;
   cmd('takeoff',{},sim?'SIMULATOR take-off (motors stay locked). Continue?':'⚠ REAL TAKE-OFF: the simulator is OFF and the motors WILL start. Propellers on, people clear, drone in sight, pilot holding the controller?')}
@@ -375,8 +375,7 @@ async function dropDrone(ll){const t=st.telemetry||{},lat=+ll.lat.toFixed(6),lon
     if(how===null)return;let r,d;
     if(how===1){r=await fetch('/api/virtual-drones/'+encodeURIComponent(DRONE),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'move',lat,lon})});d=await r.json().catch(()=>({}));
       mmsg(r.ok&&d.ok!==false?name+' moved.':(r.status===403?'Only operators and admins can move drones.':d.error||'Not moved.'),r.ok&&d.ok!==false)}
-    else{r=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Moved on the map',points:[{lat,lon}],alt:+$('rtAlt').value||30,speed:+$('rtSpeed').value||5,pause:0,end:'hover'})});
-      d=await r.json().catch(()=>({}));mmsg(d.ok?name+' is flying there.':(r.status===403?'Only operators and admins can fly drones.':d.error||'Not sent.'),!!d.ok)}
+    else{({r,d}=await uiFly('/api/routes/fly',{name:'Moved on the map',points:[{lat,lon}],alt:+$('rtAlt').value||30,speed:+$('rtSpeed').value||5,pause:0,end:'hover'}));mmsg(d.ok?name+' is flying there.':(r.status===403?'Only operators and admins can fly drones.':d.error||'Not sent.'),!!d.ok)}
   }finally{dragging=false;const t2=st.telemetry||{};if(dMark&&t2.lat)dMark.setLatLng([t2.lat,t2.lon])}}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
@@ -551,7 +550,7 @@ async function deleteRoute(){const n=$('routeSel').value;if(!n||!await uiConfirm
 async function flyRoute(){if(!route.length){rtmsg('Click the map to add stops, or choose a saved route.',false);return}const sim=(st.telemetry||{}).simulator;
   if(!await uiConfirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Fly '+route.length+' stop'+(route.length>1?'s':'')+' at '+$('rtAlt').value+' m'
     +($('rtLoop').checked?', repeating the route until you press Stop route':'')+'? Keep the drone in sight.'))return;
-  const d=await fetch('/api/routes/fly',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({...routeBody(),name:$('rtName').value||$('routeSel').value||'route'})}).then(r=>r.json());
+  const d=(await uiFly('/api/routes/fly',{...routeBody(),name:$('rtName').value||$('routeSel').value||'route'})).d;
   rtmsg(d.message||d.error,d.ok);loadRoutes()}
 async function stopRoute(){const d=await fetch('/api/routes/stop',{method:'POST'}).then(r=>r.json());rtmsg(d.ok?'Route stopped, drone hovering.':d.error,d.ok);loadRoutes()}
 setInterval(loadRoutes,3000);
