@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.23.0"
+APP_VERSION = "V11.24.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -5347,9 +5347,14 @@ def api_drone_command():
     if cmd == "takeoff" and not link["telemetry"].get("flying"):
         tel = link["telemetry"]
         home = (tel.get("home_lat") or tel.get("lat"), tel.get("home_lon") or tel.get("lon"))
-        problem = flight_conditions(home if None not in home else None)[0]
-        if problem and not args.get("force"):
-            return jsonify({"ok": False, "error": problem, "can_force": True}), 409
+        loc = home if None not in home else None
+        problem = flight_conditions(loc)[0]
+        if problem:
+            weather_only = not flight_conditions(loc, ignore_weather=True)[0]
+            if not (weather_only and args.get("force")):  # crewed aircraft nearby can't be overridden
+                return jsonify({"ok": False, "error": problem, "can_force": weather_only, "weather_override": weather_only}), 409
+            audit_record("drone: take-off despite the weather", target=drone_label(slot), detail={"problem": problem})
+            _drone_event(f"Taking off despite the weather ({problem})", slot)
         args = {}
     if cmd == "gimbal":
         args = {"pitch": max(-90.0, min(30.0, float(args.get("pitch") or 0)))}
@@ -6829,9 +6834,29 @@ def api_fleet():
                       if isinstance(x.get("battery"), dict) else x.get("battery")})
     centre = _site_location()[0]
     return jsonify({"ok": True, "drones": drones, "docks": docks, "centre": list(centre) if centre else None,
-                    "patrol_on": patrol_mode_on(), "allowed": drone_control_allowed(),
+                    "patrol_on": patrol_mode_on(), "allowed": drone_control_allowed(), "detectors": _fleet_detectors(),
                     "intruders": [{"label": t["label"], "lat": t["lat"], "lon": t["lon"]} for t in intercepts],
                     "nofly": [{"name": z["name"], "points": z["points"]} for z in nofly_zones()]})
+
+
+def _fleet_detectors():
+    """The Fleet map's Detectors layer: each detector with its range and whether it sees an unknown drone now, and the
+    unknown drones the detectors know of. {"on": False} while the Detector drones tab is off (licence or Settings)."""
+    if not tab_on("drone_detector"):
+        return {"on": False, "detectors": [], "unknown": []}
+    try:
+        dets = dronedetect_mod.load_detectors(DETECTORS_FILE)
+        known = _known_drones() if dets else []
+    except Exception:  # noqa: BLE001
+        return {"on": True, "detectors": [], "unknown": []}
+    seen = dronedetect_mod.in_range(dets, known)
+    ours = set(drone_slots())
+    return {"on": True,
+            "detectors": [{"id": d["id"], "name": d["name"], "lat": d["lat"], "lon": d["lon"], "range_m": d["range_m"],
+                           "enabled": d["enabled"], "sensor": d.get("sensor") or "",
+                           "sees": [x["label"] for x in seen.get(d["id"], []) if x.get("intruder")]} for d in dets],
+            "unknown": [{"label": x["label"], "lat": x["lat"], "lon": x["lon"]} for x in known
+                        if x.get("intruder") and x["slot"] not in ours]}
 
 
 def _fleet_hold(slot, why):
@@ -8080,9 +8105,9 @@ def delete_route(name):
         json.dump(routes, f, indent=2)
 
 
-def _route_problem(route, slot=None):
+def _route_problem(route, slot=None, ignore_weather=False):
     if slot is None:
-        return _pick_drone(lambda d: _route_problem(route, d))[1]
+        return _pick_drone(lambda d: _route_problem(route, d, ignore_weather))[1]
     if not drone_control_allowed():
         return "Drone control is not included in this licence."
     link = get_link(slot)
@@ -8104,7 +8129,7 @@ def _route_problem(route, slot=None):
     problem = nofly.route_problem(nofly_zones(), pts, route.get("loop"), home, route.get("end") == "home")
     if problem:
         return problem
-    problem = flight_conditions(home)[0]  # weather and crewed aircraft
+    problem = flight_conditions(home, ignore_weather)[0]  # weather (unless the user chose to fly anyway) and crewed aircraft
     if problem:
         return problem
     if (tel.get("battery") or 0) < load_response_settings()["min_battery"]:
@@ -8250,7 +8275,7 @@ def _hand_over(name, route, old, stop, run):
     backup, run["backup"] = run.get("backup"), None  # released, so it can take over
     nxt, problem = None, "no other drone"
     if backup:
-        problem = _route_problem(route, backup)
+        problem = _route_problem(route, backup, run.get("ignore_weather", False))
         if problem:
             problem = f"backup {drone_label(backup)} not ready ({problem})"
         else:
@@ -8260,7 +8285,7 @@ def _hand_over(name, route, old, stop, run):
         over = _sources_over_limit()
         candidates = [d for d in drone_slots() if d not in (old, backup) and d not in over
                       and (is_virtual(d) == is_virtual(old) or _virtual_cfg.get("demo_auto"))]
-        nxt = next((d for d in candidates if not _route_problem(route, d)), None)
+        nxt = next((d for d in candidates if not _route_problem(route, d, run.get("ignore_weather", False))), None)
         if not nxt:
             problem = (problem + "; " if backup else "") + ("no other drone is ready" if candidates else "no other drone")
     if not nxt:
@@ -8365,7 +8390,7 @@ def _run_route(name, route, by, slot, run):
 route_lock = threading.Lock()
 
 
-def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None):
+def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None, ignore_weather=False):
     if route is None:
         route = load_routes().get(name or "")
         if not route:
@@ -8380,14 +8405,17 @@ def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None):
             taken = run_of(backup) or backup_run_of(backup)
             if taken:
                 return {"ok": False, "error": f"{drone_label(backup)} is already busy with route {taken['name']}; choose another backup."}
-        slot, problem = _pick_drone(lambda d: "chosen as the backup" if d == backup else _route_problem(route, d), drone)
+        slot, problem = _pick_drone(lambda d: "chosen as the backup" if d == backup else _route_problem(route, d, ignore_weather), drone)
         if problem:
-            return {"ok": False, "error": problem}
+            out = {"ok": False, "error": problem}
+            if not ignore_weather and drone and _route_problem(route, drone, ignore_weather=True) == "":
+                out["weather_override"] = True  # only the weather is in the way: the user may choose to fly anyway
+            return out
         # Claimed under the lock (not in the thread) so a second request can't take the same drones meanwhile.
         run = {"active": True, "id": f"{slot}-{time.time():.3f}", "route": route,
                "drone": slot, "backup": backup, "name": name or "unsaved route", "index": 0,
                "total": len(route["points"]), "phase": "flying", "stop": False, "message": f"Route {name or 'unsaved route'} started",
-               "by": by}
+               "by": by, "ignore_weather": bool(ignore_weather)}
         route_runs[run["id"]] = run
         if not route.get("survey") and by != PATROL_MODE_BY:
             remember_last_route(slot, name or "unsaved route", route)
@@ -8472,8 +8500,15 @@ def api_routes_fly():
         backup = data.get("backup") if data.get("backup") in drone_slots() else None
         if data.get("ignore_battery"):
             backup = None  # nothing is swapped, so no drone is held back as backup
+        ignore_weather = bool(data.get("ignore_weather"))
         r = fly_route(data.get("name"), data if data.get("points") else None, by="dashboard",
-                      drone=drone if drone in drone_slots() else None, backup=backup)
+                      drone=drone if drone in drone_slots() else None, backup=backup, ignore_weather=ignore_weather)
+        if ignore_weather and r.get("ok"):
+            who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+            audit_record("drone: flight despite the weather", target=drone_label(r["drone"]),
+                         detail={"route": data.get("name") or "unsaved route", "by": who,
+                                 "weather": ", ".join(weather_status().get("issues") or []) or "unknown"})
+            _drone_event(f"Flying despite the weather (chosen by {who})", r["drone"])
     except (TypeError, ValueError, KeyError) as e:
         r = {"ok": False, "error": f"Invalid route: {e}"}
     return jsonify(r), (200 if r["ok"] else 409)
@@ -9251,16 +9286,18 @@ def _traffic_fetch(settings, lat, lon):
     return airtraffic.fetch(settings, lat, lon)
 
 
-def flight_conditions(loc=None):
-    """(problem that blocks automatic flights or '' , warnings) from the weather and air traffic."""
+def flight_conditions(loc=None, ignore_weather=False):
+    """(problem that blocks automatic flights or '' , warnings) from the weather and air traffic.
+    ignore_weather: the user chose to fly anyway; a weather problem becomes a warning (air traffic still blocks)."""
     s = load_safety()
     problems, warnings = [], []
     w = weather_status(loc)
+    wx = warnings if ignore_weather else problems
     if w["enabled"]:
         if w["reading"] and w["issues"]:
-            (problems if s["weather"]["mode"] == "block" else warnings).append("Weather: " + ", ".join(w["issues"]) + ".")
+            (wx if s["weather"]["mode"] == "block" else warnings).append("Weather: " + ", ".join(w["issues"]) + ".")
         elif not w["reading"] and s["weather"]["unknown"] == "block":
-            problems.append("The weather is unknown (no internet?) and Flight Safety requires a forecast to fly.")
+            wx.append("The weather is unknown (no internet?) and Flight Safety requires a forecast to fly.")
     t = s["traffic"]
     if t["enabled"]:
         fresh = traffic_state["ok"] and time.time() - traffic_state["at"] < TRAFFIC_STALE_S

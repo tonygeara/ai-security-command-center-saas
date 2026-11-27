@@ -36,6 +36,7 @@ BODY = r"""
 <div class="fl-bar" id="flFilters"></div>
 <div class="fl-bar">
 <label class="l4d-switch" title="Every drone flies its own patrol route again and again"><input type="checkbox" class="toggle" id="flPatrol" onchange="setPatrol(this.checked)"> RUN PATROL</label>
+<label class="l4d-switch" title="Show the drone detectors' ranges and the unknown drones they see"><input type="checkbox" class="toggle" id="flDet" onchange="setDet(this.checked)"> DETECTORS</label>
 <button class="hud-btn" id="flSendSel" onclick="pickSendSelected()" title="Tick drones in the list, then click the map">➤ Send ticked drones to a spot</button>
 <span style="flex:1"></span>
 <button class="hud-btn danger" onclick="stopAll()">■ Stop all</button>
@@ -45,7 +46,7 @@ BODY = r"""
 <div class="fl-grid">
 <section class="panel"><div class="panel-body"><div id="flMap"></div>
 <div class="fl-legend">▲ drone (points the way it flies) · dashed line: where it is going, with the distance · dotted: its route ahead · faded: its patrol route · thin line: where it has been ·
-<span style="color:#25c7ff">■</span> patrol <span style="color:#ff9f43">■</span> response <span style="color:#c18bff">■</span> watching an intruder <span style="color:#ffcf7a">■</span> backup <span style="color:#e9f8ff">■</span> flying <span style="color:#26ee89">■</span> ready <span style="color:#6d8b9d">■</span> offline</div></div></section>
+<span style="color:#25c7ff">■</span> patrol <span style="color:#ff9f43">■</span> response <span style="color:#c18bff">■</span> watching an intruder <span style="color:#ffcf7a">■</span> backup <span style="color:#e9f8ff">■</span> flying <span style="color:#26ee89">■</span> ready <span style="color:#6d8b9d">■</span> offline · <span style="color:#29ff7a">◯</span> detector range (<span style="color:#ff3b4e">red</span>: it sees an unknown drone; dashed: switched off)</div></div></section>
 <div class="fl-list" id="flList"><div class="muted">Loading…</div></div>
 </div>
 </main>
@@ -59,7 +60,7 @@ const TAG={patrol:'PATROL',response:'RESPONSE',watching:'WATCHING',backup:'BACKU
 let data={drones:[],docks:[]},filter='all',sel=new Set(),picking=null,edit=null,dragging=null,fitted=false,trails={};
 const map=L.map('flMap',{maxZoom:20}).setView([20,0],2);
 L.tileLayer('/tiles/sat/{z}/{x}/{y}',{maxZoom:20,maxNativeZoom:19}).addTo(map);
-const zoneL=L.layerGroup().addTo(map),routeL=L.layerGroup().addTo(map),droneL=L.layerGroup().addTo(map),editL=L.layerGroup().addTo(map);
+const detL=L.layerGroup().addTo(map),zoneL=L.layerGroup().addTo(map),routeL=L.layerGroup().addTo(map),droneL=L.layerGroup().addTo(map),editL=L.layerGroup().addTo(map);
 if(window.addMapSearch)addMapSearch(map);
 function msg(t,ok){const e=$('flMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t||''}
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})});
@@ -72,7 +73,19 @@ function shown(x){return filter==='all'||(filter==='flying'&&x.flying)||(filter=
 function icon(x){const c=COL[x.job]||'#e9f8ff',me=sel.has(x.slot);
   if(x.lat==null)return L.divIcon({className:'',iconSize:[26,26],iconAnchor:[13,13],html:`<div style="width:22px;height:22px;border-radius:50%;border:2px dashed #8fb3c7;background:rgba(5,19,29,.85);color:#8fb3c7;font:bold 12px/18px Arial;text-align:center">✈</div>`});
   return L.divIcon({className:'',iconSize:[34,34],iconAnchor:[17,17],html:`<div style="transform:rotate(${x.heading||0}deg);color:${c};font-size:${me?30:26}px;line-height:34px;text-align:center;text-shadow:0 0 6px #000,0 0 2px #000${me?',0 0 10px '+c:''}">▲</div>`})}
-function drawMap(){zoneL.clearLayers();routeL.clearLayers();
+let showDet=true;try{showDet=localStorage.getItem('fleetDetectors')!=='0'}catch(e){}
+$('flDet').checked=showDet;
+function setDet(on){showDet=on;try{localStorage.setItem('fleetDetectors',on?'1':'0')}catch(e){}
+  const x=data.detectors||{};if(on&&x.on===false)msg('The Detector drones tab is off for this PC (licence or Settings → Tabs), so there are no detectors to show.',false);
+  else if(on&&!(x.detectors||[]).length)msg('No detectors yet: add them on the Detector drones page.',false);else msg('');drawMap()}
+function drawDetectors(){detL.clearLayers();const x=data.detectors||{};if(!showDet||!x.on)return;
+  (x.detectors||[]).forEach(d=>{const alert=d.enabled&&(d.sees||[]).length,c=alert?'#ff3b4e':'#29ff7a';
+    L.circle([d.lat,d.lon],{radius:d.range_m,color:c,weight:alert?2.5:1.5,dashArray:d.enabled?null:'6 6',fillColor:c,fillOpacity:d.enabled?(alert?.14:.06):.02,interactive:false}).addTo(detL);
+    L.circleMarker([d.lat,d.lon],{radius:5,color:'#03101a',weight:1.5,fillColor:c,fillOpacity:1})
+      .bindTooltip(`📡 ${esc(d.name)}${d.sensor?' · '+esc(d.sensor):''} · ${fmtM(d.range_m)}${d.enabled?'':' · off'}${alert?' · ⚠ '+esc(d.sees.join(', ')):''}`,{direction:'top',offset:[0,-6],className:'fl-lbl'}).addTo(detL)});
+  (x.unknown||[]).forEach(t=>{if((data.intruders||[]).some(i=>Math.abs(i.lat-t.lat)<1e-5&&Math.abs(i.lon-t.lon)<1e-5))return;
+    L.circleMarker([t.lat,t.lon],{radius:6,color:'#fff',weight:1.5,fillColor:'#e0283e',fillOpacity:.85}).bindTooltip('⚠ '+esc(t.label),{direction:'top',offset:[0,-6],className:'fl-lbl'}).addTo(detL)})}
+function drawMap(){drawDetectors();zoneL.clearLayers();routeL.clearLayers();
   (data.nofly||[]).forEach(z=>L.polygon(z.points.map(p=>[p.lat,p.lon]),{color:'#ff4d6a',weight:1.5,fillOpacity:.15,interactive:false}).addTo(zoneL));
   (data.docks||[]).forEach(k=>{if(k.lat==null)return;L.marker([k.lat,k.lon],{icon:L.divIcon({className:'',iconSize:[24,24],iconAnchor:[12,12],
     html:`<div style="width:20px;height:20px;border-radius:4px;background:#031a0e;border:2px solid ${k.online?'#26ee89':'#6d8b9d'};color:${k.online?'#26ee89':'#6d8b9d'};font:bold 12px/16px Arial;text-align:center">⌂</div>`})})
@@ -140,17 +153,17 @@ function findDrone(slot){const x=D(slot),p=x&&pos(x);if(p){map.setView(p,Math.ma
   else msg((x?x.label:'This drone')+' has no position yet: pin it on its Drone page (📍 Pin drone).',false)}
 async function cmd(slot,c,ask){const x=D(slot);if(ask&&!await uiConfirm(x.label+': '+ask))return;
   let d=await post('/api/drone/command?drone='+encodeURIComponent(slot),{cmd:c});
-  if(!d.ok&&d.can_force&&await uiConfirm('⚠ '+d.error+'\n\nTake off anyway? You are responsible for the flight.'))d=await post('/api/drone/command?drone='+encodeURIComponent(slot),{cmd:c,args:{force:true}});
+  if(!d.ok&&d.can_force&&await uiWeatherOk(d))d=await post('/api/drone/command?drone='+encodeURIComponent(slot),{cmd:c,args:{force:true}});
   msg(d.ok?x.label+': '+({takeoff:'taking off',go_home:'returning home',land:'landing',hover:'hovering'}[c]||c)+'.':(d.error||'Not done.'),!!d.ok);load()}
 async function hover(slot){const x=D(slot);if(x.route)await post('/api/routes/stop?drone='+encodeURIComponent(slot));cmd(slot,'hover')}
 async function stopRoute(slot){const d=await post('/api/routes/stop?drone='+encodeURIComponent(slot));msg(d.ok?D(slot).label+': route stopped, hovering.':(d.error||'Not stopped.'),!!d.ok);load()}
 async function flyPatrol(slot){const x=D(slot),r=x.patrol_route;if(!r)return;
   if(!await uiConfirm(`${x.label}: fly its patrol route “${r.name}” (${r.points.length} stops${r.loop?', repeating until stopped':''})? It takes off if it is on the ground. Keep it in sight.`))return;
-  const d=await post('/api/routes/fly?drone='+encodeURIComponent(slot),{name:r.name});msg(d.ok?d.message:(d.error||'Not started.'),!!d.ok);load()}
+  const d=(await uiFly('/api/routes/fly?drone='+encodeURIComponent(slot),{name:r.name})).d;msg(d.ok?d.message:(d.error||'Not started.'),!!d.ok);load()}
 function pickSend(slot){picking=picking&&picking.slot===slot?null:{slot};edit=null;$('flMap').classList.toggle('picking',!!picking);msg(picking?'Click the map where '+D(slot).label+' should fly.':'');render()}
 function pickSendSelected(){if(!sel.size){msg('Tick one or more drones in the list first.',false);return}picking={many:[...sel]};edit=null;$('flMap').classList.add('picking');msg('Click the map where the ticked drones should fly (they spread out around the spot).')}
 async function sendTo(slot,lat,lon,quiet){const x=D(slot);
-  const d=await post('/api/routes/fly?drone='+encodeURIComponent(slot),{name:'Sent from Fleet',points:[{lat,lon}],alt:30,speed:6,pause:0,end:'hover'});
+  const d=(await uiFly('/api/routes/fly?drone='+encodeURIComponent(slot),{name:'Sent from Fleet',points:[{lat,lon}],alt:30,speed:6,pause:0,end:'hover'})).d;
   if(!quiet)msg(d.ok?x.label+' is flying there.':(d.error||'Not sent.'),!!d.ok);return d}
 // Drag a drone: a virtual one flies there or is put there; a real one flies there after a warning; a pinned one moves its pin.
 async function dropDrone(x,ll){const lat=+ll.lat.toFixed(6),lon=+ll.lng.toFixed(6);
@@ -190,7 +203,7 @@ async function edSave(fly){const x=D(edit.slot);if(!edit.pts.length){msg('Click 
   let d=await post('/api/routes?drone='+encodeURIComponent(edit.slot),route);
   if(!d.ok){msg(d.error||'Not saved.',false);return}
   if(fly){if(!await uiConfirm(`${x.label}: fly “${d.name}” now (${route.points.length} stops${route.loop?', repeating until stopped':''})? It takes off if it is on the ground. Keep it in sight.`)){edit=null;msg('Patrol route saved.',true);load();return}
-    const f=await post('/api/routes/fly?drone='+encodeURIComponent(edit.slot),{name:d.name});msg(f.ok?'Saved and flying: '+f.message:'Saved, but not started: '+(f.error||''),!!f.ok)}
+    const f=(await uiFly('/api/routes/fly?drone='+encodeURIComponent(edit.slot),{name:d.name})).d;msg(f.ok?'Saved and flying: '+f.message:'Saved, but not started: '+(f.error||''),!!f.ok)}
   else msg(`Saved as ${x.label}'s patrol route. Run patrol (top) flies it again and again.`,true);
   edit=null;load()}
 async function setPatrol(on){const d=await post('/api/routes/patrol',{on});if(d.status>=300){msg(d.error||'Only operators and admins can change this.',false);$('flPatrol').checked=!on;return}
