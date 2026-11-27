@@ -49,6 +49,17 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- In pull request: Edge **V11.23.0**: **Fleet** tab (`/fleet`, `pages/fleet.py` BODY, nav "Fleet") and a **Fleet card on
+  the Dashboard** (`pages/fleet.py` CARD, injected at `<!--FLEET_CARD-->` in `pages/main_page.py`). `/api/fleet`
+  (`_fleet_drone`): per drone job (patrol / response / watching / backup / standby / flying / ready / offline), job text,
+  target with `distance_m` (route stop: the run counts stops from 1, so stop = `index - 1`; response camera; intruder), live
+  position, battery, height, speed, heading, current route, patrol route (`last_route_of`), pin; plus docks, intruders,
+  no-fly zones. `/api/fleet/stop-all` (hover every flying drone, routes stopped) and `/api/fleet/home-all` (intercepts
+  released, response recalled, routes `stop_home`, else `_go_home_safe`); both hold Run patrol for those drones; operators
+  and admins. Page: per-drone Take off / Hover / Home / Land / Send to (map click) / Patrol route editor (click stops, drag
+  them, height, speed, repeat → `POST /api/routes?drone=` saves it as that drone's route, optionally fly now) / Fly patrol /
+  Stop route / Find / Open; drag a drone (virtual: fly or move now; real: REAL FLIGHT fly there; offline: move pin);
+  filters; Send ticked drones to a spot (20 m apart). Tested with virtual drones.
 - Released and approved 27 Nov (PRs #58, #59; release `edge-v11.22.2`, the first build failed on a Windows file lock in
   `mapping._write_json`, fixed by `_replace` retries in `mapping.py` and `dronedetect.py`, then rebuilt by hand): Edge
   **V11.22.2**: distance lines on Detector drones: detector→drone lines labelled with the distance (`dt-dist`);

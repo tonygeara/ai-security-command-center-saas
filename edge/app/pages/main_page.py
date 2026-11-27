@@ -3359,6 +3359,7 @@ FRONT CAMERA • FACE AI • LPR AI
 .grid-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 10px 12px}
 .grid-actions code{color:#2eef88;font-size:11px;word-break:break-all}
 </style>
+<!--FLEET_CARD-->
 <div class="panel" style="margin-top:9px;" id="multiGridPanel">
 <div class="panel-head">
 <div class="panel-title">▦ CAMERAS &amp; DRONES</div>
