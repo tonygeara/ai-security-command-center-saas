@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.22.2"
+APP_VERSION = "V11.23.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2372,7 +2372,7 @@ import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import satview as satellite_mod
 import dronedetect as dronedetect_mod
-import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
+import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.fleet, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -3858,6 +3858,7 @@ from pages.live_player import LIVE_PLAYER_HTML  # noqa: E402
 HUD_NAV_ITEMS = [
     ("dashboard", "/", "⌂", "Dashboard"),
     ("satellite", "/satellite", "◍", "Satellite"),
+    ("fleet", "/fleet", "◈", "Fleet"),
     ("drone", "/drone-control", "✈", "Drone"),
     ("detector", "/drone-detector", "⌖", "Detector drones"),
     ("virtual", "/virtual-drones", "◇", "Virtual drones"),
@@ -6750,6 +6751,142 @@ def api_drone_pin():
                      detail=pins.get(slot) or {})
     return jsonify({"ok": True, "pin": pins.get(slot), "pins": {k: {**v, "label": drone_label(k)} for k, v in pins.items()
                                                                if k in drone_slots()}})
+
+
+# ---------- Fleet: every drone on one page (and a card on the Dashboard) ----------
+# Where each drone is, where it is going (its job, its next target and the distance), its route and its patrol route,
+# with the controls of each drone (they use the same APIs and checks as the Drone page) and Stop all / Return all home.
+FLEET_PAGE = hud_page("Fleet", pages.fleet.BODY, active="fleet")
+
+
+@app.route("/fleet")
+def fleet_page():
+    return Response(FLEET_PAGE, mimetype="text/html")
+
+
+def _fleet_drone(slot, pins, intercepts):
+    link, fresh = get_link(slot), link_fresh(slot, 5)
+    tel = link["telemetry"] if fresh else {}
+    live = tel.get("lat") is not None and tel.get("lon") is not None
+    x = {"slot": slot, "label": drone_label(slot), "virtual": is_virtual(slot), "mavlink": str(slot).startswith("drone-m"),
+         "paired": link["conn"] is not None, "connected": bool(fresh and tel.get("drone_connected", True) and live),
+         "flying": bool(tel.get("flying")), "battery": tel.get("battery"), "lat": tel.get("lat") if live else None,
+         "lon": tel.get("lon") if live else None, "alt": tel.get("altitude"), "speed": tel.get("speed"),
+         "heading": tel.get("heading"), "mode": tel.get("flight_mode"), "over_limit": slot in _sources_over_limit(),
+         "home": [tel["home_lat"], tel["home_lon"]] if tel.get("home_lat") else None, "pin": pins.get(slot),
+         "job": "", "job_text": "", "target": None, "route": None}
+    run, backup = run_of(slot), backup_run_of(slot)
+    mission = tel.get("mission") if isinstance(tel.get("mission"), dict) else None
+    if run is not None:
+        pts = run["route"]["points"]
+        i = max(0, min(len(pts) - 1, int(run.get("index") or 1) - 1))  # the run counts stops from 1
+        watch = str(run.get("name", "")).startswith(INTERCEPT_ROUTE)
+        x["job"] = "watching" if watch else ("backup" if str(run.get("name", "")).startswith("Backup for") else "patrol")
+        x["route"] = {"name": run["name"], "points": pts, "index": i, "total": len(pts), "loop": run["route"].get("loop")}
+        x["job_text"] = run["name"] if watch else f"Route “{run['name']}” · stop {i + 1} of {len(pts)}"
+        tgt = (mission["lat"], mission["lon"]) if mission and mission.get("lat") else (pts[i]["lat"], pts[i]["lon"])
+        x["target"] = {"lat": tgt[0], "lon": tgt[1], "label": f"stop {i + 1}"}
+    if drone_response.get("active") and drone_response.get("drone") == slot:
+        loc = load_response_settings()["camera_locations"].get(drone_response.get("camera")) or {}
+        x["job"], x["job_text"] = "response", f"Going to camera {drone_response.get('camera')}"
+        if loc.get("lat") is not None:
+            x["target"] = {"lat": loc["lat"], "lon": loc["lon"], "label": f"camera {drone_response.get('camera')}"}
+    for t in intercepts:
+        if any(d["slot"] == slot for d in t["drones"]):
+            x["job"], x["job_text"] = "watching", f"Following {t['label']}"
+            x["target"] = {"lat": t["lat"], "lon": t["lon"], "label": t["label"], "intruder": True}
+    if backup is not None and not x["job"]:
+        x["job"], x["job_text"] = "standby", f"Backup for route “{backup['name']}”"
+    if not x["job"]:
+        x["job"] = "flying" if x["flying"] else ("ready" if x["connected"] else "offline")
+        x["job_text"] = {"flying": "Flying (by hand or a single point)", "ready": "On the ground, ready",
+                         "offline": "Not connected" + (" · shown at its pin" if x["pin"] else "")}[x["job"]]
+        if x["flying"] and mission and mission.get("lat"):
+            x["target"] = {"lat": mission["lat"], "lon": mission["lon"], "label": "target"}
+    if x["target"] and live:
+        x["target"]["distance_m"] = round(_distance_m(x["lat"], x["lon"], x["target"]["lat"], x["target"]["lon"]))
+    last = last_route_of(slot)
+    x["patrol_route"] = {"name": last["name"], "points": last["route"]["points"], "alt": last["route"]["alt"],
+                         "loop": last["route"].get("loop")} if last else None
+    return x
+
+
+@app.route("/api/fleet")
+def api_fleet():
+    """Every drone (and dock) with where it is, what it is doing and where it is going."""
+    pins = load_drone_pins()
+    intercepts = intercept_status()
+    drones = [_fleet_drone(s, pins, intercepts) for s in drone_slots()]
+    docks = []
+    for sn, d in dock_store.docks().items():
+        try:
+            x = dock_hub.summary(sn)
+        except Exception:  # noqa: BLE001
+            continue
+        docks.append({"sn": sn, "name": d.get("name") or sn, "lat": x.get("lat"), "lon": x.get("lon"), "online": x.get("online"),
+                      "ready": x.get("ready"), "drone_in_dock": x.get("drone_in_dock"), "drone_lat": x.get("drone_lat"),
+                      "drone_lon": x.get("drone_lon"), "battery": (x.get("battery") or {}).get("percent")
+                      if isinstance(x.get("battery"), dict) else x.get("battery")})
+    centre = _site_location()[0]
+    return jsonify({"ok": True, "drones": drones, "docks": docks, "centre": list(centre) if centre else None,
+                    "patrol_on": patrol_mode_on(), "allowed": drone_control_allowed(),
+                    "intruders": [{"label": t["label"], "lat": t["lat"], "lon": t["lon"]} for t in intercepts],
+                    "nofly": [{"name": z["name"], "points": z["points"]} for z in nofly_zones()]})
+
+
+def _fleet_hold(slot, why):
+    if patrol_mode_on():
+        _patrol_mode["held"][slot] = why  # Run patrol leaves it alone until switched on again
+
+
+@app.route("/api/fleet/stop-all", methods=["POST"])
+def api_fleet_stop_all():
+    """Operators, admins: every flying drone stops what it is doing and hovers where it is."""
+    if not drone_control_allowed():
+        return jsonify({"ok": False, "error": "Drone control is not included in this license."}), 403
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    n = 0
+    for slot in drone_slots():
+        tel = get_link(slot)["telemetry"]
+        if not (link_fresh(slot, 5) and tel.get("flying")):
+            continue
+        run = run_of(slot)
+        if run is not None:
+            run["stop"] = True
+        drone_command("hover", timeout=5.0, slot=slot)
+        _fleet_hold(slot, f"Stop all pressed by {who}")
+        _drone_event(f"Stop all ({who}): hovering", slot)
+        n += 1
+    audit_record("drone: stop all", target="fleet", detail={"drones": n, "by": who})
+    return jsonify({"ok": True, "stopped": n, "message": f"{n} drone{'s' if n != 1 else ''} hovering." if n else "No drone is flying."})
+
+
+@app.route("/api/fleet/home-all", methods=["POST"])
+def api_fleet_home_all():
+    """Operators, admins: every flying drone returns home (round no-fly zones); responses and watches end."""
+    if not drone_control_allowed():
+        return jsonify({"ok": False, "error": "Drone control is not included in this license."}), 403
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    for k in list(_intercept):
+        intercept_release(k, f"Return all home by {who}")
+    if drone_response.get("active"):
+        recall_drone(f"Return all home by {who}")
+    n = 0
+    for slot in drone_slots():
+        tel = get_link(slot)["telemetry"]
+        if not (link_fresh(slot, 5) and tel.get("flying")):
+            continue
+        run = run_of(slot)
+        if run is not None:
+            run["stop_home"] = True
+            run["stop"] = True
+        elif tel.get("flight_mode") not in ("GO_HOME", "AUTO_LANDING"):
+            _go_home_safe(slot, f"Return all home by {who}")
+        _fleet_hold(slot, f"Return all home pressed by {who}")
+        _drone_event(f"Return all home ({who})", slot)
+        n += 1
+    audit_record("drone: return all home", target="fleet", detail={"drones": n, "by": who})
+    return jsonify({"ok": True, "returning": n, "message": f"{n} drone{'s' if n != 1 else ''} returning home." if n else "No drone is flying."})
 
 
 DRONE_CONTROL_PAGE = hud_page("Drone Control", pages.drone_control.BODY, active="drone", head=pages.live4d.IMPORTMAP)
@@ -10827,6 +10964,7 @@ CAMERA_FEED_SWITCH = ('<button type="button" class="feed-switch" data-feed-switc
 
 
 PAGE = PAGE.replace("<!--HUD_SUBNAV-->", hud_subnav("dashboard")).replace("<!--APP_VERSION-->", VERSION_LABEL)
+PAGE = PAGE.replace("<!--FLEET_CARD-->", pages.fleet.CARD)  # the Fleet card: every drone on a small map
 # Edition branding (e.g. "AI Command Centre Lebanon" for the on-prem build).
 PAGE = (PAGE.replace("<title>\nAI Security Command Center\n</title>", f"<title>\n{edition.PRODUCT_NAME}\n</title>")
             .replace('<div class="brand-name">\nAI SECURITY\n</div>', f'<div class="brand-name">\n{edition.BRAND_TOP}\n</div>')
