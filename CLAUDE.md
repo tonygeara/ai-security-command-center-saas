@@ -49,6 +49,15 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- Released and approved 27 Nov (PR #63, release `edge-v11.24.0`): Edge **V11.24.0**: (1) **Detectors switch on the Fleet page**
+  (`flDet`, localStorage `fleetDetectors`; `/api/fleet` → `detectors: {on, detectors[{…, sees}], unknown}` from
+  `_fleet_detectors()`, empty while the Detector drones tab is off): range circles (green, red while it sees an unknown
+  drone, dashed when off) and unknown drones. (2) **Fly despite the weather, after asking**: `flight_conditions(loc,
+  ignore_weather)` turns weather problems into warnings (crewed aircraft still block); routes: `fly_route(...,
+  ignore_weather)` answers `weather_override: true` when only the weather blocks, `/api/routes/fly` takes `ignore_weather`
+  (kept in the run for backup hand-over); take-off: `can_force` / `args.force` now weather-only. Pages use `uiFly(url, body)`
+  / `uiWeatherOk(d)` from `pages/dialogs.py` (Fleet, Drone, Detector drones). Audit "drone: flight / take-off despite the
+  weather". Automatic flights never override. Tests `edge/tests/test_weather_override.py`.
 - Released and approved 27 Nov (PR #61, release `edge-v11.23.0`): Edge **V11.23.0**: **Fleet** tab (`/fleet`, `pages/fleet.py` BODY, nav "Fleet") and a **Fleet card on
   the Dashboard** (`pages/fleet.py` CARD, injected at `<!--FLEET_CARD-->` in `pages/main_page.py`). `/api/fleet`
   (`_fleet_drone`): per drone job (patrol / response / watching / backup / standby / flying / ready / offline), job text,
@@ -159,7 +168,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.23.0 approved for Normal clients (27 Nov); doumith is on **Normal**.
+- V11.24.0 approved for Normal clients (27 Nov); doumith is on **Normal**.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -208,7 +217,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 27 Nov (V11.23.0 released and approved 27 Nov; 90 features; 31 capabilities, 20
+- Features and Capabilities docs current on 27 Nov (V11.24.0 released and approved 27 Nov; 90 features; 31 capabilities, 20
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
