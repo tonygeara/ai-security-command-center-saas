@@ -197,10 +197,9 @@ BODY = r"""
 <div><label for="rSpeed">Speed (m/s)</label><input id="rSpeed" type="number" min="1" max="8"></div>
 <div><label for="rHover">Hover (s)</label><input id="rHover" type="number" min="10" max="600"></div>
 <div><label for="rBatt">Min battery %</label><input id="rBatt" type="number" min="20" max="90"></div>
-<div><label for="rBrief">Morning briefing</label><input id="rBrief" type="time"></div>
+<div><label>Daily report</label><a class="hud-btn" href="/reports" title="The morning briefing is now the daily report: Settings → Reports" style="display:block;text-align:center">Settings → Reports</a></div>
 <div style="display:flex;flex-direction:column;justify-content:flex-end;gap:6px;padding-bottom:4px">
-<label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rReturn"> Auto return home</label>
-<label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rBriefOn"> Send briefing</label></div>
+<label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="rReturn"> Auto return home</label></div>
 </div>
 <div id="respAutoBox" style="margin-top:12px;border:1px solid #155879;border-radius:4px;padding:8px 10px;background:rgba(14,88,128,.08)">
 <label style="margin:0;display:flex;gap:8px;align-items:center;text-transform:none;letter-spacing:0;flex-wrap:wrap"><input type="checkbox" id="rAuto" onchange="autoWarn(this)">
@@ -218,7 +217,7 @@ between <input id="rFrom" type="time" style="width:110px"> and <input id="rTo" t
 <b>Send a backup drone with each response</b></label>
 <div class="muted" style="margin-top:4px">With every drone response (sent by hand, by Auto-send or by handoff), the next ready drone also flies to the spot, 25 m to the side and 10 m higher, hovers there with its camera, ready to take over, and returns home when the response ends. Needs a second drone that is connected with enough battery.</div></div>
 <div class="actions" style="margin-top:12px"><button class="hud-btn primary" onclick="saveResp()">Save</button><button class="hud-btn danger" onclick="recallResp()">Recall drone</button>
-<button class="hud-btn" onclick="briefNow()">Send briefing now</button></div>
+<button class="hud-btn" onclick="briefNow()">Send daily report now</button></div>
 <div id="respMsg" class="hud-msg"></div>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">▣ Camera</div></div>
@@ -576,8 +575,8 @@ loadPatrol();setInterval(loadPatrol,3000);
 let resp=null,locFor='',camMarks={};
 function rmsg(t,ok){const e=$('respMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function loadResp(){try{const d=await fetch('/api/response/settings').then(r=>r.json());resp=d;const c=d.settings;
-  $('rAlt').value=c.altitude_m;$('rSpeed').value=c.speed_ms;$('rHover').value=c.hover_seconds;$('rBatt').value=c.min_battery;$('rBrief').value=c.briefing_time;
-  $('rReturn').checked=!!c.auto_return;$('rBriefOn').checked=!!c.briefing_enabled;
+  $('rAlt').value=c.altitude_m;$('rSpeed').value=c.speed_ms;$('rHover').value=c.hover_seconds;$('rBatt').value=c.min_battery;
+  $('rReturn').checked=!!c.auto_return;
   if(document.activeElement?.closest?.('#respAutoBox')==null){$('rAuto').checked=!!c.auto_dispatch;$('rAutoP').checked=!!c.auto_person;$('rAutoV').checked=!!c.auto_vehicle;
     $('rFrom').value=c.auto_from;$('rTo').value=c.auto_to;$('rCool').value=c.auto_cooldown_min;$('rHandoff').checked=!!c.handoff}$('rBackup').checked=!!c.response_backup;renderResp()}catch(e){}}
 async function handoffWarn(el){if(el.checked&&!await uiConfirm('Handoff flies a drone with no confirmation when someone leaves a camera\'s view in that time window. Only use it when the drones and controllers stay on, the area is safe to fly and a pilot can take over. Turn it on?'))el.checked=false}
@@ -592,7 +591,7 @@ async function saveCamLoc(lat,lon){const n=locFor;locFor='';const locs={...(resp
   const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({camera_locations:locs})}).then(r=>r.json());
   if(d.ok){resp.settings=d.settings;rmsg('Location of '+n+' saved.',true)}else rmsg(d.error,false);renderResp()}
 async function saveResp(){const body={altitude_m:+$('rAlt').value,speed_ms:+$('rSpeed').value,hover_seconds:+$('rHover').value,min_battery:+$('rBatt').value,
-  briefing_time:$('rBrief').value,auto_return:$('rReturn').checked,briefing_enabled:$('rBriefOn').checked,
+  auto_return:$('rReturn').checked,
   auto_dispatch:$('rAuto').checked,auto_person:$('rAutoP').checked,auto_vehicle:$('rAutoV').checked,auto_from:$('rFrom').value,auto_to:$('rTo').value,auto_cooldown_min:+$('rCool').value||10,handoff:$('rHandoff').checked,response_backup:$('rBackup').checked};
   const d=await fetch('/api/response/settings',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
   if(d.ok){resp.settings=d.settings;rmsg('Saved.',true);loadResp()}else rmsg(d.error,false)}
@@ -600,7 +599,7 @@ async function sendTo(n){const sim=(st.telemetry||{}).simulator;
   if(!await uiConfirm((sim?'SIMULATOR: ':'REAL FLIGHT: the drone takes off if it is on the ground. ')+'Send the drone to '+n+'? Keep it in sight.'))return;
   const d=await fetch('/api/response/dispatch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({camera:n})}).then(r=>r.json());rmsg(d.message||d.error,d.ok);loadResp()}
 async function recallResp(){const d=await fetch('/api/response/recall',{method:'POST'}).then(r=>r.json());rmsg(d.ok?'Drone returning home.':d.error,d.ok);loadResp()}
-async function briefNow(){const d=await fetch('/api/assistant/briefing',{method:'POST'}).then(r=>r.json());rmsg(d.ok?'Briefing sent to Telegram.':d.error,d.ok)}
+async function briefNow(){const d=await fetch('/api/assistant/briefing',{method:'POST'}).then(r=>r.json());rmsg(d.ok?d.message:d.error,d.ok)}
 setInterval(()=>{if(!locFor)loadResp()},5000);
 async function poll(){try{st=await fetch('/api/drone/link',{cache:'no-store'}).then(r=>r.json());render()}catch(e){}}
 async function loadPair(){try{const d=await fetch('/api/drone/link/pair').then(r=>r.json());if(!d.ok){$('pairMsg').className='hud-msg bad';$('pairMsg').textContent=d.error;return}
