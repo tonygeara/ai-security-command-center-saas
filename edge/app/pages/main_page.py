@@ -3369,6 +3369,7 @@ FRONT CAMERA • FACE AI • LPR AI
 <div class="grid-actions">
 <button type="button" class="history-action-button" onclick="location.href='/setup/camera'">+ ADD CAMERA</button>
 <button type="button" class="history-action-button" id="addDroneBtn">+ ADD DRONE</button>
+<button type="button" class="history-action-button" id="addRobotBtn" onclick="location.href='/robot-add'">+ ADD ROBOT</button>
 <span id="addDroneMsg" style="font-size:10px;color:#9edfff"></span>
 </div>
 </div>

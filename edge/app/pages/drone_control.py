@@ -288,6 +288,7 @@ async function loadFleet(){try{const d=await fetch('/api/drone/links',{cache:'no
     return `<a href="/drone-control?drone=${encodeURIComponent(x.drone)}" class="${x.drone===DRONE?'on':''}"><i class="${dot}"></i>${esc(x.label)} <small>${esc(info)}</small></a>`}).join('')
     +`<span id="fleetDocks" style="display:contents"></span>`
     +`<button onclick="addDroneSlot()" ${d.can_add?'':'disabled'} title="${esc(d.message||'')}">+ Add drone <small>${d.used??'?'} of ${d.limit??'∞'}</small></button>`
+    +`<button onclick="location.href='/robot-add'" title="Robot dogs, humanoids, security and hospital robots">+ Add robot</button>`
     +`<a href="/drone-grid">▦ Grid view</a>`;
   if(!many&&!d.can_add)$('fleet').querySelector('button').style.display='none';
   $('fleet').querySelector('a[href="/drone-grid"]').style.display=many?'':'none';
