@@ -14,7 +14,7 @@ export default async function Overview(){
   const {data: activity} = await supabase.from("audit_logs").select("action,metadata,created_at,organization_id,target_type").order("created_at", {ascending: false}).limit(8);
   return <>
     <div className="portalTop"><div><p className="eyebrow">SUPER ADMIN</p><h1>Overview</h1><p className="muted">What needs your attention today</p></div>
-      <div className="portalActions"><Link className="btn" href="/admin/licenses?new=onprem">+ New on-prem licence</Link><Link className="ghost" href="/admin/clients">All clients</Link></div></div>
+      <div className="portalActions"><Link className="btn" href="/admin/clients">Clients · + New client</Link></div></div>
     <section className="grid">
       <Link className="card statLink" href="/admin/clients"><h2>Clients</h2><strong>{clients.length}</strong><p className="muted">{clients.filter(c => c.type === "saas").length} online · {clients.filter(c => c.type === "onprem").length} on-prem</p></Link>
       <Link className="card statLink" href="/admin/devices"><h2>PCs online</h2><strong className={online < data.devices.length ? "locked" : "ok"}>{online}/{data.devices.length}</strong><p className="muted">client Edge Agents</p></Link>

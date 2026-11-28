@@ -393,7 +393,12 @@ USERS_PAGE = r"""
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Access</div><h1 class="page-title">Users &amp; roles</h1>
 <div class="page-sub">Who can use this dashboard. <b>Viewer</b>: watches live video, events and maps. <b>Operator</b>: also flies drones, routes and drone responses. <b>Admin</b>: everything, including setup, licences, no-fly zones and users. On a PC paired with the portal, the company's portal accounts also sign in here with their email (portal Admin = Admin, Editor = Operator, Viewer = Viewer); manage those in the portal.</div></div></div>
-<section class="panel"><div class="panel-body">
+<section class="panel" id="portalPanel" style="display:none"><div class="panel-head"><div class="panel-title">☁ Portal accounts</div><div class="live">MANAGED IN THE PORTAL</div></div><div class="panel-body">
+<p class="muted" style="margin-top:0">Your company's people sign in here with their portal email and password, with the role they have in the portal (Admin = Admin, Editor = Operator, Viewer = Viewer). Add, remove or change them in the portal; this PC follows within a minute.</p>
+<div id="portalList"></div>
+<div class="actions" style="margin-top:10px"><button class="hud-btn primary" onclick="window.open('https://www.aisecuritycommandcenter.com/portal/users','_blank')">Manage users in the portal ↗</button></div>
+</div></section>
+<section class="panel"><div class="panel-head" id="localHead" style="display:none"><div class="panel-title">⌂ Local accounts (this PC only)</div><div class="live">FOR PEOPLE WITHOUT A PORTAL ACCOUNT</div></div><div class="panel-body">
 <div id="firstNote" class="hud-msg" style="display:none">Sign-in is <b>off</b>: anyone at this PC can use everything. Create the first user below (an admin) to turn it on; you will be signed in as that user.</div>
 <div id="userList"></div>
 <div style="margin-top:14px;border-top:1px solid #123447;padding-top:12px"><b style="color:#5bd9ff;font-size:11px;letter-spacing:1.5px">ADD A USER</b>
@@ -412,6 +417,9 @@ let me='',arm='';
 function umsg(t,ok){const e=$('umsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 async function call(url,method,body){const r=await fetch(url,{method,headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});return r.json()}
 async function load(){const d=await call('/api/users','GET');if(!d.ok){umsg(d.error,false);return}me=d.me||'';
+  if(d.portal){$('portalPanel').style.display='';$('localHead').style.display='';
+    $('portalList').innerHTML=(d.portal_users||[]).map(u=>`<div class="hud-row"><div><b>${esc(u.email)}</b>${u.name?' <span class="muted">'+esc(u.name)+'</span>':''}<div class="muted">${ROLES[u.role]||u.role} · last checked ${new Date(u.verified*1000).toLocaleString()}</div></div></div>`).join('')
+      ||'<p class="muted">Nobody has signed in here with a portal account yet.</p>'}
   $('firstNote').style.display=d.users.length?'none':'';if(!d.users.length){$('nr').value='admin'}
   $('userList').innerHTML=d.users.map(u=>`<div class="hud-row"><div><b>${esc(u.username)}</b>${u.username===me?' <span class="muted">(you)</span>':''}<div class="muted">${ROLES[u.role]}</div></div>
     <div class="actions"><select onchange="setRole('${esc(u.username)}',this.value)">${Object.keys(ROLES).map(r=>`<option value="${r}" ${r===u.role?'selected':''}>${r}</option>`).join('')}</select>
@@ -450,7 +458,11 @@ def api_users():
             session.update(user=u["username"], stamp=u.get("stamp"))
         return jsonify({"ok": True, "username": name})
     me = current_user()
-    return jsonify({"ok": True, "users": [user_accounts.public(u) for u in all_users], "me": me["username"] if me else ""})
+    portal = portal_available()
+    portal_users = [{"email": e, "role": c.get("role"), "name": c.get("name") or "", "verified": c.get("verified") or 0}
+                    for e, c in sorted(_portal_load().items())] if portal else []
+    return jsonify({"ok": True, "users": [user_accounts.public(u) for u in all_users], "me": me["username"] if me else "",
+                    "portal": portal, "portal_users": portal_users})
 
 
 @bp.route("/api/users/<name>", methods=["POST", "DELETE"])

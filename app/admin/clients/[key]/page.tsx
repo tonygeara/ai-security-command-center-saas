@@ -6,6 +6,7 @@ import UpdateChannel from "../../UpdateChannel";
 import SubscriptionControls from "../../SubscriptionControls";
 import FeatureToggle from "../../FeatureToggle";
 import DownloadLicense from "./DownloadLicense";
+import RevokeLicense from "./RevokeLicense";
 import RemoveButton from "../../RemoveButton";
 import UserManager from "../../../components/UserManager";
 import {BlockClient, PcName, PcSwitch, RenameClient, SourceSwitch} from "../../DeviceControls";
@@ -100,6 +101,7 @@ It can be paired again later with a new code.`}/></div></td></tr>; })}
         {c.orgId && <RenameClient orgId={c.orgId} name={c.org?.name ?? c.name}/>}
         {c.orgId && <BlockClient orgId={c.orgId} name={c.name} blocked={c.status === "suspended"}/>}
         <Link className="ghost" href={l ? "/admin/licenses?edit=" + l.id : "/admin/licenses?org=" + c.orgId}>{l ? "Edit details" : "Add contact & limits"}</Link>
+        {l && l.status !== "revoked" && <RevokeLicense id={l.id} name={c.name} onprem={c.type === "onprem"}/>}
         {c.type === "onprem" && l ? <RemoveButton rpc="admin_remove_client_license" args={{target_license: l.id}} label="Remove" small={false} goTo="/admin/clients"
             confirmText={`Remove ${c.name} and its licence record from the portal?
 

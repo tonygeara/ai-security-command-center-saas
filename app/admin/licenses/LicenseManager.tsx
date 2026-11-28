@@ -1,6 +1,5 @@
 "use client";
-import {uiAlert,uiConfirm} from "../../../lib/dialog";
-import {useEffect, useMemo, useState} from "react";
+import {useEffect, useState} from "react";
 import {useRouter} from "next/navigation";
 import {createClient} from "../../../lib/supabase/client";
 
@@ -13,7 +12,6 @@ const inYear = () => { const d = new Date(); d.setFullYear(d.getFullYear() + 1);
 const blank = (): Lic => ({edition:"onprem", client_name:"", company:"", location:"", address:"", contact_name:"", phone:"", email:"", notes:"",
   price:"", currency:"USD", billing_period:"yearly", next_payment_date:"", payment_status:"pending", machine_id:"", plan:"on-prem",
   cameras:1, drones:1, docks:0, max_users:5, features:DEFAULT_FEATURES, expires_on:inYear(), organization_id:""});
-const daysLeft = (d?: string) => d ? Math.ceil((new Date(d).getTime() - Date.now()) / 86400000) : null;
 
 function download(l: Lic){
   const doc = l.license_document; if(!doc) return;
@@ -26,14 +24,10 @@ function download(l: Lic){
 export default function LicenseManager({licenses, orgs, limits, open}: {licenses: Lic[]; orgs: Lic[]; limits: Lic[]; open?: Record<string, string>}){
   const router = useRouter();
   const [form, setForm] = useState<Lic | null>(null);
-  const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [filter, setFilter] = useState("all");
+  const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [done, setDone] = useState("");
   const set = (k: string, v: any) => setForm(f => ({...f!, [k]: v}));
   const orgName = (id?: string) => orgs.find(o => o.id === id)?.name;
   const orgLimit = (id: string, key: string) => limits.find(e => e.organization_id === id && e.feature_key === key);
-  const recordedOrgs = new Set(licenses.filter(l => l.organization_id).map(l => l.organization_id));
-  const shown = useMemo(() => licenses.filter(l => filter === "all" || l.edition === filter || (filter === "expiring" && (daysLeft(l.expires_on) ?? 999) <= 30)), [licenses, filter]);
-  const counts = {onprem: licenses.filter(l => l.edition === "onprem").length, saas: licenses.filter(l => l.edition === "saas").length,
-    expiring: licenses.filter(l => (daysLeft(l.expires_on) ?? 999) <= 30 && l.status === "active").length};
 
   function edit(l: Lic){ setMsg(""); setForm({...blank(), ...Object.fromEntries(Object.entries(l).map(([k, v]) => [k, v ?? ""])), features: l.features?.length ? (l.features.some((f: string) => PREMIUM.includes(f)) ? l.features : [...l.features, ...PREMIUM]) : DEFAULT_FEATURES}); }
   function renew(l: Lic){ edit(l); setForm(f => ({...f!, expires_on: inYear(), renewing: true})); }
@@ -58,6 +52,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
     if(!String(f.client_name).trim()){ setMsg("Client name is required."); return; }
     setBusy(true); setMsg("");
     const sb = createClient();
+    let newId = "";
     const details = {client_name: f.client_name, company: f.company, location: f.location, address: f.address, contact_name: f.contact_name, phone: f.phone,
       email: f.email, notes: f.notes, price: f.price === "" ? null : Number(f.price), currency: f.currency || "USD", billing_period: f.billing_period || null,
       next_payment_date: f.next_payment_date || null, payment_status: f.payment_status || null};
@@ -68,7 +63,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
           const {data, error} = await sb.functions.invoke("issue-onprem-license", {body: {...details, record_id: f.id || undefined, machine_id: f.machine_id,
             expires_on: f.expires_on, plan: f.plan, cameras, drones, docks, features: f.features}});
           if(error || !data?.ok) throw new Error(data?.error || (error as any)?.context?.statusText || error?.message || "Could not issue the licence");
-          download(data.record); setMsg("Licence issued and downloaded. Send the .lic file to the client.");
+          download(data.record); newId = data.record?.id || ""; setMsg("Licence issued and downloaded. Send the .lic file to the client.");
         } else {
           const {error} = await sb.from("client_licenses").update(details).eq("id", f.id); if(error) throw error;
           setMsg("Client details saved. (To change cameras, drones, features or expiry, use Renew: a new file is issued.)");
@@ -92,44 +87,23 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         }
         setMsg(`Saved. ${org?.name ?? "Client"}: ${cameras} camera(s), ${drones} drone(s), ${docks} dock(s), ${f.features.length} feature(s).`);
       }
-      setForm(null); router.refresh();
-      if(open?.edit || open?.renew || open?.org) router.push(form.organization_id ? "/admin/clients/org-" + form.organization_id : form.id ? "/admin/clients/lic-" + form.id : "/admin/clients");
+      const target = f.organization_id ? "/admin/clients/org-" + f.organization_id : f.id ? "/admin/clients/lic-" + f.id : newId ? "/admin/clients/lic-" + newId : "/admin/clients";
+      setForm(null); setDone(target);
+      if(f.id || f.edition === "saas") router.push(target);  // a new licence file stays here so its download message is seen
     } catch(e){ setMsg(e instanceof Error ? e.message : "Save failed"); }
     finally{ setBusy(false); }
-  }
-
-  async function revoke(l: Lic){
-    if(!await uiConfirm(`Mark ${l.client_name}'s licence as revoked?` + (l.edition === "onprem" ? "\n\nNote: an on-prem file already installed keeps working until its expiry date (it is offline). Do not renew it." : ""))) return;
-    const {error} = await createClient().from("client_licenses").update({status: "revoked"}).eq("id", l.id);
-    if(error) uiAlert(error.message); else router.refresh();
-  }
-
-  async function remove(l: Lic){
-    const note = l.edition === "onprem" ? `An on-prem licence already installed keeps working until ${l.expires_on}.` : "Their online account stays; only these client details are removed.";
-    if(!await uiConfirm(`Remove ${l.client_name} and its licence record from the portal?\n\n${note}`)) return;
-    const {error} = await createClient().rpc("admin_remove_client_license", {target_license: l.id});
-    if(error) uiAlert(error.message); else router.refresh();
   }
 
   const F = (k: string, label: string, props: Lic = {}) => <label>{label}<input value={form?.[k] ?? ""} onChange={e => set(k, e.target.value)} {...props}/></label>;
   const lockedFile = form?.edition === "onprem" && form?.id && !form?.renewing;
 
+  // The list of clients is on the Clients page; this page is the licence form (new, edit, renew, add details).
   return <>
-    <section className="grid">
-      <article className="card"><h2>Clients</h2><strong>{licenses.length}</strong><p className="muted">with licence records</p></article>
-      <article className="card"><h2>On-prem</h2><strong>{counts.onprem}</strong><p className="muted">offline licence files</p></article>
-      <article className="card"><h2>Online (SaaS)</h2><strong>{counts.saas}</strong><p className="muted">portal accounts</p></article>
-      <article className={"card"}><h2>Expiring</h2><strong className={counts.expiring ? "locked" : ""}>{counts.expiring}</strong><p className="muted">within 30 days</p></article>
-    </section>
-    <div className="portalTop" style={{marginTop: 24}}>
-      <div className="licFilters">{[["all","All"],["onprem","On-prem"],["saas","Online (SaaS)"],["expiring","Expiring soon"]].map(([k, t]) =>
-        <button key={k} className={filter === k ? "btn small" : "ghost"} onClick={() => setFilter(k)}>{t}</button>)}</div>
-      <button className="btn" onClick={() => { setMsg(""); setForm(blank()); }}>+ New client / licence</button>
-    </div>
+    <p><a className="muted" href="/admin/clients">← All clients</a></p>
     {msg && <p className="card licMsg">{msg}</p>}
-
+    {done && <p><a className="btn" href={done}>Open the client</a> <a className="ghost" href="/admin/clients">All clients</a></p>}
+    {!form && !done && <p className="muted">Open a client to edit or renew its licence, or start a new one from the Clients page.</p>}
     {form && <section className="card licForm">
-      <h2>{form.id ? (form.renewing ? "Renew licence" : "Edit client") : "New client / licence"}</h2>
       {!form.id && <div className="licEdition">{[["onprem","On-prem (offline licence file)"],["saas","Online (SaaS portal account)"]].map(([k, t]) =>
         <label key={k} className="radio"><input type="radio" checked={form.edition === k} onChange={() => set("edition", k)}/> {t}</label>)}</div>}
       <h3>Client</h3>
@@ -159,31 +133,8 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
         <label>Payment status<select value={form.payment_status} onChange={e => set("payment_status", e.target.value)}><option value="pending">Pending</option><option value="paid">Paid</option><option value="overdue">Overdue</option></select></label></div>
       <label>Notes<textarea rows={3} value={form.notes ?? ""} onChange={e => set("notes", e.target.value)}/></label>
       <div className="actions"><button className="btn" disabled={busy} onClick={save}>{busy ? "Saving…" : form.edition === "onprem" && (!form.id || form.renewing) ? "Issue & download licence" : "Save"}</button>
-        <button className="ghost" disabled={busy} onClick={() => setForm(null)}>Cancel</button></div>
+        <button className="ghost" disabled={busy} onClick={() => history.length > 1 ? history.back() : router.push("/admin/clients")}>Cancel</button></div>
     </section>}
 
-    <div className="card tableWrap"><table className="adminTable"><thead><tr><th>Client</th><th>Type</th><th>Contact</th><th>Licence</th><th>Expires</th><th>Payment</th><th></th></tr></thead><tbody>
-      {shown.map(l => { const d = daysLeft(l.expires_on); return <tr key={l.id}>
-        <td><b>{l.client_name}</b>{l.company && <div className="muted">{l.company}</div>}<div className="muted">{[l.location, l.address].filter(Boolean).join(" · ")}</div></td>
-        <td><span className="badge">{l.edition === "onprem" ? "ON-PREM" : "SaaS"}</span>{l.status === "revoked" && <div className="locked">revoked</div>}</td>
-        <td>{l.contact_name}<div className="muted">{l.phone}</div><div className="muted">{l.email}</div></td>
-        <td>{l.cameras} camera{l.cameras === 1 ? "" : "s"} · {l.drones} drone{l.drones === 1 ? "" : "s"}
-          <div className="muted">{l.edition === "onprem" ? `Machine ${l.machine_id}` : orgName(l.organization_id) ?? "account removed"}</div>
-          {l.license_id && <div className="muted" title="Shown on the client's License page">ID {String(l.license_id).slice(0, 8).toUpperCase()}</div>}</td>
-        <td className={d !== null && d <= 0 ? "locked" : d !== null && d <= 30 ? "locked" : ""}>{l.expires_on ?? "—"}{d !== null && <div className="muted">{d <= 0 ? "expired" : `${d} days`}</div>}</td>
-        <td>{l.price != null ? `${l.price} ${l.currency}` : "—"}<div className="muted">{[l.billing_period, l.payment_status].filter(Boolean).join(" · ")}</div>{l.next_payment_date && <div className="muted">next {l.next_payment_date}</div>}</td>
-        <td className="licActions">{l.edition === "onprem" && l.license_document && <button className="ghost" onClick={() => download(l)}>Download .lic</button>}
-          {l.edition === "onprem" && <button className="ghost" onClick={() => renew(l)}>Renew</button>}
-          <button className="ghost" onClick={() => edit(l)}>Edit</button>
-          {l.status !== "revoked" && <button className="ghost" onClick={() => revoke(l)}>Revoke</button>}
-          <button className="ghost danger" onClick={() => remove(l)}>Remove</button></td>
-      </tr>; })}
-      {!shown.length && <tr><td colSpan={7} className="muted">No clients here yet. Use “+ New client / licence”.</td></tr>}
-    </tbody></table></div>
-
-    {orgs.some(o => !recordedOrgs.has(o.id)) && <><h2>Online accounts without client details</h2><div className="card tableWrap"><table className="adminTable"><tbody>
-      {orgs.filter(o => !recordedOrgs.has(o.id)).map(o => <tr key={o.id}><td><b>{o.name}</b><div className="muted">{String(o.plan_code).toUpperCase()} · {o.status}</div></td>
-        <td style={{textAlign: "right"}}><button className="ghost" onClick={() => fromOrg(o)}>Add client details & limits</button></td></tr>)}
-    </tbody></table></div></>}
   </>;
 }

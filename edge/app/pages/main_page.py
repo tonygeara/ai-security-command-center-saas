@@ -3519,18 +3519,8 @@ FRONT CAMERA • FACE AI • LPR AI
         }
     }
 
-    document.getElementById("addDroneBtn").addEventListener("click", async () => {
-        const btn = document.getElementById("addDroneBtn"), msg = document.getElementById("addDroneMsg");
-        btn.disabled = true; msg.textContent = "Adding drone…";
-        try {
-            const r = await fetch("/api/setup/drone", {method: "POST"});
-            const d = await r.json();
-            if (!r.ok || !d.ok) throw new Error(d.error || "Could not add drone");
-            msg.innerHTML = esc(d.message) + " RTMP: <code>" + esc(d.publish_url) + "</code>";
-            setTimeout(refresh, 20000);  // Frigate restarts to load the new drone
-        } catch (e) { msg.textContent = e.message; }
-        finally { btn.disabled = false; }
-    });
+    // One list for every kind of drone (DJI, PX4, ArduPilot, DJI Fly live stream, docks, virtual…).
+    document.getElementById("addDroneBtn").addEventListener("click", () => { location.href = "/drone-add"; });
 
     refresh();
     setInterval(refresh, 10000);
@@ -4032,7 +4022,7 @@ CAMERA AI • CHECKING...
     class="security-button"
     style="grid-column:1 / -1; border-color:#9a6200; color:#ffb23c;"
 >
-OBJECT AI • CHECKING...
+OTHER OBJECTS LIST • CHECKING...
 </button>
 <div id="objectAiPanel" style="grid-column:1 / -1; border:1px solid #164b67; padding:9px; font-size:10px; color:#8ba9b8; background:rgba(2,15,24,.72);">
   <div style="display:flex;justify-content:space-between"><span>OBJECTS DETECTED</span><span id="objectAiCount">0</span></div>
@@ -5676,7 +5666,7 @@ let objectAiEnabled = true;
 function paintObjectAi(data) {
     objectAiEnabled = !!data.enabled;
     if (objectAiToggle) {
-        objectAiToggle.innerText = objectAiEnabled ? "OBJECT AI • ON — CLICK TO STOP" : "OBJECT AI • OFF — CLICK TO START";
+        objectAiToggle.innerText = objectAiEnabled ? "OTHER OBJECTS LIST • ON — CLICK TO HIDE" : "OTHER OBJECTS LIST • OFF — CLICK TO SHOW";
         objectAiToggle.style.borderColor = objectAiEnabled ? "#19d978" : "#9a6200";
         objectAiToggle.style.color = objectAiEnabled ? "#35f59a" : "#ffb23c";
     }
@@ -5686,7 +5676,7 @@ function paintObjectAi(data) {
         objectAiList.innerHTML = objects.length ? objects.slice(0, 8).map(o => {
             const c = (o.confidence === null || o.confidence === undefined) ? "" : ` — ${o.confidence}%`;
             return `<div><b>${o.label}</b>${c} <span style="color:#617f8f">[${o.source}]</span></div>`;
-        }).join("") : (objectAiEnabled ? "WAITING FOR OBJECTS..." : "OBJECT AI DISABLED");
+        }).join("") : (objectAiEnabled ? "WAITING FOR OBJECTS..." : "LIST OFF");
     }
 }
 async function refreshObjectAi() {
@@ -5850,7 +5840,7 @@ function closeEventHistory() {
     if (eventHistoryOverlay) eventHistoryOverlay.classList.remove("open");
 }
 
-document.getElementById("goHistory").addEventListener("click", openEventHistory);
+document.getElementById("goHistory").addEventListener("click", () => { location.href = "/settings/events"; });  // one place for events: Settings → Incidents & events
 
 document.getElementById("viewAllHistory").addEventListener("click", openEventHistory);
 

@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.25.1"
+APP_VERSION = "V11.26.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -11269,8 +11269,9 @@ _body_end = PAGE.rfind("</body>")
 # Settings → Events / People / Vehicles: the dashboard's own screens for them, each on its own page (without the
 # dashboard's columns or live video), so every button keeps working as before.
 SETTINGS_SECTIONS = {
-    "events": ("Events", "Detections and alerts: unknown faces and vehicles, drone responses.", "openEventHistory()",
-               "#eventHistoryOverlay", "closeEventHistory", ""),
+    "events": ("Events", "Every detection and alert one by one: unknown faces and vehicles, drone responses. Incidents tells the same as stories.",
+               "openEventHistory()", "#eventHistoryOverlay", "closeEventHistory",
+               '<a href="/incidents" style="margin-right:10px">⚑ Incidents</a>'),
     "people": ("People", "Known faces: add, check and remove the people the cameras recognise.",
                "document.getElementById('openFaceLibrary').click()", "#faceLibraryOverlay", "closeFaceLibrary",
                '<button class="sp-add" onclick="document.getElementById(\'openFaceEnroll\').click()">＋ Add person</button>'),
@@ -11491,13 +11492,12 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 .set-hub a:hover{border-color:#36cfff;box-shadow:0 0 12px rgba(53,203,255,.16)}
 .set-hub b{font-size:13px;letter-spacing:.5px}.set-hub span{font-size:20px;color:#5bd9ff}.set-hub small{color:#6d8b9d;font-size:11px}</style>
 <nav class="set-hub">
-<a href="/settings/events"><span>◷</span><b>Events</b><small>Detections and alerts</small></a>
 <a href="/settings/people"><span>◎</span><b>People</b><small>Known faces</small></a>
 <a href="/settings/vehicles"><span>▱</span><b>Vehicles</b><small>Known plates</small></a>
 <a href="/license"><span>⚿</span><b>Licence</b><small>This PC's licence</small></a>
 <a href="/users"><span>👤</span><b>Users</b><small>Sign-in and roles</small></a>
 <a href="/safety"><span>⚠</span><b>Flight safety</b><small>Weather, aircraft, airspace limits</small></a>
-<a href="/incidents"><span>⚑</span><b>Incidents</b><small>Each camera's events as one story</small></a>
+<a href="/incidents"><span>⚑</span><b>Incidents &amp; events</b><small>What happened, as stories or one by one</small></a>
 <a href="/coverage"><span>◔</span><b>Coverage</b><small>What cameras see, blind spots</small></a>
 <a href="/alarms"><span>☎</span><b>Monitoring centre</b><small>Drone-verified alarms</small></a>
 <a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
@@ -11529,32 +11529,23 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <section class="panel"><div class="panel-head"><div class="panel-title">⌂ Dashboard</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Camera live feed on the dashboard</b><div class="muted">Off: the main camera's live video is not shown (or streamed) on the dashboard.</div></div><input class="toggle" type="checkbox" data-key="dashboard_camera_feed" onchange="save()"></div>
 </div></section>
-<section class="panel"><div class="panel-head"><div class="panel-title">◎ AI &amp; devices</div><div class="live">LOCAL</div></div><div class="panel-body">
-<div class="hud-row"><div><b>Camera AI</b><div class="muted">Person and vehicle detection</div></div><input class="toggle" type="checkbox" data-key="camera_ai"></div>
-<div class="hud-row"><div><b>Face recognition</b></div><input class="toggle" type="checkbox" data-key="face_ai"></div>
-<div class="hud-row"><div><b>License plate recognition</b></div><input class="toggle" type="checkbox" data-key="lpr"></div>
-<div class="hud-row"><div><b>Drone runtime</b><div class="muted">Live receiver only when needed</div></div><input class="toggle" type="checkbox" data-key="drone_runtime"></div>
-<div class="hud-row"><div><b>Drone AI</b></div><input class="toggle" type="checkbox" data-key="drone_ai"></div>
-<div class="hud-row"><div><b>Drone tracking assist</b></div><input class="toggle" type="checkbox" data-key="drone_tracking"></div>
-</div></section>
-<section class="panel"><div class="panel-head"><div class="panel-title">✈ GPS dispatch</div><div class="live">SAFETY-GATED</div></div><div class="panel-body">
-<p class="muted" style="margin-top:0">Store the camera location locally. Aircraft movement remains safety-gated behind a compatible flight-control bridge.</p>
-<div class="hud-row"><div><b>Enable GPS dispatch</b></div><input class="toggle" type="checkbox" data-key="gps_dispatch"></div>
-<div class="hud-row"><div><b>Camera latitude</b></div><input id="lat" type="number" step="any" style="width:180px"></div>
-<div class="hud-row"><div><b>Camera longitude</b></div><input id="lon" type="number" step="any" style="width:180px"></div>
-<div class="hud-row"><div><b>Safety radius (m)</b></div><input id="radius" type="number" min="10" max="1000" style="width:180px"></div>
-<div class="hud-row"><div><b>Require dispatch confirmation</b></div><input class="toggle" type="checkbox" data-key="require_dispatch_confirmation"></div>
-<div class="actions" style="margin-top:16px"><button class="hud-btn primary" onclick="save()">Save settings</button></div>
-<div id="msg" class="hud-msg">Loading…</div>
+<section class="panel"><div class="panel-head"><div class="panel-title">◎ AI &amp; devices</div><div class="live">LIVE</div></div><div class="panel-body">
+<p class="muted" style="margin-top:0">The same switches as on the Dashboard. Face recognition and number-plate reading are part of the camera AI.</p>
+<div class="hud-row"><div><b>Camera AI</b><div class="muted">People and vehicles, faces and number plates on the cameras. <span id="aiCamState"></span></div></div><input class="toggle" type="checkbox" id="aiCam" onchange="aiSet('cam',this)"></div>
+<div class="hud-row"><div><b>Drone AI</b><div class="muted">The same detection on the drones' video. <span id="aiDroneState"></span></div></div><input class="toggle" type="checkbox" id="aiDrone" onchange="aiSet('drone',this)"></div>
+<div class="hud-row"><div><b>Drone tracking assist</b><div class="muted">Helps keep a chosen person or vehicle in the middle of the drone's picture while you fly. <span id="aiTrackState"></span></div></div><input class="toggle" type="checkbox" id="aiTrack" onchange="aiSet('track',this)"></div>
+<div class="hud-row"><div><b>Other objects list</b><div class="muted">Shows other things the AI sees (animals, bags, bicycles…) in a list on the Dashboard.</div></div><input class="toggle" type="checkbox" id="aiObj" onchange="aiSet('obj',this)"></div>
+<div id="aiMsg" class="hud-msg"></div>
+<div id="msg" class="hud-msg" style="display:none"></div>
 </div></section>
 <section class="panel"><div class="panel-head"><div class="panel-title">＋ Add device</div></div><div class="panel-body">
 <p class="muted" style="margin-top:0">Scan the current local network for nearby camera and stream candidates.</p>
 <button class="hud-btn" onclick="location.href='/setup/discover'">Add camera or drone</button>
 </div></section>
 </main>
-<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);lat.value=cfg.camera_latitude??'';lon.value=cfg.camera_longitude??'';radius.value=cfg.gps_safety_radius_m??120;casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;msg.textContent='Settings loaded';
+<script>let cfg={};async function load(){cfg=await fetch('/api/customer/settings').then(r=>r.json());document.querySelectorAll('[data-key]').forEach(x=>x.checked=!!cfg[x.dataset.key]);casingVisits.value=cfg.casing_visits??3;casingHours.value=cfg.casing_hours??24;
   const lic=cfg._licensed||{};[['licSat','satellite','satellite_tab'],['licDet','drone_detector','detector_tab']].forEach(([id,k,key])=>{const on=!!lic[k],box=document.querySelector(`[data-key="${key}"]`);
-    document.getElementById(id).innerHTML=on?'<span style="color:#7dffc1">Included in this licence.</span>':'<span style="color:#ff9ea8">Not in this licence: ask your provider to switch it on.</span>';if(box)box.disabled=!on})}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.camera_latitude=lat.value===''?null:Number(lat.value);cfg.camera_longitude=lon.value===''?null:Number(lon.value);cfg.gps_safety_radius_m=Number(radius.value||120);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());msg.textContent=d.ok?'Saved. Controls applied.':(d.message||'Could not save.');
+    document.getElementById(id).innerHTML=on?'<span style="color:#7dffc1">Included in this licence.</span>':'<span style="color:#ff9ea8">Not in this licence: ask your provider to switch it on.</span>';if(box)box.disabled=!on})}async function save(){document.querySelectorAll('[data-key]').forEach(x=>cfg[x.dataset.key]=x.checked);cfg.casing_visits=Number(casingVisits.value||3);cfg.casing_hours=Number(casingHours.value||24);let d=await fetch('/api/customer/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(r=>r.json());if(!d.ok){msg.style.display='';msg.textContent=d.message||'Could not save.'}
   if(d.ok&&('satellite_tab' in cfg))document.querySelectorAll('a[href="/satellite"],a[href="/drone-detector"]').forEach(a=>{const k=a.getAttribute('href')==='/satellite'?'satellite_tab':'detector_tab';a.style.setProperty('display',cfg[k]&&(cfg._licensed||{})[k==='satellite_tab'?'satellite':'drone_detector']?'':'none','important')})}
 fetch('/api/cloud/sync').then(r=>r.json()).then(c=>{if(c.onprem){cloudRow.style.display='none';return}
   cloudState.textContent=!c.paired?'This PC is not paired with the portal yet.':c.synced===false?'Last sync failed: '+c.error:c.synced?`Synced ${new Date(c.last*1000).toLocaleTimeString()} · ${c.incidents_sent} incident updates sent`+(c.watching?` · ${c.watching} watching live`:''):''});
@@ -11590,7 +11581,19 @@ async function shutdown(){const b=offBtn;if(!b.dataset.arm){b.dataset.arm=1;b.te
   const d=await fetch('/api/system/shutdown',{method:'POST'}).then(r=>r.json()).catch(()=>({ok:false,error:'No answer.'}));
   if(d.ok){document.body.innerHTML='<main class="hud-main narrow"><h1 class="page-title">System stopped</h1><p class="muted">Cameras and drones are no longer guarded. Start the program again from the desktop icon. You can close this window.</p></main>'}
   else{b.disabled=false;offMsg.className='hud-msg bad';offMsg.textContent=d.error||'Could not shut down.'}}
-load()</script>""", active="settings")
+load()</script><script>
+const AI={cam:['/api/camera/status','/api/camera/toggle','aiCam','aiCamState'],drone:['/api/drone/status','/api/drone/toggle','aiDrone','aiDroneState'],
+  track:['/api/drone/tracking/status','/api/drone/tracking/toggle','aiTrack','aiTrackState'],obj:['/api/object_ai/status','/api/object_ai/toggle','aiObj','']};
+async function aiLoad(){for(const [k,[st,,box,lab]] of Object.entries(AI)){try{const d=await fetch(st,{cache:'no-store'}).then(r=>r.json());
+  const b=document.getElementById(box);if(document.activeElement!==b)b.checked=!!d.enabled;
+  if(lab)document.getElementById(lab).textContent=d.mqtt===false?'(the AI service is not answering: is Docker running?)':''}catch(e){}}}
+async function aiSet(k,box){const [,tg]=AI[k];box.disabled=true;
+  try{const r=await fetch(tg,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:box.checked})});const d=await r.json().catch(()=>({}));
+    const m=document.getElementById('aiMsg');m.className='hud-msg '+(r.ok&&d.ok!==false?'ok':'bad');
+    m.textContent=r.ok&&d.ok!==false?'Done.':(r.status===403&&!d.error?'Only admins can change this.':d.error||'Not changed.');if(!(r.ok&&d.ok!==false))box.checked=!box.checked}
+  finally{box.disabled=false}}
+aiLoad();setInterval(aiLoad,10000);
+</script>""", active="settings")
 @app.route("/settings")
 def customer_settings_page():return Response(SETTINGS_PAGE,mimetype="text/html")
 @app.route("/api/customer/settings",methods=["GET","POST"])
@@ -11605,19 +11608,6 @@ def customer_settings_api():
     try:drone_ai_enabled=bool(cfg["drone_ai"])
     except Exception:pass
     return jsonify({"ok":True,"settings":cfg})
-@app.route("/api/gps-dispatch/status")
-def gps_dispatch_status():
-    cfg=_load_customer_settings();bridge=bool(os.environ.get("AI_SECURITY_FLIGHT_BRIDGE_URL"));loc=all(isinstance(cfg.get(k),(int,float)) for k in ("camera_latitude","camera_longitude"))
-    return jsonify({"ok":True,"enabled":bool(cfg["gps_dispatch"]),"camera_location_configured":loc,"drone_runtime":bool(drone_enabled_runtime),"flight_control_bridge":bridge,"ready":bool(cfg["gps_dispatch"] and loc and drone_enabled_runtime and bridge),"confirmation_required":bool(cfg["require_dispatch_confirmation"])})
-@app.route("/api/gps-dispatch/request",methods=["POST"])
-def gps_dispatch_request():
-    cfg=_load_customer_settings();bridge=os.environ.get("AI_SECURITY_FLIGHT_BRIDGE_URL")
-    if not cfg["gps_dispatch"]:return jsonify({"ok":False,"state":"disabled","message":"GPS Dispatch is disabled."}),409
-    if not all(isinstance(cfg.get(k),(int,float)) for k in ("camera_latitude","camera_longitude")):return jsonify({"ok":False,"state":"location_missing","message":"Configure the camera GPS location first."}),409
-    if not drone_enabled_runtime:return jsonify({"ok":False,"state":"drone_offline","message":"Enable and connect the drone first."}),409
-    if not bridge:return jsonify({"ok":False,"state":"bridge_required","message":"Compatible flight-control bridge required. No aircraft command sent."}),409
-    return jsonify({"ok":False,"state":"bridge_not_integrated","message":"Bridge configured; flight command integration is not enabled in this release."}),501
-
 
 # ============================================================
 # MAPS THAT WORK OFFLINE

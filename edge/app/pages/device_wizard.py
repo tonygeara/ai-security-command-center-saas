@@ -40,7 +40,7 @@ BODY = r"""
 <div class="wz-tabs">
 <button class="wz-tab on" id="tabCam" onclick="mode('cam')"><b>▣ Camera</b><span>IP / CCTV camera or NVR channel</span></button>
 <button class="wz-tab" id="tabRec" onclick="mode('rec')"><b>📼 Recorder</b><span>Whole NVR / DVR in one step</span></button>
-<button class="wz-tab" id="tabDrone" onclick="mode('drone')"><b>✈ Drone</b><span>DJI live stream over RTMP</span></button>
+<button class="wz-tab" id="tabDrone" onclick="location.href='/drone-add'"><b>✈ Drone</b><span>Every kind of drone: DJI, PX4, ArduPilot, docks…</span></button>
 </div>
 
 <section class="panel" id="camPanel"><div class="panel-head"><div class="panel-title">▣ New camera</div><div class="live">RTSP</div></div>
@@ -106,29 +106,21 @@ BODY = r"""
 </div>
 </div></section>
 
-<section class="panel wz-hidden" id="dronePanel"><div class="panel-head"><div class="panel-title">✈ Drones</div><div class="live" id="recv"></div></div>
-<div class="panel-body">
-<div class="muted">In DJI Fly: tap <b>•••</b> &gt; <b>Transmission</b> &gt; <b>Live Streaming Platforms</b> &gt; <b>RTMP</b>, then type the address below (or scan the QR code with the phone and copy it). The phone/controller must be on the same Wi-Fi as this PC.</div>
-<div id="drones" style="margin-top:14px"></div>
-<div class="actions" style="margin-top:6px"><button class="hud-btn primary" id="droneBtn" onclick="addDrone()">Add another drone</button></div>
-<div id="md" class="hud-msg"></div>
-</div></section>
 </main>
 <script>
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
 const msg=(id,t,cls)=>{const e=$(id);e.className='hud-msg '+(cls||'');e.textContent=t};
-let brands=[],manual=false,found=null,dronePoll=null;
-function mode(m){$('tabCam').classList.toggle('on',m==='cam');$('tabDrone').classList.toggle('on',m==='drone');$('tabRec').classList.toggle('on',m==='rec');
-  $('camPanel').classList.toggle('wz-hidden',m!=='cam');$('dronePanel').classList.toggle('wz-hidden',m!=='drone');$('recPanel').classList.toggle('wz-hidden',m!=='rec');
-  clearInterval(dronePoll);if(m==='drone'){loadDrones();dronePoll=setInterval(loadDrones,5000)}history.replaceState(null,'',m==='drone'?'#drone':m==='rec'?'#recorder':'#camera')}
+let brands=[],manual=false,found=null;
+function mode(m){$('tabCam').classList.toggle('on',m==='cam');$('tabRec').classList.toggle('on',m==='rec');
+  $('camPanel').classList.toggle('wz-hidden',m!=='cam');$('recPanel').classList.toggle('wz-hidden',m!=='rec');
+  history.replaceState(null,'',m==='rec'?'#recorder':'#camera')}
 function go(n){for(let i=1;i<=4;i++){$('step'+i).classList.toggle('wz-hidden',i!==n);$('st'+i).className=i===n?'on':(i<n?'done':'')}}
 function brandChanged(){const b=brands.find(x=>x.id===$('brand').value)||{};$('note').textContent=b.note||'';if(!$('user').dataset.touched)$('user').value=b.user||'';$('port').value=b.port||554}
 function toggleManual(){manual=!manual;$('simple').classList.toggle('wz-hidden',manual);$('manual').classList.toggle('wz-hidden',!manual);$('manualLink').textContent=manual?'Use brand + IP instead':'Enter full RTSP address instead'}
 async function usage(){try{const [c,d]=await Promise.all(['camera','drone'].map(k=>fetch('/api/cloud/can-add-source/'+k).then(r=>r.json())));
   const f=x=>x.limit==null?x.used+' used':x.used+' of '+x.limit;$('usage').innerHTML='Cameras: <b>'+esc(f(c))+'</b> · Drones: <b>'+esc(f(d))+'</b>';
-  if(!c.allowed){$('scanBtn').disabled=true;$('testBtn').disabled=true;msg('m2',c.message,'bad');$('scanMsg').textContent=c.message}
-  $('droneBtn').disabled=!d.allowed;if(!d.allowed)msg('md',d.message,'bad')}catch(e){}}
+  if(!c.allowed){$('scanBtn').disabled=true;$('testBtn').disabled=true;msg('m2',c.message,'bad');$('scanMsg').textContent=c.message}}catch(e){}}
 async function scan(){$('scanBtn').disabled=true;$('found').innerHTML='';$('scanMsg').textContent='Scanning the local network… (up to 30 seconds)';
   try{const d=await fetch('/api/setup/scan',{method:'POST'}).then(r=>r.json());const cams=d.cameras||[];
     $('scanMsg').textContent=cams.length?`Found ${cams.length} camera(s) on ${d.network}. Click one to use it.`:`No cameras found on ${d.network||'the network'}. Check the camera is powered and on the same network, or enter the IP yourself.`;
@@ -154,14 +146,6 @@ async function waitLive(slug,name){for(let i=0;i<45;i++){await new Promise(r=>se
     if(c&&c.online){msg('m4','✓ “'+name+'” is live ('+c.fps+' fps) with face and plate recognition. It now appears on the dashboard.','ok');usage();return}}catch(e){}}
   msg('m4','“'+name+'” was added, but its video has not started yet. Give it a minute, then check the dashboard.','bad')}
 function reset(){probed=null;['ip','pass','rtsp','cname'].forEach(k=>$(k).value='');$('channel').value=1;go(1);usage()}
-async function loadDrones(){try{const d=await fetch('/api/setup/drones').then(r=>r.json());
-  $('recv').innerHTML=d.receiver_ready?'<i class="dot good"></i>RECEIVER READY':'<i class="dot bad"></i>RECEIVER OFF';
-  $('drones').innerHTML=(d.drones||[]).map(x=>`<div class="wz-drone"><div class="qr">${x.qr||''}</div><div><b style="color:#5bd9ff;letter-spacing:1px;text-transform:uppercase">${esc(x.name)}</b>
-  <span class="state" style="margin-left:10px">${x.online?'<i class="dot good"></i>LIVE':'<i class="dot warn"></i>WAITING FOR STREAM'}</span>
-  <label>RTMP address for DJI Fly</label><code>${esc(x.publish_url)}</code> <button class="hud-btn" style="min-height:28px;margin-left:6px" onclick="navigator.clipboard.writeText('${esc(x.publish_url)}')">Copy</button></div></div>`).join('')||'<p class="muted">No drone slot yet. Click “Add another drone”.</p>'}catch(e){}}
-async function addDrone(){$('droneBtn').disabled=true;msg('md','Adding a drone slot…');
-  try{const r=await fetch('/api/setup/drone',{method:'POST'});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'Could not add the drone');
-    msg('md',d.message,'ok');loadDrones()}catch(e){msg('md',e.message,'bad')}finally{usage()}}
 let recFound=[],recCanAdd=null;
 async function recScan(){const body={brand:$('recBrand').value,ip:$('recIp').value.trim(),port:$('recPort').value,user:$('recUser').value,password:$('recPass').value,sub_stream:$('recSub').checked};
   $('recScanBtn').disabled=true;$('recResult').classList.add('wz-hidden');msg('recMsg','Looking for the recorder and its cameras… (up to a minute)');
@@ -187,5 +171,6 @@ async function recAdd(){const cams=recFound.map((c,i)=>({sel:$('rc'+i).checked,n
 fetch('/api/setup/brands').then(r=>r.json()).then(d=>{brands=d.brands||[];
   $('recBrand').innerHTML=brands.filter(b=>['other','hikvision','dahua','reolink','uniview','ezviz'].includes(b.id)).map(b=>`<option value="${b.id}">${b.id==='other'?'Not sure: detect automatically':esc(b.label)}</option>`).join('');$('brand').innerHTML=brands.map(b=>`<option value="${b.id}">${esc(b.label)}</option>`).join('');$('brand').value='other';brandChanged()});
 $('user').addEventListener('input',()=>$('user').dataset.touched=1);
-usage();mode(location.hash==='#drone'?'drone':location.hash==='#recorder'?'rec':'cam');
+if(location.hash==='#drone')location.replace('/drone-add?kind=rtmp');  // drones are added from the one Add a drone list
+usage();mode(location.hash==='#recorder'?'rec':'cam');
 </script>"""

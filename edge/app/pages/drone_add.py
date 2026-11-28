@@ -15,6 +15,7 @@ BODY = r"""
 .da-found{border:1px solid #155879;border-radius:5px;padding:10px;margin:8px 0;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
 .da-mine{margin-top:16px}
 @media(max-width:700px){.da-grid{grid-template-columns:1fr}}
+.da-qr{width:96px;flex:none;background:#fff;padding:4px;border-radius:3px}.da-qr svg{display:block;width:100%;height:auto}
 </style>
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Drones</div><h1 class="page-title">Add a drone</h1>
@@ -31,6 +32,7 @@ const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 function msg(t,ok){const e=$('daMsg');e.className='hud-msg '+(ok===true?'ok':ok===false?'bad':'');e.textContent=t}
 const KINDS=[
  {k:'dji',t:'DJI (Drone Link app)',d:'DJI drones with a phone and controller running the Drone Link app (Mini, Air, Mavic, Matrice). Each gets a pairing QR code.',tag:'ready'},
+ {k:'rtmp',t:'DJI Fly live stream (video only)',d:'Any DJI drone streaming from the DJI Fly app over RTMP: its video goes to the live feed and the AI. The PC does not fly it.',tag:'ready'},
  {k:'px4',t:'PX4',d:'Drones running PX4 (Holybro, ModalAI, Auterion-based and many custom builds), over a telemetry radio, a companion computer or the network (MAVLink).',tag:'ready'},
  {k:'ardupilot',t:'ArduPilot',d:'Drones running ArduPilot / ArduCopter (CubePilot, Matek, Pixhawk builds and many commercial drones), over a radio, companion computer or network (MAVLink).',tag:'ready'},
  {k:'mavsdk',t:'Other MAVLink / MAVSDK drone',d:'Any autopilot that speaks MAVLink (also MAVSDK-based systems and simulators such as SITL or Gazebo).',tag:'ready'},
@@ -57,6 +59,9 @@ function mavForm(title,hint){return `<h3>${esc(title)}</h3>
  <div class="actions" style="margin-top:10px"><button class="hud-btn primary" onclick="addMav()">Add drone</button><button class="hud-btn" onclick="pick('others')">Find it on the network instead</button></div>`}
 function pick(k){cur=k;draw();msg('');const f=$('daForm');const x=KINDS.find(y=>y.k===k);
  if(k==='dji'){f.innerHTML=`<h3>DJI drone</h3><div class="muted">Adds a drone slot with its own pairing QR code and video. Pair it from the Drone page with the Drone Link app on the controller’s phone. Frigate restarts (about 20 s).</div><div class="actions" style="margin-top:10px"><button class="hud-btn primary" onclick="addDji()">Add DJI drone</button></div>`}
+ else if(k==='rtmp'){f.innerHTML=`<h3>DJI Fly live stream</h3><div class="muted">In DJI Fly: tap <b>•••</b> &gt; <b>Transmission</b> &gt; <b>Live Streaming Platforms</b> &gt; <b>RTMP</b>, then type the address shown for the drone (or scan its QR code with the phone and copy it). The phone or controller must be on the same Wi-Fi as this PC. Adding one restarts the video service (about 20 s).</div>
+  <div id="rtmpList" style="margin-top:12px"><p class="muted">Loading…</p></div>
+  <div class="actions" style="margin-top:10px"><button class="hud-btn primary" id="rtmpBtn" onclick="addRtmp()">Add a drone stream</button></div>`;loadRtmp()}
  else if(k==='px4')f.innerHTML=mavForm('PX4 drone','In QGroundControl or the companion computer, send MAVLink to this PC’s address. The drone flies routes in Hold/Position modes; keyboard and gamepad flying is not available for PX4 yet.');
  else if(k==='ardupilot')f.innerHTML=mavForm('ArduPilot drone','In Mission Planner or on the companion computer (mavlink-router, MAVProxy), send MAVLink to this PC’s address. The PC flies it in GUIDED mode.');
  else if(k==='mavsdk')f.innerHTML=mavForm('MAVLink drone','Any autopilot that speaks MAVLink 2 with the common command set (take-off, reposition, return to launch, land).');
@@ -72,6 +77,13 @@ function pick(k){cur=k;draw();msg('');const f=$('daForm');const x=KINDS.find(y=>
   <div class="actions" style="margin-top:10px"><button class="hud-btn primary" onclick="askIntegration('${k}')">Send request</button></div>`}
  f.scrollIntoView({behavior:'smooth',block:'nearest'})}
 async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});let d={};try{d=await r.json()}catch(e){}if(!r.ok&&d.ok===undefined)d={ok:false,error:r.status===403?'Only admins can add drones.':'Error '+r.status};return d}
+let rtmpPoll=null;
+async function loadRtmp(){clearTimeout(rtmpPoll);if(cur!=='rtmp')return;try{const d=await fetch('/api/setup/drones').then(r=>r.json());const L=$('rtmpList');if(!L)return;
+  L.innerHTML=(d.receiver_ready?'':'<p class="muted" style="color:#ffcf7a">The video receiver is not running (is Docker running?).</p>')+((d.drones||[]).map(x=>`<div class="da-found"><div style="display:flex;gap:14px;align-items:center"><div class="da-qr">${x.qr||''}</div><div><b>${esc(x.name)}</b> <span class="muted">${x.online?'● live':'○ waiting for the stream'}</span><div><code>${esc(x.publish_url)}</code></div></div></div>
+   <div class="actions"><button class="hud-btn" onclick="navigator.clipboard.writeText('${esc(x.publish_url)}')">Copy address</button></div></div>`).join('')||'<p class="muted">No drone stream yet.</p>')}catch(e){}
+  rtmpPoll=setTimeout(loadRtmp,5000)}
+async function addRtmp(){if(info.allowed===false){msg(info.message||'The licence’s drone limit is reached.',false);return}
+ $('rtmpBtn').disabled=true;msg('Adding a drone stream…');try{const d=await post('/api/setup/drone');msg(d.ok?d.message:(d.error||'Could not add it.'),!!d.ok);loadRtmp();load()}finally{$('rtmpBtn').disabled=false}}
 async function addDji(){if(info.allowed===false){msg(info.message||'The licence’s drone limit is reached.',false);return}
  const d=await post('/api/drone/add');if(d.ok)location.href='/drone-control?drone='+encodeURIComponent(d.name);else msg(d.error||'Could not add a drone.',false)}
 async function addMav(conn,name){conn=conn||$('mConn').value.trim();name=name??($('mName')?$('mName').value.trim():'');

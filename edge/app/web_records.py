@@ -200,7 +200,8 @@ def api_evidence_verify():
 INCIDENTS_PAGE = r"""
 <main class="hud-main">
 <div class="page-head"><div><div class="page-kicker">Security</div><h1 class="page-title">Incidents</h1>
-<div class="page-sub">Everything that happened at a camera within 5 minutes, told as one story: who or what was seen, unknown faces and plates, and the drone that was sent.</div></div></div>
+<div class="page-sub">Everything that happened at a camera within 5 minutes, told as one story: who or what was seen, unknown faces and plates, and the drone that was sent.</div></div>
+<div class="actions"><button class="hud-btn" onclick="location.href='/settings/events'" title="Every detection and alert one by one">◷ All events one by one</button></div></div>
 <style>.inc{border:1px solid #155879;border-radius:5px;margin-bottom:10px;background:#05131d}.inc-h{display:flex;gap:10px;align-items:center;padding:10px 12px;cursor:pointer}
 .inc-h b{flex:1}.sev{font-size:10px;letter-spacing:1px;padding:2px 7px;border-radius:3px;border:1px solid}.sev1{color:#7fb6cf;border-color:#245a73}.sev2{color:#ffd27a;border-color:#7a5a1a}.sev3{color:#ff8f8f;border-color:#7a2a2a}
 .inc-b{display:none;padding:0 12px 12px}.inc.open .inc-b{display:block}.it{display:flex;gap:10px;padding:4px 0;border-top:1px solid #0f2c3c;font-size:12px}.it time{color:#6d8b9d;min-width:70px}
