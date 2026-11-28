@@ -5192,7 +5192,7 @@ async function handleVoiceCommand(rawTranscript) {
         document.getElementById("newVehicleName").value = vehicleName;
         openVehicleEnrollmentByVoice();
         voicePendingAction = "vehicle_plate";
-        speakDashboard("Vehicle name set to " + vehicleName + ". What is the license plate?", true);
+        speakDashboard("Vehicle name set to " + vehicleName + ". What is the number plate?", true);
         return;
     }
 
@@ -5273,7 +5273,7 @@ async function handleVoiceCommand(rawTranscript) {
         }
         if (!plate) {
             voicePendingAction = "vehicle_plate";
-            speakDashboard("I need the license plate. What is the plate?", true);
+            speakDashboard("I need the number plate. What is the plate?", true);
             return;
         }
         document.getElementById("saveVehicle").click();

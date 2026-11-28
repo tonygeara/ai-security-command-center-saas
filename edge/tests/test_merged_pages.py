@@ -34,3 +34,27 @@ def test_users_page_shows_portal_accounts_when_paired(d, client, monkeypatch):
     assert j["portal"] and j["portal_users"] == [{"email": "rami@cedar.example", "role": "admin", "name": "Rami", "verified": 1700000000}]
     html = client.get("/users").get_data(as_text=True)
     assert 'id="portalPanel"' in html and "Manage users in the portal" in html and "Local accounts (this PC only)" in html
+
+
+def test_licence_page_wording_and_online_licence(d, client, monkeypatch):
+    html = client.get("/license").get_data(as_text=True)
+    assert 'id="onlinePanel"' in html and "Install licence file" in html and "license file" not in html.lower()
+    r = client.post("/api/license", data="not json")
+    assert r.status_code == 400 and r.get_json()["error"] == "That is not a licence file."
+    assert client.get("/api/license").get_json()["online"] is None  # an on-prem (licence file) PC
+    monkeypatch.setattr(d, "onprem_mode", lambda: False)
+    monkeypatch.setattr(d.edition, "EDITION", "saas")
+    monkeypatch.setattr(d, "load_edge_agent_config", lambda: {"device_token": "t"})
+    with d.cloud_lock:
+        saved = dict(d.cloud_state)
+        d.cloud_state.update(licensed=True, plan_code="business", organization_status="active", connected=True,
+                             features={"camera_ai": {"enabled": True}, "drone_dock": {"enabled": False}})
+    try:
+        o = client.get("/api/license").get_json()["online"]
+        assert o["licensed"] and o["plan"] == "business" and o["features"] == ["camera_ai"]
+    finally:
+        with d.cloud_lock:
+            d.cloud_state.clear()
+            d.cloud_state.update(saved)
+    import licensing
+    assert licensing.verify({"nope": 1})[1] == "Not a licence file."

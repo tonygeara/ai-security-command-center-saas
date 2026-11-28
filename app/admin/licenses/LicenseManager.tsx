@@ -112,7 +112,7 @@ export default function LicenseManager({licenses, orgs, limits, open}: {licenses
       <div className="licGrid">{F("contact_name", "Contact person")}{F("phone", "Phone / WhatsApp")}{F("email", "Email", {type: "email"})}</div>
       <h3>Licence</h3>
       <div className="licGrid">
-        {form.edition === "onprem" ? F("machine_id", "Machine ID * (from the client's License page)", {placeholder: "XXXX-XXXX-XXXX-XXXX-XXXX", disabled: lockedFile, style: {textTransform: "uppercase"}})
+        {form.edition === "onprem" ? F("machine_id", "Machine ID * (from the client's Licence page)", {placeholder: "XXXX-XXXX-XXXX-XXXX-XXXX", disabled: lockedFile, style: {textTransform: "uppercase"}})
           : <label>Portal account *<select value={form.organization_id} disabled={!!form.id} onChange={e => set("organization_id", e.target.value)}><option value="">Choose…</option>
               {orgs.map(o => <option key={o.id} value={o.id}>{o.name} ({String(o.plan_code).toUpperCase()})</option>)}</select></label>}
         {F("cameras", "Cameras (max) *", {type: "number", min: 1, disabled: lockedFile})}
