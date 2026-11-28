@@ -49,17 +49,20 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
-- **SAVED FOR LATER (owner, 28 Nov; not started)**, also improvements 14 and 21–23 in the Capabilities doc. Page tours of every
+- **SAVED FOR LATER (owner, 28 Nov; not started)**, also improvements 14, 21 and 22 in the Capabilities doc. Page tours of every
   screen were made 28 Nov (edge app, website, customer and admin portal; Word/PDF sent to the owner).
   - **Email the reports** (14): online clients via the portal (Resend, as the demo form); reports themselves are done (V11.25.0).
-  - **Bugs** (21): admin Overview `edgeReleases()` (`lib/admin.ts`) calls the GitHub API unauthenticated on a private repo,
-    so the Approve list is probably empty on the live site (check); Fleet "Send to" one-stop routes become `last_route_of`
-    (Run patrol would fly them). (The blocked morning briefing was fixed by V11.25.0.)
-  - **Merge duplicates** (22): add-drone from Devices tab (RTMP) / Drone page list / Dashboard → one list; camera position in
+  - **Merge duplicates** (21, in progress 28 Nov, V11.26.0 not merged yet): add-drone from Devices tab (RTMP) / Drone page list / Dashboard → one list; camera position in
     Settings GPS dispatch / Drone page / Coverage → one; Events + Incidents + Dashboard history; admin Clients vs Licences
     (3 "new client" buttons); "Object AI" (Dashboard) vs "Camera AI" (Settings); PC Users page vs portal users (online).
-  - **Wording** (23): Licence/License, Command Centre/Center, the on-prem Licence page in the online edition, portal "AI controls:
+  - **Wording** (22, in progress 28 Nov, in V11.26.0, not merged yet): Licence/License, Command Centre/Center, the on-prem Licence page in the online edition, portal "AI controls:
     manual feature overrides" and "Drone flight requires a compatible bridge".
+- Released and approved 28 Nov (PR #68, release `edge-v11.25.1`): Edge **V11.25.1**: (1) one-off trips keep the drone's patrol
+  route: `fly_route(..., oneoff=True)` skips `remember_last_route` (response backup, intercept "Watch …", and `/api/routes/fly`
+  with `"oneoff": true` from Fleet Send to and map drags on Fleet / Drone page / Detector drones). (2) Admin portal version
+  list: the repo is public; GitHub's unsigned limit (60/h per address, shared on Vercel) emptied it. `lib/releases.ts`
+  (parser, URL), `lib/useEdgeVersions.ts` (the admin's browser fetches it when the server got none), optional
+  `GITHUB_TOKEN` on Vercel. Tests in `test_fleet.py`.
 - Released and approved 28 Nov (PR #66, release `edge-v11.25.0`): Edge **V11.25.0**: **Reports** (Settings tile → `/reports`,
   `pages/reports.py`; `edge/app/reports.py` settings / schedule / figures / text / PDF layout; `edge/app/pdfmini.py` small
   PDF writer, Helvetica/WinAnsi so non-Latin text shows "?"). Daily / weekly (weekday) / monthly (day, clamped) with times,
@@ -190,7 +193,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.25.0 approved for Normal clients (28 Nov); doumith is on **Normal**.
+- V11.25.1 approved for Normal clients (28 Nov); doumith is on **Normal**.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -239,7 +242,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 28 Nov (V11.25.0 released and approved 28 Nov; 90 features; 31 capabilities, 23
+- Features and Capabilities docs current on 28 Nov (V11.25.1 released and approved 28 Nov; 90 features; 31 capabilities, 22
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
