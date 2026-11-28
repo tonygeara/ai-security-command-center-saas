@@ -137,7 +137,7 @@ def test_send_now_saves_and_sends_even_with_intruder_warnings_only(d, client, mo
     client.post("/api/reports", json={"telegram": False})
     n = len(sent)
     r = client.post("/api/reports/send", json={"kind": "daily"}).get_json()
-    assert r["ok"] and not r["telegram"] and len(sent) == n and r["message"].endswith("kept on this PC.")
+    assert r["ok"] and not r["telegram"] and len(sent) == n and r["message"] == "Daily report made. Kept on this PC."
     # The old "Send briefing now" button sends the daily report now.
     client.post("/api/reports", json={"telegram": True})
     assert client.post("/api/assistant/briefing").get_json()["ok"] and sent[-1][2].startswith("daily-report-")
@@ -195,3 +195,41 @@ def test_reports_reach_telegram_with_intruder_warnings_only_on(d, monkeypatch):
     assert calls[1][1]["files"]["document"][0] == "daily-report-2026-11-28-0800.pdf"
     # An ordinary message is still held back by "intruder warnings only".
     assert d._send_telegram_real("Route finished") is None
+
+
+def test_reports_by_email_through_the_portal(d, client, monkeypatch, rm):
+    s = rm.clean_settings({"email": {"on": True, "to": ["Rami@Cedar.example", "bad address", "rami@cedar.example", "ops@cedar.example"]}})
+    assert s["email"] == {"on": True, "to": ["rami@cedar.example", "ops@cedar.example"]}
+    assert rm.clean_settings({})["email"] == {"on": False, "to": []}
+    # On-prem PCs (the tests' default) have no email.
+    assert client.get("/api/reports").get_json()["email_available"] is False
+    assert client.get("/api/reports/people").status_code == 409
+    calls = []
+
+    def fake_sync(body, timeout=30):
+        calls.append(body)
+        if body["action"] == "report_people":
+            return {"ok": True, "people": [{"email": "rami@cedar.example", "name": "Rami", "role": "Admin"}]}
+        if "ops@cedar.example" in body["to"]:
+            return {"ok": False, "error": "not_member", "addresses": ["ops@cedar.example"]}
+        return {"ok": True, "sent": body["to"]}
+    monkeypatch.setattr(d, "report_email_available", lambda: True)
+    monkeypatch.setattr(d, "_edge_sync", fake_sync)
+    monkeypatch.setattr(d, "send_report_telegram", lambda *a: True)
+    assert client.get("/api/reports").get_json()["email_available"] is True
+    assert client.get("/api/reports/people").get_json()["people"][0]["email"] == "rami@cedar.example"
+    client.post("/api/reports", json={"telegram": True, "email": {"on": True, "to": ["rami@cedar.example"]}})
+    r = client.post("/api/reports/send", json={"kind": "daily"}).get_json()
+    assert r["ok"] and r["emailed"] == ["rami@cedar.example"] and "emailed to 1 person" in r["message"]
+    body = calls[-1]
+    import base64
+    assert body["action"] == "report_email" and base64.b64decode(body["pdf"]).startswith(b"%PDF") and body["subject"].startswith("Daily report")
+    # Someone who left the company's portal accounts: the portal refuses, the PC says why (the report is still kept).
+    client.post("/api/reports", json={"telegram": True, "email": {"on": True, "to": ["rami@cedar.example", "ops@cedar.example"]}})
+    r = client.post("/api/reports/send", json={"kind": "daily"}).get_json()
+    assert r["ok"] and not r["emailed"] and "no longer one of your company's portal accounts" in r["email_problem"]
+    client.post("/api/reports", json={"telegram": True, "email": {"on": False, "to": []}})
+    import users
+    assert not users.allowed("operator", "GET", "/api/reports/people") and users.allowed("admin", "GET", "/api/reports/people")
+    html = client.get("/reports").get_data(as_text=True)
+    assert 'id="rpEmail"' in html and "async function loadPeople" in html

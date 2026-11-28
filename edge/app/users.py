@@ -21,7 +21,7 @@ ROLE_NAMES = {"viewer": "Viewer: watch only", "operator": "Operator: watch and f
 OPEN_PATHS = ("/login", "/logout", "/reset-signin", "/hud.css", "/healthz", "/favicon.ico", "/api/cloud/can-add-source/", "/api/browser/",
               "/api/remoteid/report", "/api/sensors/report")  # receivers and sensors: checked with their token
 # Read-only pages that still need an admin (they show secrets or manage users).
-ADMIN_ONLY_READ = ("/users", "/api/users", "/api/detector/remoteid-config", "/api/drone/link/pair", "/api/docks/setup", "/audit", "/api/audit")
+ADMIN_ONLY_READ = ("/users", "/api/users", "/api/reports/people", "/api/detector/remoteid-config", "/api/drone/link/pair", "/api/docks/setup", "/audit", "/api/audit")
 # What an operator may change: flying, routes, responses, which live feeds are shown.
 OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/drone/(?!add$|remove$|link/pair|integration-request$)",  # adding, removing and pairing drones: admins

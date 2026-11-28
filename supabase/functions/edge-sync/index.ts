@@ -8,10 +8,15 @@
 //        -> {ok, email, name, role: admin|operator|viewer}  (super admin and company Admin -> admin,
 //           Editor -> operator, Viewer -> viewer) or {ok:false, error: bad_credentials|blocked|
 //           must_change_password|not_member|trial_expired}
+//   {action:"report_people"}                                -> {ok, people:[{email, name, role}]} the company's portal accounts,
+//                                                              the only addresses its reports can be emailed to
+//   {action:"report_email", to:[emails], subject, text, name, pdf}  email a report (base64 PDF) to some of those people
+//        -> {ok, sent:[emails]} or {ok:false, error: not_member|no_email_service|sender_not_verified|too_many|...}
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import {createClient} from "npm:@supabase/supabase-js@2";
 
-const BUCKET = "edge-pictures", MAX_JPEG = 1_500_000;
+const BUCKET = "edge-pictures", MAX_JPEG = 1_500_000, MAX_PDF = 4_000_000, REPORTS_PER_DAY = 12;
+const esc = (s: string) => s.replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"} as Record<string, string>)[c]);
 const json = (b: unknown, s = 200) => new Response(JSON.stringify(b), {status: s, headers: {"content-type": "application/json", "cache-control": "no-store"}});
 const hex = async (s: string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s))))
   .map(b => b.toString(16).padStart(2, "0")).join("");
@@ -110,6 +115,55 @@ Deno.serve(async req => {
     if (e) return json({error: e.message}, 500);
     await admin.from("live_requests").update({last_frame_at: new Date().toISOString(), frame_path: path}).eq("id", r.id);
     return json({ok: true});
+  }
+
+  if (body.action === "report_people" || body.action === "report_email") {
+    // The company's portal accounts: reports go only to these (never to an address typed on the PC).
+    const {data: members} = await admin.from("organization_members").select("user_id,role").eq("organization_id", org).limit(200);
+    const people: {email: string, name: string, role: string}[] = [];
+    for (const m of members || []) {
+      const {data: u} = await admin.auth.admin.getUserById(m.user_id);
+      const email = (u?.user?.email || "").toLowerCase();
+      if (!email || u?.user?.banned_until && Date.parse(u.user.banned_until) > Date.now()) continue;
+      const {data: p} = await admin.from("profiles").select("full_name").eq("id", m.user_id).maybeSingle();
+      people.push({email, name: p?.full_name || "", role: ({owner: "Admin", admin: "Admin", member: "Editor", viewer: "Viewer"} as Record<string, string>)[m.role] || m.role});
+    }
+    if (body.action === "report_people") return json({ok: true, people});
+
+    const {data: ended} = await admin.rpc("org_trial_expired", {target_org: org});
+    if (ended) return json({ok: false, error: "trial_expired"});
+    const allowed = new Set(people.map(p => p.email));
+    const to = [...new Set((Array.isArray(body.to) ? body.to : []).map(x => str(x, 200).trim().toLowerCase()).filter(Boolean))].slice(0, 25);
+    if (!to.length) return json({ok: false, error: "no_recipients"}, 400);
+    const strangers = to.filter(e => !allowed.has(e));
+    if (strangers.length) return json({ok: false, error: "not_member", addresses: strangers}, 403);
+    const b64 = typeof body.pdf === "string" ? body.pdf : "";
+    let isPdf = false;
+    try { isPdf = !!b64 && b64.length <= MAX_PDF * 1.4 && atob(b64.slice(0, 12)).startsWith("%PDF"); } catch { isPdf = false; }
+    if (!isPdf) return json({ok: false, error: "bad_pdf"}, 400);
+    const since = new Date(Date.now() - 86400_000).toISOString();
+    const {count} = await admin.from("audit_logs").select("id", {count: "exact", head: true}).eq("target_id", dev)
+      .eq("action", "report_emailed").gte("created_at", since);
+    if ((count || 0) >= REPORTS_PER_DAY) return json({ok: false, error: "too_many"}, 429);
+    const key = (Deno.env.get("RESEND_API_KEY") || "").trim();
+    if (!key) return json({ok: false, error: "no_email_service"}, 503);
+    const subject = str(body.subject, 160) || "Security report", name = (str(body.name, 80) || "report.pdf").replace(/[^\w.-]/g, "_");
+    const text = str(body.text, 4000);
+    const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1b2a35"><pre style="font-family:inherit;white-space:pre-wrap">${esc(text)}</pre>` +
+      `<p style="color:#777;font-size:12px">Sent by your AI Security Command Center PC. The full report is attached as a PDF. ` +
+      `You get it because you have an account in your company's portal; your admin chooses who receives reports on the PC (Settings → Reports).</p></div>`;
+    const res = await fetch("https://api.resend.com/emails", {method: "POST", headers: {"Authorization": `Bearer ${key}`, "Content-Type": "application/json"},
+      body: JSON.stringify({from: Deno.env.get("REPORT_FROM_EMAIL") || Deno.env.get("DEMO_FROM_EMAIL") || "AI Security Command Center <onboarding@resend.dev>",
+        to, subject, html, text, attachments: [{filename: name, content: b64}]})});
+    if (!res.ok) {
+      const why = (await res.text()).slice(0, 300);
+      console.error("report not emailed: Resend said", res.status, why);
+      // Resend's test sender (onboarding@resend.dev) only delivers to the Resend account's own address: a verified domain is needed.
+      return json({ok: false, error: res.status === 403 || /domain|verify|testing/i.test(why) ? "sender_not_verified" : "email_failed"}, 502);
+    }
+    await admin.from("audit_logs").insert({organization_id: org, action: "report_emailed", target_type: "edge_device", target_id: dev,
+      metadata: {to: to.length, subject, name}});
+    return json({ok: true, sent: to});
   }
 
   return json({error: "unknown_action"}, 400);

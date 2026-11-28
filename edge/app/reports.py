@@ -36,7 +36,9 @@ DEFAULTS = {
     "monthly": {"on": False, "time": "08:00", "day": 1},
     "sections": {k: True for k in SECTIONS},
     "telegram": True,
+    "email": {"on": False, "to": []},  # online PCs: emailed through the portal to some of the company's portal accounts
 }
+EMAIL_RX = re.compile(r"^[^@\s]{1,64}@[^@\s]{1,190}\.[^@\s]{2,}$")
 
 
 # ---------------------------------------------------------------- settings
@@ -67,6 +69,9 @@ def clean_settings(raw):
     sec = raw.get("sections") if isinstance(raw.get("sections"), dict) else {}
     out["sections"] = {k: bool(sec.get(k, True)) for k in SECTIONS}
     out["telegram"] = bool(raw.get("telegram", True))
+    em = raw.get("email") if isinstance(raw.get("email"), dict) else {}
+    to = [str(x).strip().lower() for x in (em.get("to") if isinstance(em.get("to"), list) else [])]
+    out["email"] = {"on": bool(em.get("on", False)), "to": list(dict.fromkeys(x for x in to if EMAIL_RX.match(x)))[:25]}
     return out
 
 
