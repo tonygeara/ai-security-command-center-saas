@@ -51,20 +51,26 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
 - **SAVED FOR LATER (owner, 28 Nov; not started)**, also improvements 14 and 21–23 in the Capabilities doc. Page tours of every
   screen were made 28 Nov (edge app, website, customer and admin portal; Word/PDF sent to the owner).
-  - **Reports** (improvement 14): Settings → Reports, daily / weekly / monthly (each with time, weekday, day of month), ticked
-    sections (detections, incidents and drone responses, flights incl. weather overrides, unknown drones, verified alarms,
-    camera/PC downtime, busiest cameras/hours, vs previous period); Telegram summary + PDF, PDFs kept on the PC with a list,
-    Send now / Preview; always sent even with intruder-warnings-only; the daily one replaces the morning briefing
-    (`briefing_text`, `_briefing_worker`). Email later for online clients via the portal (Resend, as the demo form).
-  - **Bugs** (21): the morning briefing is blocked by `telegram_intruders_only` (default on; `send_telegram` without
-    `warning=True`); admin Overview `edgeReleases()` (`lib/admin.ts`) calls the GitHub API unauthenticated on a private repo,
+  - **Email the reports** (14): online clients via the portal (Resend, as the demo form); reports themselves are done (V11.25.0).
+  - **Bugs** (21): admin Overview `edgeReleases()` (`lib/admin.ts`) calls the GitHub API unauthenticated on a private repo,
     so the Approve list is probably empty on the live site (check); Fleet "Send to" one-stop routes become `last_route_of`
-    (Run patrol would fly them).
+    (Run patrol would fly them). (The blocked morning briefing was fixed by V11.25.0.)
   - **Merge duplicates** (22): add-drone from Devices tab (RTMP) / Drone page list / Dashboard → one list; camera position in
     Settings GPS dispatch / Drone page / Coverage → one; Events + Incidents + Dashboard history; admin Clients vs Licences
     (3 "new client" buttons); "Object AI" (Dashboard) vs "Camera AI" (Settings); PC Users page vs portal users (online).
   - **Wording** (23): Licence/License, Command Centre/Center, the on-prem Licence page in the online edition, portal "AI controls:
     manual feature overrides" and "Drone flight requires a compatible bridge".
+- Released and approved 28 Nov (PR #66, release `edge-v11.25.0`): Edge **V11.25.0**: **Reports** (Settings tile → `/reports`,
+  `pages/reports.py`; `edge/app/reports.py` settings / schedule / figures / text / PDF layout; `edge/app/pdfmini.py` small
+  PDF writer, Helvetica/WinAnsi so non-Latin text shows "?"). Daily / weekly (weekday) / monthly (day, clamped) with times,
+  ticked sections, compared with the previous period; `deliver_report()` saves `DATA/reports/<kind>-report-<date>.pdf`
+  (kept 400 days) and `send_report_telegram()` (sendMessage + sendDocument via `_tg`, bypasses intruder-warnings-only).
+  `_reports_worker` replaced `_briefing_worker` (late limits daily 2 h, weekly 2 d, monthly 5 d; `mark_handled` on first
+  start and on save; daily tidy: sightings, reports, logs). Until first saved, daily follows `briefing_enabled/time`. New logs
+  (`_report_tracker_worker`, 400 days): `flight_log.jsonl` (`_track_flights`, ≥15 s), `detector_alarms.jsonl`
+  (`_detector_event`), `uptime_log.jsonl` (every 10 min: PC minutes, cameras with no picture). API `/api/reports` (GET all,
+  POST admins), `/api/reports/send` (operators), `/api/reports/preview`, `/api/reports/file/<name>` (`NAME_RX`). Drone
+  page briefing fields → link to Reports; "Send daily report now" (`/api/assistant/briefing`). Tests `test_reports.py`.
 - Released and approved 27 Nov (PR #63, release `edge-v11.24.0`): Edge **V11.24.0**: (1) **Detectors switch on the Fleet page**
   (`flDet`, localStorage `fleetDetectors`; `/api/fleet` → `detectors: {on, detectors[{…, sees}], unknown}` from
   `_fleet_detectors()`, empty while the Detector drones tab is off): range circles (green, red while it sees an unknown
@@ -184,7 +190,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   for 14 days (`organizations.trial_ends_at`), then PCs switch off and refuse sign-in (edge-agent-control v17,
   edge-sync v6) and the portal only shows `/choose-plan` (Stripe) until a plan is paid; one trial per email
   (`trial_emails`, manage-users v6). Real Stripe payment through `/choose-plan` not yet tested.
-- V11.24.0 approved for Normal clients (27 Nov); doumith is on **Normal**.
+- V11.25.0 approved for Normal clients (28 Nov); doumith is on **Normal**.
 - Gran Canaria tender XP1130/2025 (Lot 4): questions only via the Plataforma (deadline passed 20 Nov); bids close 1 Dec.
 - Before that: Edge **V11.13.1** (21 Nov, release `edge-v11.13.1`; the V11.13.0 build failed on a Windows file-lock test
   and was never published, so V11.13.1 carries it):
@@ -233,7 +239,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 28 Nov (V11.24.0 released and approved 27 Nov; 90 features; 31 capabilities, 23
+- Features and Capabilities docs current on 28 Nov (V11.25.0 released and approved 28 Nov; 90 features; 31 capabilities, 23
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
