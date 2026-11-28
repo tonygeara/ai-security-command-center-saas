@@ -23,7 +23,8 @@ host = None  # the dashboard module; set by dashboard.py
 
 AUTOPILOTS = {3: "ArduPilot", 12: "PX4"}
 VEHICLES = {1: "fixed-wing", 2: "quadcopter", 3: "coaxial", 4: "helicopter", 13: "hexacopter", 14: "octocopter",
-            15: "tricopter", 19: "VTOL", 20: "VTOL", 21: "VTOL", 22: "VTOL", 23: "VTOL", 24: "VTOL", 25: "VTOL", 29: "dodecacopter"}
+            15: "tricopter", 19: "VTOL", 20: "VTOL", 21: "VTOL", 22: "VTOL", 23: "VTOL", 24: "VTOL", 25: "VTOL", 29: "dodecacopter",
+            10: "ground rover", 11: "surface boat", 12: "submarine"}  # ground and water vehicles: listed on Add Robot → Others
 DEFAULT_SCAN_PORTS = (14550, 14540, 14551, 14560)
 
 

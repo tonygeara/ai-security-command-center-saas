@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.27.0"
+APP_VERSION = "V11.28.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2372,7 +2372,7 @@ import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import satview as satellite_mod
 import dronedetect as dronedetect_mod
-import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.fleet, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay, pages.reports  # noqa: E401
+import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.fleet, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay, pages.reports, pages.robot_add  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -3867,7 +3867,7 @@ HUD_NAV_ITEMS = [
 ]
 # Pages reached from inside a tab light up that tab: 3D maps and flight safety from Drone; events, people,
 # vehicles, licence and users from Settings.
-NAV_ALIAS = {"reports": "settings", "maps": "drone", "safety": "drone", "license": "settings", "users": "settings",
+NAV_ALIAS = {"robot-add": "drone", "reports": "settings", "maps": "drone", "safety": "drone", "license": "settings", "users": "settings",
              "events": "settings", "people": "settings", "vehicles": "settings"}
 
 
@@ -5666,6 +5666,122 @@ def api_drone_integration_request():
     if not ok:
         return jsonify({"ok": False, "error": "The request couldn't be sent (no internet?). Try again later or contact your provider."}), 502
     return jsonify({"ok": True, "sent": True, "message": f"Request for {family} sent to your provider. They will contact you at {email}."})
+
+
+# ============================================================
+# ADD ROBOT: robots that can be connected (on request) and "Others" (find a robot on the network)
+# ============================================================
+import robotscan  # noqa: E402
+
+ROBOT_KINDS = [  # (key, group, name, what it is)
+    ("spot", "Robot dogs", "Boston Dynamics Spot", "The best-known security and inspection robot dog: stairs, rough ground, a PTZ and thermal camera option, and a self-charging dock. Spot SDK."),
+    ("anymal", "Robot dogs", "ANYbotics ANYmal", "Industrial patrol robot dog for plants and sites, built for rain and dust, with its own charging dock. ANYbotics API."),
+    ("unitree_dog", "Robot dogs", "Unitree Go2 / B2", "Affordable robot dogs (Go2) and the heavy-duty B2 for outdoor patrols. Unitree SDK 2 and ROS 2."),
+    ("ghost", "Robot dogs", "Ghost Robotics Vision 60", "Rugged all-weather robot dog used for perimeter and border security."),
+    ("deep_robotics", "Robot dogs", "DEEP Robotics X30 / Lite3", "Industrial inspection robot dogs (X30) and compact ones (Lite3). ROS based."),
+    ("unitree_humanoid", "Humanoids", "Unitree G1 / H1", "The most widely sold humanoids, with cameras and depth sensors. Unitree SDK 2 and ROS 2."),
+    ("digit", "Humanoids", "Agility Robotics Digit", "A humanoid already working shifts in warehouses. Agility Arc API."),
+    ("walker", "Humanoids", "UBTech Walker S", "A humanoid for factories, reception and guiding. UBTech SDK and ROS."),
+    ("knightscope", "Security patrol robots", "Knightscope K5 / K1", "Outdoor and indoor security patrol robots with cameras, plate reading and a speaker."),
+    ("cobalt", "Security patrol robots", "Cobalt Robotics", "Indoor security robot for offices and warehouses: patrols, badge checks and a remote guard on its screen."),
+    ("smp", "Security patrol robots", "SMP Robotics S5", "Outdoor autonomous security robot for large sites and perimeters."),
+    ("ascento", "Security patrol robots", "Ascento Guard", "Two-wheeled outdoor patrol robot for perimeters, day and night."),
+    ("tug", "Hospital and service robots", "Aethon TUG", "Carries medicines and supplies through hospital corridors on its own. Fleet API."),
+    ("moxi", "Hospital and service robots", "Diligent Moxi", "Hospital helper that fetches supplies for nurses, with an arm to open doors."),
+    ("temi", "Hospital and service robots", "temi", "Telepresence and concierge robot: a screen on wheels a guard or a doctor drives remotely. temi SDK."),
+    ("ohmni", "Hospital and service robots", "OhmniLabs Ohmni", "Telepresence robot for clinics and buildings, driven from a browser."),
+    ("ros2_robot", "Open ground robots", "ROS 2 robot", "Any robot running ROS 2 (Clearpath, AgileX, Unitree and many more): position, camera and navigation goals."),
+    ("rover", "Open ground robots", "ArduPilot / PX4 rover or boat", "Ground rovers and boats with an ArduPilot or PX4 autopilot (MAVLink), like the PX4 / ArduPilot drones."),
+    ("others", "Others", "Others (find it automatically)", "The PC looks for robots on the network (ROS 2, MAVLink rovers and boats, makers' usual addresses) and tells you what it found."),
+]
+ROBOT_GROUPS = ["Robot dogs", "Humanoids", "Security patrol robots", "Hospital and service robots", "Open ground robots", "Others"]
+ROBOT_REQUESTS_FILE = os.path.join(DATA_FOLDER, "robot_requests.json")
+
+
+def _robot_requests():
+    try:
+        with open(ROBOT_REQUESTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+ROBOT_ADD_PAGE = hud_page("Add a robot", pages.robot_add.BODY, active="drone")
+
+
+@app.route("/robot-add")
+def robot_add_page():
+    return Response(ROBOT_ADD_PAGE, mimetype="text/html")
+
+
+@app.route("/api/robot/kinds")
+def api_robot_kinds():
+    return jsonify({"ok": True, "groups": ROBOT_GROUPS, "kinds": [{"k": k, "group": g, "t": t, "d": d} for k, g, t, d in ROBOT_KINDS]})
+
+
+@app.route("/api/robot/scan", methods=["POST"])
+def api_robot_scan():
+    """Admins ("Others"): listen about 6 s for robots on the network (ROS 2 / DDS, MAVLink ground vehicles, usual addresses)."""
+    busy = {int(d.connection.rsplit(":", 1)[1]) for d in mavlink_drones.values() if d.connection.startswith(("udpin", "udp:"))}
+
+    def ground_vehicles(seconds):
+        try:
+            return [x for x in mavlink_bridge.scan(mavlink_bridge.DEFAULT_SCAN_PORTS, seconds=seconds, busy=busy)
+                    if x.get("vehicle") in robotscan.ROVER_TYPES.values()]
+        except ImportError:
+            return []
+    found = robotscan.scan(ground_vehicles, seconds=6.0)
+    audit_record("robot: network searched", detail={"found": len(found)})
+    return jsonify({"ok": True, "found": found})
+
+
+@app.route("/api/robot/requests")
+def api_robot_requests():
+    return jsonify({"ok": True, "requests": list(reversed(_robot_requests()))[:50]})
+
+
+@app.route("/api/robot/integration-request", methods=["POST"])
+def api_robot_integration_request():
+    """Admins: ask the provider to connect a robot (one from the list, or one the network search found)."""
+    data = request.get_json(silent=True) or {}
+    key = str(data.get("kind") or "")
+    names = {k: t for k, _g, t, _d in ROBOT_KINDS}
+    dev = data.get("device") if isinstance(data.get("device"), dict) else None
+    if key == "found" and dev:
+        label = "Found on the network: " + str(dev.get("label") or "robot")[:80]
+    elif key == "other":
+        label = "Another robot"
+    elif key in names and key != "others":
+        label = names[key]
+    else:
+        return jsonify({"ok": False, "error": "Unknown robot."}), 400
+    email = str(data.get("email") or "").strip()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return jsonify({"ok": False, "error": "Give an email address the provider can answer."}), 400
+    details = re.sub(r"[\x00-\x08\x0b-\x1f]", " ", str(data.get("details") or ""))[:1500]
+    if dev:
+        details = (details + "\n\nFound by the PC: " + re.sub(r"[\x00-\x1f]", " ", str(dev.get("details") or ""))[:300]).strip()
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    body = {"full_name": who if len(who) >= 2 else "Dashboard user", "email": email, "company": str(data.get("company") or "")[:160],
+            "message": f"Robot integration request from a PC ({VERSION_LABEL}): {label}.\n\n{details}".strip()}
+    audit_record("robot: integration requested", target=label, detail={"email": email})
+    sent = False
+    if not onprem_mode():
+        try:
+            r = requests.post(INTEGRATION_REQUEST_URL, json=body, timeout=15)
+            sent = bool(r.ok and r.json().get("ok"))
+        except Exception:  # noqa: BLE001
+            sent = False
+        if not sent:
+            return jsonify({"ok": False, "error": "The request couldn't be sent (no internet?). Try again later or contact your provider."}), 502
+    reqs = _robot_requests()[-99:] + [{"label": label, "kind": key, "details": details[:400], "email": email, "at": time.time(), "sent": sent}]
+    tmp = ROBOT_REQUESTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(reqs, f, indent=1)
+    _replace_file(tmp, ROBOT_REQUESTS_FILE)
+    return jsonify({"ok": True, "sent": sent, "message": f"Request for {label} sent to your provider. They will contact you at {email}." if sent
+                    else f"Noted. Tell your provider you'd like {label} connected (this PC is offline)."})
 
 
 @app.route("/api/virtual-drones", methods=["GET", "POST"])
