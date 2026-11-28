@@ -67,3 +67,31 @@ def test_route_stop_is_counted_like_the_route_run(d, monkeypatch):
         x = d._fleet_drone("drone", {}, [])
         assert x["job"] == "patrol" and x["job_text"] == f"Route “R” · stop {want} of 3" and x["route"]["index"] == want - 1
         assert (x["target"]["lat"], x["target"]["lon"]) == (pts[want - 1]["lat"], pts[want - 1]["lon"])
+
+
+def test_one_off_trips_do_not_replace_the_patrol_route(d, client, fleet):
+    """Send to, dragging a drone, backups and watches fly one spot: Run patrol keeps flying the drone's patrol route."""
+    (v1,) = fleet(1)
+    a, b = offset(60, 0), offset(60, 60)
+    assert client.post(f"/api/routes?drone={v1}", json={"name": "Night patrol", "points": [a, b], "alt": 30, "speed": 6,
+                                                         "loop": True, "end": "home"}).get_json()["ok"]
+    r = client.post(f"/api/routes/fly?drone={v1}", json={"name": "Sent from Fleet", "oneoff": True, "points": [offset(30, 0)],
+                                                          "alt": 30, "speed": 8, "pause": 0, "end": "hover"}).get_json()
+    assert r["ok"], r
+    assert d.last_route_of(v1)["name"] == "Night patrol"
+    assert next(x for x in client.get("/api/fleet").get_json()["drones"] if x["slot"] == v1)["patrol_route"]["name"] == "Night patrol"
+    client.post(f"/api/routes/stop?drone={v1}")
+    assert wait_until(lambda: not d.run_of(v1), 20)
+    # A route flown on purpose still becomes the drone's patrol route.
+    r = client.post(f"/api/routes/fly?drone={v1}", json={"name": "Fence line", "points": [a], "alt": 30, "speed": 8,
+                                                          "pause": 0, "end": "hover"}).get_json()
+    assert r["ok"] and d.last_route_of(v1)["name"] == "Fence line"
+    client.post(f"/api/routes/stop?drone={v1}")
+    client.post(f"/api/drone/command?drone={v1}", json={"cmd": "land"})
+    assert wait_until(lambda: not d.get_link(v1)["telemetry"].get("flying"), 90)
+
+
+def test_pages_send_one_off_trips(client):
+    assert "name:'Sent from Fleet',oneoff:true" in client.get("/fleet").get_data(as_text=True)
+    assert "name:'Moved on the map',oneoff:true" in client.get("/drone-control").get_data(as_text=True)
+    assert "name:'Sent from Detector drones',oneoff:true" in client.get("/drone-detector").get_data(as_text=True)

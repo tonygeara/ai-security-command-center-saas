@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.25.0"
+APP_VERSION = "V11.25.1"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -7203,7 +7203,7 @@ def _send_response_backup(camera, primary, loc, cfg):
     side = {"lat": loc["lat"], "lon": loc["lon"] + RESPONSE_BACKUP_SIDE_M / (111320.0 * max(0.05, math.cos(math.radians(loc["lat"]))))}
     alt = min(float(DRONE_LIMITS["max_altitude_m"]), float(cfg["altitude_m"]) + RESPONSE_BACKUP_ABOVE_M)
     r = fly_route(f"Backup for {camera}", {"points": [side], "alt": alt, "speed": cfg["speed_ms"], "pause": 0, "end": "hover",
-                                           "loop": False, "lost_link": "home"}, by="response backup", drone=backup)
+                                           "loop": False, "lost_link": "home"}, by="response backup", drone=backup, oneoff=True)
     if not r.get("ok"):
         _drone_event(f"Backup drone not sent to {camera}: {r.get('error')}", backup)
         return f" Backup drone not sent: {r.get('error')}"
@@ -8643,7 +8643,9 @@ def _run_route(name, route, by, slot, run):
 route_lock = threading.Lock()
 
 
-def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None, ignore_weather=False):
+def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None, ignore_weather=False, oneoff=False):
+    """oneoff: a trip to one spot (Send to, a drone dragged on a map, a backup or a watch), not the drone's patrol route:
+    it is not remembered as the route Run patrol flies for that drone."""
     if route is None:
         route = load_routes().get(name or "")
         if not route:
@@ -8670,7 +8672,7 @@ def fly_route(name=None, route=None, by="dashboard", drone=None, backup=None, ig
                "total": len(route["points"]), "phase": "flying", "stop": False, "message": f"Route {name or 'unsaved route'} started",
                "by": by, "ignore_weather": bool(ignore_weather)}
         route_runs[run["id"]] = run
-        if not route.get("survey") and by != PATROL_MODE_BY:
+        if not route.get("survey") and by != PATROL_MODE_BY and not oneoff:
             remember_last_route(slot, name or "unsaved route", route)
         for k in [k for k, r in route_runs.items() if not r["active"] and time.time() - r.get("ended_at", time.time()) > 3600]:
             route_runs.pop(k, None)
@@ -8755,7 +8757,8 @@ def api_routes_fly():
             backup = None  # nothing is swapped, so no drone is held back as backup
         ignore_weather = bool(data.get("ignore_weather"))
         r = fly_route(data.get("name"), data if data.get("points") else None, by="dashboard",
-                      drone=drone if drone in drone_slots() else None, backup=backup, ignore_weather=ignore_weather)
+                      drone=drone if drone in drone_slots() else None, backup=backup, ignore_weather=ignore_weather,
+                      oneoff=bool(data.get("oneoff")))
         if ignore_weather and r.get("ok"):
             who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
             audit_record("drone: flight despite the weather", target=drone_label(r["drone"]),
@@ -10357,7 +10360,7 @@ def _intercept_fly(t, slot, n, cfg, by):
     alt = min(float(DRONE_LIMITS["max_altitude_m"]), float(cfg["intercept_alt_m"]) + n * INTERCEPT_STACK_M)
     r = fly_route(INTERCEPT_ROUTE + t["label"], {"points": [pt], "alt": alt, "speed": load_response_settings()["speed_ms"],
                                                   "pause": 0, "end": "hover", "loop": False, "lost_link": "home"},
-                  by=by, drone=slot)
+                  by=by, drone=slot, oneoff=True)
     if r.get("ok"):
         t["drones"][slot] = {"lat": t["lat"], "lon": t["lon"], "at": time.time(), "alt": alt}
     return r

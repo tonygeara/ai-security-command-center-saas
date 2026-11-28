@@ -29,7 +29,7 @@ export default async function Overview(){
     <div className="card tableWrap"><table className="adminTable"><tbody>{INSTALLERS.map(i => <tr key={i.file}>
       <td><b>{i.edition}</b><div className="muted">{i.note}</div></td>
       <td style={{whiteSpace: "nowrap"}}><a className="btn small" href={i.url}>Download</a> <a className="ghost small" href={i.guide} target="_blank">Install guide</a></td></tr>)}
-      <tr><td className="muted" colSpan={2}>Always the newest installers published by the “Edge installer” workflow on GitHub (sign in to GitHub to download). A new version (V{LATEST_APP_VERSION} on main now) appears here about 15 minutes after it reaches main, once its build and tests have passed. <a href={RELEASE_URL} target="_blank">Release notes ↗</a></td></tr></tbody></table></div>
+      <tr><td className="muted" colSpan={2}>Always the newest installers published by the “Edge installer” workflow on GitHub. A new version (V{LATEST_APP_VERSION} on main now) appears here about 15 minutes after it reaches main, once its build and tests have passed. <a href={RELEASE_URL} target="_blank">Release notes ↗</a></td></tr></tbody></table></div>
     <h2>Update channels</h2>
     <div className="card"><ApproveVersion approved={policy?.approved_version ?? null} versions={versions}/>
       <p className="muted">Each client follows a channel (client page → Updates): <b>Test</b> gets every new version as soon as it is published,

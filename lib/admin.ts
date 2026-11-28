@@ -1,6 +1,7 @@
 // Shared data for the super-admin pages: one "client" list that merges online (SaaS) accounts with
 // on-prem licence records, plus the "needs attention" checks shown on the overview.
 import type {SupabaseClient} from "@supabase/supabase-js";
+import {parseEdgeVersions, RELEASES_API} from "./releases";
 
 // The Windows app's APP_VERSION (edge/app/launcher.pyw), read when the site is built (next.config.mjs), so a
 // new release shows here by itself; PCs on older versions are flagged. The installers for it are built and
@@ -9,7 +10,7 @@ export const LATEST_APP_VERSION = process.env.EDGE_APP_VERSION || "11.13.4";
 // Installers are built by the "Edge installer" GitHub workflow and published as release edge-v<version>, marked
 // "latest", with copies whose names carry no version. The links below go to GitHub's latest release, so they always
 // give the newest installers that were actually published: right after a merge (build still running) or if a build
-// fails, they keep giving the previous ones instead of a missing file. Private repository: sign in to GitHub.
+// fails, they keep giving the previous ones instead of a missing file.
 const REPO = "https://github.com/tonygeara/ai-security-command-center-saas";
 export const RELEASE_URL = `${REPO}/releases/latest`;
 const latest = (file: string) => `${REPO}/releases/latest/download/${file}`;
@@ -21,17 +22,15 @@ export const INSTALLERS = [
 ].map(i => ({...i, url: latest(i.file)}));
 const OFFLINE_ALERT_MS = 24 * 3600 * 1000;
 
-// Published Windows versions (GitHub releases edge-v<version>), newest first, for the update channel pickers.
+// Published Windows versions, newest first (lib/releases.ts). An optional GITHUB_TOKEN (read-only, set on Vercel) raises
+// GitHub's limit from 60 requests an hour per address to 5,000; without it the admin's browser fetches the list
+// itself when the server's request is refused (useEdgeVersions).
 export async function edgeReleases(): Promise<string[]> {
   try {
-    const r = await fetch("https://api.github.com/repos/tonygeara/ai-security-command-center-saas/releases?per_page=50",
-      {headers: {Accept: "application/vnd.github+json"}, next: {revalidate: 60}} as RequestInit);
-    if(!r.ok) return [];
-    const rows = await r.json() as {tag_name?: string; draft?: boolean}[];
-    const vs = rows.filter(x => !x.draft).map(x => /^edge-v(\d+)\.(\d+)\.(\d+)$/.exec(x.tag_name || "")).filter(Boolean)
-      .map(m => [Number(m![1]), Number(m![2]), Number(m![3])]);
-    vs.sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2]);
-    return vs.map(v => `V${v.join(".")}`);
+    const headers: Record<string, string> = {Accept: "application/vnd.github+json"};
+    if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+    const r = await fetch(RELEASES_API, {headers, next: {revalidate: 60}} as RequestInit);
+    return r.ok ? parseEdgeVersions(await r.json()) : [];
   } catch { return []; }
 }
 
