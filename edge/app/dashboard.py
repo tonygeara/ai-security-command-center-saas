@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.26.0"
+APP_VERSION = "V11.27.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -8107,6 +8107,45 @@ def send_report_telegram(text, pdf, name):
     return bool(_tg("sendDocument", chat_id=chat, caption=name, files={"document": (name, pdf, "application/pdf")}))
 
 
+REPORT_EMAIL_ERRORS = {
+    "not_member": "an address is no longer one of your company's portal accounts: choose the people again",
+    "no_recipients": "nobody is chosen to receive it",
+    "no_email_service": "email is not set up yet by your provider",
+    "sender_not_verified": "email is not set up yet by your provider (a verified sending address is needed)",
+    "too_many": "more than 12 reports were emailed today",
+    "trial_expired": "your free trial has ended: choose a plan in the portal",
+    "unauthorized": "this PC is not paired with the portal",
+}
+
+
+def report_email_available():
+    """Online PCs paired with the portal can email reports (through the portal, to the company's portal accounts)."""
+    return edition.EDITION != "onprem" and not onprem_mode() and bool(str(load_edge_agent_config().get("device_token") or "").strip())
+
+
+def _edge_sync(body, timeout=30):
+    token = str(load_edge_agent_config().get("device_token") or "").strip()
+    try:
+        r = requests.post(EDGE_SYNC_URL, json=body, headers={"x-device-token": token}, timeout=timeout)
+    except requests.RequestException:
+        return {"ok": False, "error": "offline"}
+    try:
+        return r.json()
+    except ValueError:
+        return {"ok": False, "error": f"http_{r.status_code}"}
+
+
+def send_report_email(report, pdf, name, to):
+    """(sent to, problem): the report emailed through the portal to these portal accounts."""
+    import base64
+    d = _edge_sync({"action": "report_email", "to": list(to), "subject": reports_mod.title(report) + " · " + reports_mod.span(report),
+                    "text": reports_mod.text_summary(report), "name": name, "pdf": base64.b64encode(pdf).decode("ascii")}, timeout=60)
+    if d.get("ok"):
+        return d.get("sent") or list(to), ""
+    err = str(d.get("error") or "")
+    return [], REPORT_EMAIL_ERRORS.get(err, "the portal did not answer" if err in ("offline", "") else err.replace("_", " "))
+
+
 def deliver_report(kind, end=None, by="schedule"):
     """Make, keep and (if switched on) send one report. Returns a short message."""
     cfg = load_report_settings()
@@ -8115,10 +8154,18 @@ def deliver_report(kind, end=None, by="schedule"):
     with open(os.path.join(REPORTS_DIR, name), "wb") as f:
         f.write(pdf)
     sent = cfg["telegram"] and send_report_telegram(reports_mod.text_summary(r), pdf, name)
-    audit_record(f"report: {kind} report made", target=name, detail={"by": by, "telegram": bool(sent)})
-    return {"name": name, "telegram": bool(sent),
-            "message": f"{reports_mod.KIND_NAME[kind]} report made" + (" and sent to Telegram." if sent else
-                       (", kept on this PC (Telegram is not set up)." if cfg["telegram"] and not telegram_ready() else ", kept on this PC."))}
+    emailed, email_problem = [], ""
+    if cfg["email"]["on"] and report_email_available():
+        emailed, email_problem = send_report_email(r, pdf, name, cfg["email"]["to"]) if cfg["email"]["to"] else ([], REPORT_EMAIL_ERRORS["no_recipients"])
+    audit_record(f"report: {kind} report made", target=name, detail={"by": by, "telegram": bool(sent), "emailed": len(emailed),
+                                                                      **({"email_problem": email_problem} if email_problem else {})})
+    if email_problem:
+        _drone_event(f"Report not emailed: {email_problem}.")
+    msg = f"{reports_mod.KIND_NAME[kind]} report made" + (" and sent to Telegram" if sent else
+          " (Telegram is not set up)" if cfg["telegram"] and not telegram_ready() else "")
+    msg += (f", emailed to {len(emailed)} {'person' if len(emailed) == 1 else 'people'}" if emailed else "")
+    msg += (f"; not emailed: {email_problem}" if email_problem else "") + ". Kept on this PC."
+    return {"name": name, "telegram": bool(sent), "emailed": emailed, "email_problem": email_problem, "message": msg}
 
 
 def _reports_worker():
@@ -8172,7 +8219,18 @@ def api_reports():
         return jsonify({"ok": True, "settings": cfg, "schedule": reports_mod.describe_schedule(cfg)})
     cfg = load_report_settings()
     return jsonify({"ok": True, "settings": cfg, "schedule": reports_mod.describe_schedule(cfg), "sections": list(reports_mod.SECTIONS.items()),  # a list keeps the order
-                    "telegram_ready": telegram_ready(), "reports": _report_list()})
+                    "telegram_ready": telegram_ready(), "email_available": report_email_available(), "reports": _report_list()})
+
+
+@app.route("/api/reports/people")
+def api_reports_people():
+    """Admins: the company's portal accounts, the only people its reports can be emailed to."""
+    if not report_email_available():
+        return jsonify({"ok": False, "error": "Email is for PCs paired with the portal (online edition)."}), 409
+    d = _edge_sync({"action": "report_people"}, timeout=20)
+    if not d.get("ok"):
+        return jsonify({"ok": False, "error": "The portal did not answer: " + str(d.get("error") or "no answer")}), 502
+    return jsonify({"ok": True, "people": d.get("people") or []})
 
 
 @app.route("/api/reports/send", methods=["POST"])
