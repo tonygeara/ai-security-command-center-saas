@@ -43,12 +43,28 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   repo copies identical to what is deployed (`supabase/functions/*/license.ts` copies must match).
 - Run the edge tests before merging: `edge/tests` (pytest, ~12 minutes; on Linux stub `winsound`).
 
-## Where we left off (27 November 2026)
+## Where we left off (28 November 2026)
 
 - **TO PUT BACK: the drones' 500 m distance-from-home limit**, switched off for now on the owner's request (23 Nov,
   V11.19.0): `DRONE_LIMITS["max_distance_m"] = None` in `edge/app/dashboard.py` (set it back to 500; checks, the Drone
   page ring and text follow; update `test_distance_from_home_limit_is_off_for_now`). A reminder to the owner is scheduled
   for 30 Nov 2026 (scheduled task "Re-add the 500 m drone distance limit"). Also on the Capabilities doc improvements list.
+- **SAVED FOR LATER (owner, 28 Nov; not started)**, also improvements 14 and 21–23 in the Capabilities doc. Page tours of every
+  screen were made 28 Nov (edge app, website, customer and admin portal; Word/PDF sent to the owner).
+  - **Reports** (improvement 14): Settings → Reports, daily / weekly / monthly (each with time, weekday, day of month), ticked
+    sections (detections, incidents and drone responses, flights incl. weather overrides, unknown drones, verified alarms,
+    camera/PC downtime, busiest cameras/hours, vs previous period); Telegram summary + PDF, PDFs kept on the PC with a list,
+    Send now / Preview; always sent even with intruder-warnings-only; the daily one replaces the morning briefing
+    (`briefing_text`, `_briefing_worker`). Email later for online clients via the portal (Resend, as the demo form).
+  - **Bugs** (21): the morning briefing is blocked by `telegram_intruders_only` (default on; `send_telegram` without
+    `warning=True`); admin Overview `edgeReleases()` (`lib/admin.ts`) calls the GitHub API unauthenticated on a private repo,
+    so the Approve list is probably empty on the live site (check); Fleet "Send to" one-stop routes become `last_route_of`
+    (Run patrol would fly them).
+  - **Merge duplicates** (22): add-drone from Devices tab (RTMP) / Drone page list / Dashboard → one list; camera position in
+    Settings GPS dispatch / Drone page / Coverage → one; Events + Incidents + Dashboard history; admin Clients vs Licences
+    (3 "new client" buttons); "Object AI" (Dashboard) vs "Camera AI" (Settings); PC Users page vs portal users (online).
+  - **Wording** (23): Licence/License, Command Centre/Center, the on-prem Licence page in the online edition, portal "AI controls:
+    manual feature overrides" and "Drone flight requires a compatible bridge".
 - Released and approved 27 Nov (PR #63, release `edge-v11.24.0`): Edge **V11.24.0**: (1) **Detectors switch on the Fleet page**
   (`flDet`, localStorage `fleetDetectors`; `/api/fleet` → `detectors: {on, detectors[{…, sees}], unknown}` from
   `_fleet_detectors()`, empty while the Detector drones tab is off): range circles (green, red while it sees an unknown
@@ -217,7 +233,7 @@ CLAUDE.md-only change builds no installer). Never wait for the owner to ask for 
   `edge/installer/saas-INSTALL.txt` (published with each release as `Online-INSTALL.txt`) the same; the repo copy
   was synced on main (PR #23) and reaches clients with the next release. There is no on-prem guide in Drive; the
   on-prem one is `edge/installer/onprem-INSTALL.txt`.
-- Features and Capabilities docs current on 27 Nov (V11.24.0 released and approved 27 Nov; 90 features; 31 capabilities, 20
+- Features and Capabilities docs current on 28 Nov (V11.24.0 released and approved 27 Nov; 90 features; 31 capabilities, 23
   improvements; DJI Dock support stays on the improvements list until the first real flight).
 - Decided: SaaS is the main product, on-prem for offline/no-cloud clients. Skipped for now: Phase 4
   (Lebanese plates, Arabic UI, WhatsApp, power-cut handling), the AI narrator.
