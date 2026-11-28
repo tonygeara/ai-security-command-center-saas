@@ -26,7 +26,7 @@ export default function NewClient() {
       {done.password ? <><p>Temporary password (shown only now):</p><code className="secret">{done.password}</code>
         <p className="muted small">Give it to them privately; they choose their own at first sign-in.</p></>
         : <p className="muted">That email already had an account; it keeps its password.</p>}
-      <p className="muted small">Next: set their cameras, drones and user places on the Licences page.</p>
+      <p className="muted small">Next: set their cameras, drones and user places.</p>
       <div className="actions"><a className="btn small" href={`/admin/licenses?org=${done.org}`}>Set their licence</a>
         <button className="ghost" onClick={() => window.location.reload()}>Close</button></div>
     </> : <form onSubmit={submit} className="login-form">

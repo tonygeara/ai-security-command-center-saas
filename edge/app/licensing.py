@@ -84,28 +84,28 @@ def verify_lease(document, device_token, now=None):
 
 
 def verify(document, machine=None, now=None):
-    """Check a license document. Returns (ok, reason, payload)."""
+    """Check a licence document. Returns (ok, reason, payload)."""
     if not isinstance(document, dict):
-        return False, "Not a license file.", None
+        return False, "Not a licence file.", None
     payload = document.get("license")
     signature = document.get("signature")
     if not isinstance(payload, dict) or not signature:
-        return False, "Not a license file.", None
+        return False, "Not a licence file.", None
     if not _signature_ok(payload, signature):
-        return False, "License signature is invalid (the file was changed or not issued by the vendor).", payload
+        return False, "Licence signature is invalid (the file was changed or not issued by the vendor).", payload
     if payload.get("kind"):  # online leases are not installable license files
-        return False, "Not a license file.", payload
+        return False, "Not a licence file.", payload
     if str(payload.get("machine_id", "")).upper() != str(machine or machine_id()).upper():
-        return False, "This license belongs to a different computer.", payload
+        return False, "This licence belongs to a different computer.", payload
     expires = str(payload.get("expires") or "")
     if expires:
         try:
             end = datetime.date.fromisoformat(expires)
         except ValueError:
-            return False, "License expiry date is invalid.", payload
+            return False, "Licence expiry date is invalid.", payload
         today = datetime.date.fromtimestamp(now or time.time())
         if today > end:
-            return False, f"License expired on {expires}.", payload
+            return False, f"Licence expired on {expires}.", payload
     return True, "Valid", payload
 
 
@@ -115,13 +115,13 @@ def load(path):
 
 
 def check_file(path, machine=None, now=None):
-    """Verify the license file at `path`. Returns (ok, reason, payload)."""
+    """Verify the licence file at `path`. Returns (ok, reason, payload)."""
     if not os.path.isfile(path):
-        return False, "No license installed.", None
+        return False, "No licence installed.", None
     try:
         return verify(load(path), machine=machine, now=now)
     except Exception as e:
-        return False, f"License file could not be read: {e}", None
+        return False, f"Licence file could not be read: {e}", None
 
 
 def features_for_dashboard(payload):

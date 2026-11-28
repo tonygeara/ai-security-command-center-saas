@@ -35,7 +35,7 @@ def test_top_bar_and_settings_hub(client):
     assert [t for t in ("Dashboard", "Drone", "Virtual drones", "Devices", "Settings") if t in nav] == \
         ["Dashboard", "Drone", "Virtual drones", "Devices", "Settings"]
     assert "3D Maps" not in nav and "Flight safety" not in nav and "License" not in nav and "Users" not in nav
-    for href in ("/settings/events", "/settings/people", "/settings/vehicles", "/license", "/users", "/safety"):
+    for href in ("/incidents", "/settings/people", "/settings/vehicles", "/license", "/users", "/safety", "/reports"):
         assert f'href="{href}"' in html
     assert 'class="active"><span class="ico">⚙' in client.get("/license").get_data(as_text=True)  # Settings lit
     drone = client.get("/drone-control").get_data(as_text=True)
@@ -65,7 +65,11 @@ def test_settings_pages_for_events_people_vehicles(client):
     dash = client.get("/").get_data(as_text=True)
     assert "#historyPanel,#openFaceEnroll" in dash  # moved off the dashboard
     hub = client.get("/settings").get_data(as_text=True)
-    assert 'href="/settings/events"' in hub and 'href="/settings/people"' in hub and 'href="/settings/vehicles"' in hub
+    # Events and Incidents are one tile ("Incidents & events"); each page links to the other.
+    assert 'href="/settings/events"' not in hub and "Incidents &amp; events" in hub
+    assert 'href="/settings/people"' in hub and 'href="/settings/vehicles"' in hub
+    assert "location.href='/settings/events'" in client.get("/incidents").get_data(as_text=True)
+    assert 'href="/incidents"' in client.get("/settings/events").get_data(as_text=True)
 
 
 def test_geocode_and_map_search_script(d, client, tmp_path):

@@ -37,17 +37,17 @@ STEP 3 - FIRST START
   - Open "AI Command Centre Lebanon" from the desktop.
   - The first start loads the AI services (several minutes), then opens the dashboard.
 
-STEP 4 - ACTIVATE THE LICENSE
-  - The dashboard opens the License page and shows this computer's Machine ID,
+STEP 4 - ACTIVATE THE LICENCE
+  - The dashboard opens the Licence page and shows this computer's Machine ID,
     for example: F9C9-B5F1-CBB1-BA7C-7356
-  - Send the Machine ID to your supplier. You receive a license file (.lic).
-  - On the License page click "Choose file", pick the .lic file, click "Install license".
-  - The license works only on this computer and until its expiry date.
+  - Send the Machine ID to your supplier. You receive a licence file (.lic).
+  - On the Licence page click "Choose file", pick the .lic file, click "Install licence".
+  - The licence works only on this computer and until its expiry date.
 
 STEP 5 - ADD CAMERAS
   - Launcher > "Camera / Drone Setup": enter the camera's RTSP address, e.g.
     rtsp://username:password@192.168.1.50:554/stream1, then Stop System / Start System.
-  - More cameras: dashboard > Devices > Add camera (up to the number in your license).
+  - More cameras: dashboard > Devices > Add camera (up to the number in your licence).
   - Drone: in DJI Fly, stream RTMP to the address shown in Camera / Drone Setup.
 
 GOOD TO KNOW

@@ -21,6 +21,12 @@ export default async function Portal({searchParams}:{searchParams:Promise<{organ
   supabase.from("feature_entitlements").select("feature_key,enabled,source").eq("organization_id",member.organization_id),
   supabase.from("sites").select("id,name").eq("organization_id",member.organization_id).limit(1).maybeSingle()
  ]);
+ // The features this company has: its plan's, with what its provider switched on or off for it on top.
+ const planCode=(sub?.plan_code??org?.plan_code??"trial");
+ const {data:planFeatures}=await supabase.from("plan_features").select("feature_key,enabled").eq("plan_code",planCode);
+ const on=new Map<string,boolean>((planFeatures??[]).map(f=>[f.feature_key,!!f.enabled]));
+ for(const f of features??[])on.set(f.feature_key,!!f.enabled);
+ const featuresOn=[...on.values()].filter(Boolean).length;
  if(!org)redirect(organization?"/admin":"/onboarding");
  // Trial over and no plan chosen yet: only the plan page opens (a super admin looking at a client still sees it all).
  if(!organization){const {data:ended}=await supabase.rpc("org_trial_expired",{target_org:member.organization_id});if(ended)redirect(checkout?`/choose-plan?checkout=${encodeURIComponent(checkout)}`:"/choose-plan");}
@@ -30,8 +36,8 @@ export default async function Portal({searchParams}:{searchParams:Promise<{organ
  {organization&&<aside className="card"><b>Super admin · managing {org.name}</b><p>This dashboard is scoped to this customer. Camera discovery and live video run on their paired Windows agent.</p><a className="ghost" href="/admin">Back to all customers</a></aside>}<section className="grid"><article className="card"><h2>Edge Agent</h2><strong className={online?"ok":"muted"}>{online?"Connected":"Offline"}</strong><p className="muted">{online} online Windows agent{online===1?"":"s"}</p></article>
  <article className="card"><h2>Plan</h2><strong>{plan}</strong><p className="muted">{sub?.status??org?.status}</p></article>
  <article className="card"><h2>Video devices</h2><strong>{sources?.length??0}</strong><p className="muted">{sources?.filter(s=>s.enabled).length??0} enabled</p></article>
- <article className="card"><h2>AI controls</h2><strong>{features?.filter(f=>f.enabled).length??0}</strong><p className="muted">manual feature overrides</p></article></section>
- {!organization&&<section className="card commandCard"><div><p className="eyebrow">LOCAL COMMAND CENTER</p><h2>Drone fleet, patrols, live video & AI events</h2><p className="muted">The Windows Edge Agent keeps video and camera credentials local. Open the Command Center on the computer running the agent to view your fleet, configure saved routes and scheduled patrols, or connect cameras. Drone flight requires a compatible bridge and a pilot ready to take over.</p></div><a className="btn" href="http://127.0.0.1:8080">Launch dashboard →</a><a className="ghost" href={RELEASE_URL}>Get latest release</a></section>}
+ <article className="card"><h2>Features</h2><strong>{featuresOn}</strong><p className="muted">of {on.size||15} included in your plan</p></article></section>
+ {!organization&&<section className="card commandCard"><div><p className="eyebrow">LOCAL COMMAND CENTER</p><h2>Drone fleet, patrols, live video & AI events</h2><p className="muted">The Windows Edge Agent keeps video and camera credentials local. Open the Command Center on the computer running the agent to fly your drones, set routes, patrols and alarm responses, watch the detectors, or connect cameras. Keep a pilot ready to take over.</p></div><a className="btn" href="http://127.0.0.1:8080">Launch dashboard →</a><a className="ghost" href={RELEASE_URL}>Get latest release</a></section>}
  <h2 id="devices">Devices</h2><section className="grid">{(sources??[]).map(s=><article className="card" key={s.id}><span className="badge">{s.source_type.toUpperCase()}</span><h2>{s.name}</h2><p className={s.enabled?"ok":"muted"}>{s.enabled?"Enabled":"Disabled"}</p></article>)}</section>
  {["owner","admin","Super admin"].includes(member.role)&&<><h2>Pair a Windows Edge Agent</h2><article className="card"><p className="muted">Generate a one-time pairing code. Camera passwords remain on the Windows machine and are never stored in this portal.</p><PairDevice orgId={member.organization_id} siteId={site?.id}/></article>
  <h2>Subscription</h2>{organization?<SubscriptionControls orgId={org.id} initialPlan={sub?.plan_code??org.plan_code} initialStatus={org.status} paid={!!sub?.provider_subscription_id}/>:<UpgradePlans currentPlan={sub?.plan_code??org?.plan_code??"trial"}/>}</>}</main>

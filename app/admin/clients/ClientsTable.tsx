@@ -3,7 +3,7 @@ import {useMemo, useState} from "react";
 import {useRouter} from "next/navigation";
 
 type C = Record<string, any>;
-const FILTERS: [string, string][] = [["all", "All"], ["saas", "Online"], ["onprem", "On-prem"], ["expiring", "Expiring ≤30 days"], ["overdue", "Payment overdue"], ["offline", "PC offline"], ["inactive", "Suspended / revoked"]];
+const FILTERS: [string, string][] = [["all", "All"], ["saas", "Online"], ["onprem", "On-prem"], ["expiring", "Expiring ≤30 days"], ["overdue", "Payment overdue"], ["offline", "PC offline"], ["inactive", "Suspended / revoked"], ["nodetails", "No details yet"]];
 const daysLeft = (d?: string | null) => d ? Math.ceil((new Date(d).getTime() - Date.now()) / 86400000) : null;
 
 export default function ClientsTable({rows}: {rows: C[]}){
@@ -18,6 +18,7 @@ export default function ClientsTable({rows}: {rows: C[]}){
       case "overdue": return c.paymentStatus === "overdue" || (!!c.nextPayment && c.nextPayment < today && c.paymentStatus !== "paid");
       case "offline": return c.devicesTotal > 0 && c.devicesOnline < c.devicesTotal;
       case "inactive": return ["suspended", "revoked", "cancelled"].includes(c.status);
+      case "nodetails": return c.type === "saas" && !c.hasDetails;
       default: return true;
     }
   };
@@ -43,7 +44,7 @@ export default function ClientsTable({rows}: {rows: C[]}){
       {th("name", "Client")}{th("type", "Type")}{th("plan", "Plan")}<th>Contact</th>{th("cameras", "Limits")}{th("devicesOnline", "PCs")}{th("expires", "Expires")}{th("paymentStatus", "Payment")}
     </tr></thead><tbody>
       {shown.map(c => { const left = daysLeft(c.expires); return <tr key={c.key} onClick={() => router.push("/admin/clients/" + c.key)}>
-        <td><b>{c.name}</b><div className="muted">{[c.company, c.location].filter(Boolean).join(" · ")}</div></td>
+        <td><b>{c.name}</b><div className="muted">{[c.company, c.location].filter(Boolean).join(" · ")}</div>{c.type === "saas" && !c.hasDetails && <div className="locked">no contact or limits yet</div>}</td>
         <td><span className={"badge " + (c.type === "onprem" ? "badgeOnprem" : "badgeSaas")}>{c.type === "onprem" ? "ON-PREM" : "ONLINE"}</span>
           {["suspended", "revoked", "cancelled"].includes(c.status) && <div className="locked">{c.status}</div>}</td>
         <td>{String(c.plan).toUpperCase()}</td>

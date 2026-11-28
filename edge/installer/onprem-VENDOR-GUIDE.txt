@@ -2,11 +2,11 @@ AI COMMAND CENTRE LEBANON - VENDOR GUIDE (for Tony only - do NOT give this to cu
 =========================================================================================
 
 This guide covers: building the package, installing it at a customer (e.g. Karim),
-and issuing / renewing his license.
+and issuing / renewing his licence.
 
 YOUR IMPORTANT FILES
   C:\AI-Security-Keys\license-signing-key.pem   YOUR SECRET KEY. Only this key can create
-                                                licenses the app accepts.
+                                                licences the app accepts.
                                                 - Back it up (USB stick + another safe place).
                                                 - Never email it, never put it on the customer USB.
                                                 - If you lose it you cannot renew existing customers.
@@ -16,7 +16,7 @@ YOUR IMPORTANT FILES
 
 ONE CODEBASE, TWO SEPARATE APPS
   Your system and the on-prem edition are built from the same code (so fixes reach both),
-  but they are separate programs with separate installs, data, licenses and installers.
+  but they are separate programs with separate installs, data, licences and installers.
   They can NOT be installed on the same computer (they share the local AI services):
   each installer refuses to install if the other edition is already on that PC.
   Never install the Lebanon edition on your own PC.
@@ -59,13 +59,13 @@ Steps:
    If Windows says "Windows protected your PC": More info > Run anyway.
 3. Open "AI Command Centre Lebanon" from the desktop.
    The first start loads the AI services - this takes several minutes.
-4. The License page opens and shows the MACHINE ID, for example:
+4. The Licence page opens and shows the MACHINE ID, for example:
        F9C9-B5F1-CBB1-BA7C-7356
    Write it down exactly (or take a photo). You need it for Part 3.
 
 
 -----------------------------------------------------------------------------------------
-PART 3 - GENERATE KARIM'S LICENSE (on YOUR PC)
+PART 3 - GENERATE KARIM'S LICENCE (on YOUR PC)
 -----------------------------------------------------------------------------------------
 1. Open PowerShell and go to the tools folder:
        cd C:\AI-Security\edge\tools
@@ -82,12 +82,12 @@ PART 3 - GENERATE KARIM'S LICENSE (on YOUR PC)
        & "C:\AI-Security\edge\.venv-onprem\Scripts\python.exe" license_tool.py show license-Karim-XXXX-XXXX.lic
 
 Options you can change:
-   --customer "Name"      customer name shown on his License page
+   --customer "Name"      customer name shown on his Licence page
    --machine  ID          Karim's Machine ID (from Part 2, step 4) - must be exact
-   --expires  YYYY-MM-DD  last day the license works (e.g. 2027-10-20 = one year)
+   --expires  YYYY-MM-DD  last day the licence works (e.g. 2027-10-20 = one year)
    --cameras  N           maximum number of cameras
    --drones   N           maximum number of drones (0 = no drones)
-   --plan     "Label"     plan name shown on his License page (default: on-prem)
+   --plan     "Label"     plan name shown on his Licence page (default: on-prem)
    --features ...         what is included. Leave it out = everything. Choices:
                             camera_ai  face_ai  lpr  drone_live  drone_ai  drone_tracking
    --out      path        save the .lic somewhere else (e.g. straight to the USB: --out E:\karim.lic)
@@ -101,13 +101,13 @@ Examples:
 
 
 -----------------------------------------------------------------------------------------
-PART 4 - INSTALL THE LICENSE ON KARIM'S LAPTOP
+PART 4 - INSTALL THE LICENCE ON KARIM'S LAPTOP
 -----------------------------------------------------------------------------------------
 1. Send him the .lic file (email, WhatsApp, USB) - or do it yourself on site.
-2. In the app, on the License page: click "Choose file", pick the .lic file,
-   click "Install license". The dashboard opens.
+2. In the app, on the Licence page: click "Choose file", pick the .lic file,
+   click "Install licence". The dashboard opens.
 3. Then add his cameras: Launcher > "Camera / Drone Setup" for the first camera,
-   dashboard > Devices > Add camera for more (up to the license limit).
+   dashboard > Devices > Add camera for more (up to the licence limit).
 
 
 -----------------------------------------------------------------------------------------
@@ -129,29 +129,29 @@ On Karim's laptop:
    It installs over the old version.
 7. Open the app again. Done.
 
-Kept automatically: his license, faces, plates, events, recordings, cameras and settings
+Kept automatically: his licence, faces, plates, events, recordings, cameras and settings
 (they live in %LOCALAPPDATA%\AI-Command-Centre-Lebanon, which the installer never touches).
-No new license is needed - it is tied to his laptop, not to the version.
+No new licence is needed - it is tied to his laptop, not to the version.
 Tip: before a big update, back up his data folder to a USB stick.
 
 
 -----------------------------------------------------------------------------------------
-RENEWING / CHANGING A LICENSE
+RENEWING / CHANGING A LICENCE
 -----------------------------------------------------------------------------------------
 - Run the same "issue" command with the new expiry date or new limits.
 - Karim installs the new .lic the same way; it replaces the old one.
 - Keep a list of customers + Machine IDs + expiry dates so you know when to renew.
 
-WHAT THE LICENSE PROTECTS
+WHAT THE LICENCE PROTECTS
 - It only works on the laptop with that Machine ID (copying it to another PC fails).
-- It stops working after the expiry date (the License page opens again).
+- It stops working after the expiry date (the Licence page opens again).
 - Any change to the file (dates, limits, features) makes it invalid.
-- Karim's laptop never needs internet or your cloud for the license.
+- Karim's laptop never needs internet or your cloud for the licence.
 
 TROUBLESHOOTING
-- "License is for a different computer": the Machine ID was typed wrong, or Windows
-  was reinstalled on his laptop (new Machine ID) -> issue a new license for the new ID.
-- "License has expired": issue a renewal.
+- "Licence is for a different computer": the Machine ID was typed wrong, or Windows
+  was reinstalled on his laptop (new Machine ID) -> issue a new licence for the new ID.
+- "Licence has expired": issue a renewal.
 - "signature is invalid": the file was edited or not made with your key -> re-issue.
 - Dashboard does not open / no video: make sure Docker Desktop is running
   ("Engine running"), then Stop System / Start System in the launcher.
