@@ -1,7 +1,8 @@
 "use client";
-import {useState} from "react";
+import {useEffect, useState} from "react";
 import {useRouter} from "next/navigation";
 import {createClient} from "../../lib/supabase/client";
+import {useEdgeVersions} from "../../lib/useEdgeVersions";
 
 // Which version this client's PCs install when their Settings → Updates switch is on.
 const CHANNELS: [string, string][] = [
@@ -10,11 +11,13 @@ const CHANNELS: [string, string][] = [
   ["pinned", "Pinned: one version you choose"],
 ];
 
-export default function UpdateChannel({orgId, initialChannel, initialPinned, versions, approved}:
+export default function UpdateChannel({orgId, initialChannel, initialPinned, versions: fromServer, approved}:
   {orgId: string; initialChannel: string; initialPinned: string | null; versions: string[]; approved: string | null}){
   const router = useRouter();
+  const {versions} = useEdgeVersions(fromServer);
   const [channel, setChannel] = useState(initialChannel), [pinned, setPinned] = useState(initialPinned || versions[0] || "");
   const [busy, setBusy] = useState(false), [message, setMessage] = useState("");
+  useEffect(() => { if(!pinned && versions[0]) setPinned(versions[0]); }, [versions, pinned]);
   async function save(){
     setBusy(true); setMessage("");
     const {error} = await createClient().rpc("set_update_channel", {target_org: orgId, target_channel: channel,

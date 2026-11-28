@@ -179,7 +179,7 @@ async function dropDrone(x,ll){const lat=+ll.lat.toFixed(6),lon=+ll.lng.toFixed(
     let r,d;
     if(how===1){r=await fetch('/api/virtual-drones/'+encodeURIComponent(x.slot),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'move',lat,lon})});d=await r.json().catch(()=>({}))
       ;msg('dtMsg',r.ok&&d.ok!==false?x.label+' moved.':(r.status===403?'Only operators and admins can move drones.':d.error||'Not moved.'),r.ok&&d.ok!==false)}
-    else{({r,d}=await uiFly('/api/routes/fly?drone='+encodeURIComponent(x.slot),{name:'Sent from Detector drones',points:[{lat,lon}],alt:30,speed:6,pause:0,end:'hover'}));
+    else{({r,d}=await uiFly('/api/routes/fly?drone='+encodeURIComponent(x.slot),{name:'Sent from Detector drones',oneoff:true,points:[{lat,lon}],alt:30,speed:6,pause:0,end:'hover'}));
       msg('dtMsg',d.ok?x.label+' is flying there.':(r.status===403?'Only operators and admins can fly drones.':d.error||'Not sent.'),!!d.ok)}
   }finally{dragDrone=null;await load()}}
 function renderList(){

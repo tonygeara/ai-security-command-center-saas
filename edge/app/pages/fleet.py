@@ -163,7 +163,7 @@ async function flyPatrol(slot){const x=D(slot),r=x.patrol_route;if(!r)return;
 function pickSend(slot){picking=picking&&picking.slot===slot?null:{slot};edit=null;$('flMap').classList.toggle('picking',!!picking);msg(picking?'Click the map where '+D(slot).label+' should fly.':'');render()}
 function pickSendSelected(){if(!sel.size){msg('Tick one or more drones in the list first.',false);return}picking={many:[...sel]};edit=null;$('flMap').classList.add('picking');msg('Click the map where the ticked drones should fly (they spread out around the spot).')}
 async function sendTo(slot,lat,lon,quiet){const x=D(slot);
-  const d=(await uiFly('/api/routes/fly?drone='+encodeURIComponent(slot),{name:'Sent from Fleet',points:[{lat,lon}],alt:30,speed:6,pause:0,end:'hover'})).d;
+  const d=(await uiFly('/api/routes/fly?drone='+encodeURIComponent(slot),{name:'Sent from Fleet',oneoff:true,points:[{lat,lon}],alt:30,speed:6,pause:0,end:'hover'})).d;
   if(!quiet)msg(d.ok?x.label+' is flying there.':(d.error||'Not sent.'),!!d.ok);return d}
 // Drag a drone: a virtual one flies there or is put there; a real one flies there after a warning; a pinned one moves its pin.
 async function dropDrone(x,ll){const lat=+ll.lat.toFixed(6),lon=+ll.lng.toFixed(6);

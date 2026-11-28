@@ -374,7 +374,7 @@ async function dropDrone(ll){const t=st.telemetry||{},lat=+ll.lat.toFixed(6),lon
     if(how===null)return;let r,d;
     if(how===1){r=await fetch('/api/virtual-drones/'+encodeURIComponent(DRONE),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({action:'move',lat,lon})});d=await r.json().catch(()=>({}));
       mmsg(r.ok&&d.ok!==false?name+' moved.':(r.status===403?'Only operators and admins can move drones.':d.error||'Not moved.'),r.ok&&d.ok!==false)}
-    else{({r,d}=await uiFly('/api/routes/fly',{name:'Moved on the map',points:[{lat,lon}],alt:+$('rtAlt').value||30,speed:+$('rtSpeed').value||5,pause:0,end:'hover'}));mmsg(d.ok?name+' is flying there.':(r.status===403?'Only operators and admins can fly drones.':d.error||'Not sent.'),!!d.ok)}
+    else{({r,d}=await uiFly('/api/routes/fly',{name:'Moved on the map',oneoff:true,points:[{lat,lon}],alt:+$('rtAlt').value||30,speed:+$('rtSpeed').value||5,pause:0,end:'hover'}));mmsg(d.ok?name+' is flying there.':(r.status===403?'Only operators and admins can fly drones.':d.error||'Not sent.'),!!d.ok)}
   }finally{dragging=false;const t2=st.telemetry||{};if(dMark&&t2.lat)dMark.setLatLng([t2.lat,t2.lon])}}
 function distM(a,b,c,d){const R=6371000,p1=a*Math.PI/180,p2=c*Math.PI/180,dp=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180;
   const x=Math.sin(dp/2)**2+Math.cos(p1)*Math.cos(p2)*Math.sin(dl/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x))}
