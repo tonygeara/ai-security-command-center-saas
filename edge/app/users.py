@@ -29,7 +29,8 @@ OPERATOR_WRITES = [re.compile(p) for p in (
     r"^/api/satellite/pins$",  # Satellite tab pins (the FIRMS key: admins)
     r"^/api/detector/(sites|settings|mine|alarm/ack|intercept)$",  # Detector drones: detectors, my drones, acknowledge (the YOLO model: admins)
     r"^/api/response/(dispatch|recall)$",
-    r"^/api/fleet/(stop-all|home-all)$",  # Fleet page: stop every drone / bring every drone home
+    r"^/api/fleet/(stop-all|home-all)$",
+    r"^/api/reports/send$",  # Settings → Reports: Send now (changing the reports: admins)  # Fleet page: stop every drone / bring every drone home
     r"^/api/assistant/briefing$",
     r"^/api/sources/[^/]+/feed$",
     r"^/api/docks/[^/]+/video$",  # dock live video: start, stop, lens

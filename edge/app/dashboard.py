@@ -175,7 +175,7 @@ TELEGRAM_DEFAULTS = {
 }
 
 PORT = int(os.environ.get("AI_SECURITY_PORT", "8080"))
-APP_VERSION = "V11.24.0"
+APP_VERSION = "V11.25.0"
 
 DISPLAY_SECONDS = 7
 SPEECH_COOLDOWN = 300
@@ -2372,7 +2372,7 @@ import virtual_drone
 from virtual_drone import VirtualDrone  # noqa: E402
 import satview as satellite_mod
 import dronedetect as dronedetect_mod
-import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.fleet, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay  # noqa: E401
+import pages.satellite, pages.detector, pages.dialogs, pages.drone_control, pages.drone_grid, pages.virtual_drones, pages.drone_add, pages.fleet, pages.device_wizard, pages.maps, pages.safety, pages.live4d, pages.mapsearch, pages.coverage, pages.alarms, pages.replay, pages.reports  # noqa: E401
 import users as user_accounts
 import web_access
 import web_records
@@ -3867,7 +3867,7 @@ HUD_NAV_ITEMS = [
 ]
 # Pages reached from inside a tab light up that tab: 3D maps and flight safety from Drone; events, people,
 # vehicles, licence and users from Settings.
-NAV_ALIAS = {"maps": "drone", "safety": "drone", "license": "settings", "users": "settings",
+NAV_ALIAS = {"reports": "settings", "maps": "drone", "safety": "drone", "license": "settings", "users": "settings",
              "events": "settings", "people": "settings", "vehicles": "settings"}
 
 
@@ -7934,26 +7934,279 @@ def telegram_assistant_worker():
                 _tg_reply.on = False
 
 
-def _briefing_worker():
-    sent_on = ""
+# ============================================================
+# REPORTS (Settings → Reports): daily / weekly / monthly, to Telegram with a PDF, kept on this PC
+# ============================================================
+import reports as reports_mod  # noqa: E402
+
+REPORTS_SETTINGS_FILE = os.path.join(DATA_FOLDER, "reports_settings.json")
+REPORTS_STATE_FILE = os.path.join(DATA_FOLDER, "reports_state.json")
+REPORTS_DIR = os.path.join(DATA_FOLDER, "reports")
+FLIGHT_LOG_FILE = os.path.join(DATA_FOLDER, "flight_log.jsonl")  # one line per drone flight (take-off to landing)
+DETECTOR_LOG_FILE = os.path.join(DATA_FOLDER, "detector_alarms.jsonl")  # unknown-drone alarms
+UPTIME_LOG_FILE = os.path.join(DATA_FOLDER, "uptime_log.jsonl")  # every 10 min: minutes the PC ran, cameras offline
+_report_lock = threading.Lock()
+REPORT_LOG_DAYS = 400
+
+
+def _report_log(path, row):
+    try:
+        with _report_lock, open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print("Report log error:", e)
+
+
+def _report_read(path, since, key="t"):
+    out = []
+    try:
+        with _report_lock, open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get(key, 0) >= since:
+                    out.append(r)
+    except OSError:
+        pass
+    return out
+
+
+def _report_prune_logs():
+    """Keep the report logs to 400 days."""
+    cut = time.time() - REPORT_LOG_DAYS * 86400
+    for path, key in ((FLIGHT_LOG_FILE, "start"), (DETECTOR_LOG_FILE, "t"), (UPTIME_LOG_FILE, "t")):
+        rows = _report_read(path, cut, key)
+        try:
+            with _report_lock:
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+                _replace_file(tmp, path)
+        except OSError:
+            pass
+
+
+_flights_open = {}  # slot -> the flight in progress
+
+
+def _track_flights(now=None):
+    """Called every few seconds: a drone that takes off starts a flight, one that lands (or is lost > 60 s) ends it."""
+    now = now or time.time()
+    for slot in drone_slots():
+        link = get_link(slot)
+        tel = link["telemetry"]
+        fresh = link_fresh(slot, 10)
+        f = _flights_open.get(slot)
+        if fresh and tel.get("flying") and tel.get("lat") is not None:
+            if f is None:
+                f = _flights_open[slot] = {"slot": slot, "label": drone_label(slot), "virtual": is_virtual(slot), "start": now,
+                                           "distance_m": 0.0, "max_alt": 0.0, "pos": (tel["lat"], tel["lon"])}
+            else:
+                step = _distance_m(f["pos"][0], f["pos"][1], tel["lat"], tel["lon"])
+                if step < 500:  # a GPS jump is not flown distance
+                    f["distance_m"] += step
+                f["pos"] = (tel["lat"], tel["lon"])
+            f["max_alt"] = max(f["max_alt"], float(tel.get("altitude") or 0))
+            f["seen"] = now
+        elif f is not None and (fresh or now - f.get("seen", now) > 60):
+            _flights_open.pop(slot, None)
+            end = f.get("seen", now)
+            if end - f["start"] >= 15:  # a hop of a few seconds is not a flight
+                _report_log(FLIGHT_LOG_FILE, {"slot": slot, "label": f["label"], "virtual": f["virtual"], "start": round(f["start"], 1),
+                                              "end": round(end, 1), "distance_m": round(f["distance_m"], 1), "max_alt": round(f["max_alt"], 1)})
+
+
+def _cameras_offline():
+    """Cameras (not drones or docks) whose AI gets no picture now."""
+    names = [n for n in _frigate_camera_names() if not _is_drone_name(n) and not _is_dock_name(n)]
+    try:
+        stats = requests.get(f"{FRIGATE_API_URL}/api/stats", timeout=3).json().get("cameras") or {}
+    except Exception:
+        return names  # the video service is not running: no camera is watched
+    return [n for n in names if float((stats.get(n) or {}).get("camera_fps") or 0) <= 0]
+
+
+def _report_tracker_worker():
+    bucket = {"t": time.time(), "pc": 0, "cams_off": {}}
+    last_min = time.time()
+    while True:
+        time.sleep(5)
+        try:
+            _track_flights()
+            now = time.time()
+            if now - last_min >= 60:
+                last_min = now
+                bucket["pc"] += 1
+                for c in _cameras_offline():
+                    bucket["cams_off"][c] = bucket["cams_off"].get(c, 0) + 1
+                if bucket["pc"] >= 10:
+                    _report_log(UPTIME_LOG_FILE, bucket)
+                    bucket = {"t": now, "pc": 0, "cams_off": {}}
+        except Exception as e:
+            print("Report tracker error:", e)
+
+
+def load_report_settings():
+    return reports_mod.load_settings(REPORTS_SETTINGS_FILE, legacy_briefing=load_response_settings())
+
+
+def _report_state():
+    try:
+        with open(REPORTS_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_report_state(state):
+    tmp = REPORTS_STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+    _replace_file(tmp, REPORTS_STATE_FILE)
+
+
+def _report_data(since):
+    """Everything the reports count, from `since` on (the previous period is included for the comparison)."""
+    items = []
+    for r in STORE.q("SELECT i.t AS t, i.kind AS kind, i.data AS data, c.camera AS camera FROM incident_items i "
+                     "JOIN incidents c ON c.id = i.incident WHERE i.t >= ?", (since,)):
+        try:
+            data = json.loads(r["data"] or "{}")
+        except ValueError:
+            data = {}
+        items.append({"t": r["t"], "kind": r["kind"], "camera": r["camera"], "data": data if isinstance(data, dict) else {}})
+    incs = [dict(r) for r in STORE.q("SELECT id, started, updated, camera, title, severity FROM incidents WHERE updated >= ?", (since,))]
+    audit_rows = [{"t": r["t"], "action": r["action"]} for r in STORE.q("SELECT t, action FROM audit WHERE t >= ?", (since,))]
+    return {"sightings": load_sightings(since), "items": items, "incidents": incs, "audit": audit_rows,
+            "flights": _report_read(FLIGHT_LOG_FILE, since, "start"), "detector_events": _report_read(DETECTOR_LOG_FILE, since),
+            "uptime": _report_read(UPTIME_LOG_FILE, since)}
+
+
+def _site_name():
+    return str(load_edge_agent_config().get("device_name") or "").strip() or socket.gethostname()
+
+
+def make_report(kind, end=None):
+    """Build one report for the period ending at `end` (now by default): (report, pdf bytes, file name)."""
+    cfg = load_report_settings()
+    end = end or time.time()
+    start, end = reports_mod.period(kind, end)
+    data = _report_data(start - (end - start))
+    r = reports_mod.build(kind, start, end, data, cfg, site=_site_name(), version=APP_VERSION)
+    return r, reports_mod.pdf_bytes(r), reports_mod.file_name(r)
+
+
+def send_report_telegram(text, pdf, name):
+    """Reports are always sent, even with "intruder warnings only" on (they are asked for on their own)."""
+    if not telegram_ready():
+        return False
+    chat = str(load_telegram_config().get("chat_id") or "").strip()
+    _tg("sendMessage", chat_id=chat, text=text[:4000])
+    return bool(_tg("sendDocument", chat_id=chat, caption=name, files={"document": (name, pdf, "application/pdf")}))
+
+
+def deliver_report(kind, end=None, by="schedule"):
+    """Make, keep and (if switched on) send one report. Returns a short message."""
+    cfg = load_report_settings()
+    r, pdf, name = make_report(kind, end)
+    os.makedirs(REPORTS_DIR, exist_ok=True)
+    with open(os.path.join(REPORTS_DIR, name), "wb") as f:
+        f.write(pdf)
+    sent = cfg["telegram"] and send_report_telegram(reports_mod.text_summary(r), pdf, name)
+    audit_record(f"report: {kind} report made", target=name, detail={"by": by, "telegram": bool(sent)})
+    return {"name": name, "telegram": bool(sent),
+            "message": f"{reports_mod.KIND_NAME[kind]} report made" + (" and sent to Telegram." if sent else
+                       (", kept on this PC (Telegram is not set up)." if cfg["telegram"] and not telegram_ready() else ", kept on this PC."))}
+
+
+def _reports_worker():
+    """Sends each report at its time; also tidies old sightings, reports and report logs once a day."""
+    tidy_on = ""
     while True:
         time.sleep(30)
         try:
-            cfg = load_response_settings()
+            cfg = load_report_settings()
+            state = _report_state()
+            if not state.get("last"):  # first start: nothing is sent late for times already passed
+                _save_report_state(reports_mod.mark_handled(cfg, state))
+                continue
+            for kind, moment in reports_mod.due(cfg, state):
+                try:
+                    deliver_report(kind, moment)
+                finally:
+                    state.setdefault("last", {})[kind] = moment
+                    _save_report_state(state)
             today = time.strftime("%Y-%m-%d")
-            if cfg["briefing_enabled"] and time.strftime("%H:%M") >= cfg["briefing_time"] and sent_on != today and telegram_ready():
-                sent_on = today
-                send_telegram(briefing_text())
+            if tidy_on != today:
+                tidy_on = today
                 prune_sightings()
-            elif not sent_on:
-                sent_on = today if time.strftime("%H:%M") >= cfg["briefing_time"] else ""  # don't send a late briefing at startup
+                reports_mod.prune(REPORTS_DIR)
+                _report_prune_logs()
         except Exception as e:
-            print("Briefing error:", e)
+            print("Reports error:", e)
+
+
+REPORTS_PAGE = hud_page("Reports", pages.reports.BODY, active="settings")
+
+
+@app.route("/reports")
+def reports_page():
+    return Response(REPORTS_PAGE, mimetype="text/html")
+
+
+def _report_list():
+    return [{**x, "ends": time.strftime("%d %b %Y %H:%M", time.strptime(x["name"][-19:-4], "%Y-%m-%d-%H%M"))}
+            for x in reports_mod.saved(REPORTS_DIR)]
+
+
+@app.route("/api/reports", methods=["GET", "POST"])
+def api_reports():
+    """GET: settings, saved reports. POST (admins): save the settings."""
+    if request.method == "POST":
+        cfg = reports_mod.save_settings(REPORTS_SETTINGS_FILE, request.get_json(silent=True) or {})
+        # Turning a report on after its time today does not send a late one.
+        _save_report_state(reports_mod.mark_handled(cfg, _report_state()))
+        audit_record("report: settings changed", detail={"schedule": reports_mod.describe_schedule(cfg)})
+        return jsonify({"ok": True, "settings": cfg, "schedule": reports_mod.describe_schedule(cfg)})
+    cfg = load_report_settings()
+    return jsonify({"ok": True, "settings": cfg, "schedule": reports_mod.describe_schedule(cfg), "sections": list(reports_mod.SECTIONS.items()),  # a list keeps the order
+                    "telegram_ready": telegram_ready(), "reports": _report_list()})
+
+
+@app.route("/api/reports/send", methods=["POST"])
+def api_reports_send():
+    """Operators, admins: make the daily / weekly / monthly report for the period up to now and send it."""
+    kind = str((request.get_json(silent=True) or {}).get("kind") or "daily")
+    if kind not in reports_mod.KINDS:
+        return jsonify({"ok": False, "error": "Unknown report."}), 400
+    who = (getattr(g, "user", None) or {}).get("username") or "dashboard"
+    r = deliver_report(kind, by=who)
+    return jsonify({"ok": True, **r})
+
+
+@app.route("/api/reports/preview")
+def api_reports_preview():
+    """The report for the period up to now, as a PDF in the browser (not kept, not sent)."""
+    kind = request.args.get("kind", "daily")
+    if kind not in reports_mod.KINDS:
+        return jsonify({"ok": False, "error": "Unknown report."}), 400
+    _r, pdf, name = make_report(kind)
+    return Response(pdf, mimetype="application/pdf", headers={"Content-Disposition": f'inline; filename="{name}"'})
+
+
+@app.route("/api/reports/file/<name>")
+def api_reports_file(name):
+    if not reports_mod.NAME_RX.match(name) or not os.path.isfile(os.path.join(REPORTS_DIR, name)):
+        return jsonify({"ok": False, "error": "No such report."}), 404
+    return send_from_directory(REPORTS_DIR, name, mimetype="application/pdf", as_attachment=bool(request.args.get("download")))
 
 
 def start_assistant():
     threading.Thread(target=telegram_assistant_worker, daemon=True).start()
-    threading.Thread(target=_briefing_worker, daemon=True).start()
+    threading.Thread(target=_reports_worker, daemon=True).start()  # the daily report replaced the morning briefing
+    threading.Thread(target=_report_tracker_worker, daemon=True).start()
     threading.Thread(target=_drone_response_worker, daemon=True).start()
     threading.Thread(target=_patrol_scheduler_worker, daemon=True).start()
     threading.Thread(target=_smart_patrol_worker, daemon=True).start()
@@ -9942,6 +10195,8 @@ def _detector_event(det, kind, text, drone=None, photo=None, extra=None):
             _detector["photos"][ev["id"]] = photo
             for k in list(_detector["photos"])[:-30]:
                 _detector["photos"].pop(k, None)
+    if kind in reports_mod.DETECTOR_ALARM_KINDS:  # kept on disk for the reports
+        _report_log(DETECTOR_LOG_FILE, {"t": ev["at"], "kind": kind, "text": text, "detector_name": det["name"]})
     if kind in ("position", "camera", "remote_id", "acoustic", "rf"):
         with _detector_lock:
             _detector["alarms"].append({"id": ev["id"], "at": ev["at"], "text": text, "detector": det["name"], "kind": kind,
@@ -10826,8 +11081,8 @@ def api_response_recall():
 def api_assistant_briefing():
     if not telegram_ready():
         return jsonify({"ok": False, "error": "Telegram is not set up."}), 409
-    send_telegram(briefing_text())
-    return jsonify({"ok": True})
+    r = deliver_report("daily", by=(getattr(g, "user", None) or {}).get("username") or "dashboard")
+    return jsonify({"ok": True, **r})
 
 
 # ============================================================
@@ -11243,6 +11498,7 @@ SETTINGS_PAGE = hud_page("Settings", r"""
 <a href="/coverage"><span>◔</span><b>Coverage</b><small>What cameras see, blind spots</small></a>
 <a href="/alarms"><span>☎</span><b>Monitoring centre</b><small>Drone-verified alarms</small></a>
 <a href="/audit"><span>☰</span><b>Audit log</b><small>Who flew, who changed what</small></a>
+<a href="/reports"><span>🗎</span><b>Reports</b><small>Daily, weekly, monthly</small></a>
 </nav>
 <section class="panel"><div class="panel-head"><div class="panel-title">🔎 Patterns</div></div><div class="panel-body">
 <div class="hud-row"><div><b>Casing warnings</b><div class="muted">The same unknown plate coming by several times: burglars often check a place before they come back.</div></div><input class="toggle" type="checkbox" data-key="casing_alerts" onchange="save()"></div>
